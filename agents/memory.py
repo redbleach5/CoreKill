@@ -1,0 +1,290 @@
+"""Система памяти для сохранения и поиска прошлого опыта."""
+import json
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass, asdict
+from infrastructure.rag import RAGSystem
+from utils.logger import get_logger
+
+
+logger = get_logger()
+
+
+@dataclass
+class TaskMemory:
+    """Структура для хранения информации о выполненной задаче."""
+    task: str  # Исходная задача
+    intent_type: str  # Тип намерения
+    success: float  # Успешность (0.0-1.0, из reflection)
+    planning_score: float
+    research_score: float
+    testing_score: float
+    coding_score: float
+    overall_score: float
+    key_decisions: str  # Ключевые решения/подходы, которые сработали
+    prompts_used: str  # Промпты/стратегии, которые были эффективны
+    what_worked: str  # Что сработало хорошо
+    what_didnt_work: str  # Что не сработало
+
+
+class MemoryAgent:
+    """Агент для сохранения и поиска прошлого опыта в ChromaDB.
+    
+    Сохраняет информацию о выполненных задачах и умеет находить похожие задачи
+    для извлечения уроков.
+    """
+
+    def __init__(self, rag_system: Optional[RAGSystem] = None) -> None:
+        """Инициализация агента памяти.
+        
+        Args:
+            rag_system: Опциональный RAGSystem для хранения памяти.
+                       Если None, создаётся новый с коллекцией "task_memory".
+        """
+        # Используем отдельную коллекцию для памяти
+        if rag_system is not None:
+            self.memory_rag = rag_system
+        else:
+            # Создаём отдельную RAG систему для памяти
+            from infrastructure.rag import RAGSystem as BaseRAG
+            self.memory_rag = BaseRAG(collection_name="task_memory", persist_directory=".chromadb")
+        
+        self.collection_name = "task_memory"
+        self.task_counter = 0
+
+    def save_task_experience(
+        self,
+        task: str,
+        intent_type: str,
+        reflection_result: Any,  # ReflectionResult
+        key_decisions: str = "",
+        prompts_used: str = "",
+        what_worked: str = "",
+        what_didnt_work: str = "",
+        feedback: Optional[str] = None  # "positive" или "negative"
+    ) -> None:
+        """Сохраняет опыт выполнения задачи в память.
+        
+        Args:
+            task: Исходная задача
+            intent_type: Тип намерения
+            reflection_result: Результат рефлексии (ReflectionResult)
+            key_decisions: Ключевые решения, которые были приняты
+            prompts_used: Промпты/стратегии, которые использовались
+            what_worked: Что сработало хорошо
+            what_didnt_work: Что не сработало
+        """
+        self.task_counter += 1
+        
+        task_memory = TaskMemory(
+            task=task,
+            intent_type=intent_type,
+            success=reflection_result.overall_score,
+            planning_score=reflection_result.planning_score,
+            research_score=reflection_result.research_score,
+            testing_score=reflection_result.testing_score,
+            coding_score=reflection_result.coding_score,
+            overall_score=reflection_result.overall_score,
+            key_decisions=key_decisions or reflection_result.analysis,
+            prompts_used=prompts_used,
+            what_worked=what_worked or reflection_result.analysis,
+            what_didnt_work=what_didnt_work or ""
+        )
+        
+        # Формируем текст для сохранения в RAG
+        memory_text = self._format_memory_text(task_memory)
+        
+        # Создаём метаданные
+        metadata = {
+            "task_id": f"task_{self.task_counter}",
+            "intent_type": intent_type,
+            "success": str(reflection_result.overall_score),
+            "overall_score": str(reflection_result.overall_score),
+            "timestamp": str(self.task_counter)  # Простой счётчик вместо timestamp
+        }
+        
+        # Сохраняем в RAG
+        self.memory_rag.add_documents(
+            documents=[memory_text],
+            metadatas=[metadata]
+        )
+        
+        logger.info(f"💾 Опыт задачи сохранён в память (ID: task_{self.task_counter}, успех: {reflection_result.overall_score:.2f})")
+
+    def find_similar_tasks(
+        self,
+        query: str,
+        intent_type: Optional[str] = None,
+        min_success: float = 0.7,
+        max_results: int = 3
+    ) -> List[Dict[str, Any]]:
+        """Находит похожие задачи из прошлого опыта.
+        
+        Args:
+            query: Поисковый запрос (обычно текущая задача)
+            intent_type: Опциональный фильтр по типу намерения
+            min_success: Минимальный уровень успешности прошлых задач
+            max_results: Максимальное количество результатов
+            
+        Returns:
+            Список словарей с информацией о похожих задачах:
+            {
+                "task": str,
+                "intent_type": str,
+                "success": float,
+                "what_worked": str,
+                "key_decisions": str,
+                "metadata": dict
+            }
+        """
+        if not query.strip():
+            return []
+        
+        logger.info(f"🔍 Ищу похожие задачи в памяти для: {query[:50]}...")
+        
+        # Ищем похожие задачи в RAG
+        results = self.memory_rag.get_relevant_context_with_metadata(
+            query=query,
+            n_results=max_results * 2  # Берём больше, потом отфильтруем
+        )
+        
+        similar_tasks: List[Dict[str, Any]] = []
+        
+        for result in results:
+            metadata = result.get("metadata", {})
+            document = result.get("document", "")
+            
+            # Фильтруем по типу намерения если указан
+            if intent_type and metadata.get("intent_type") != intent_type:
+                continue
+            
+            # Фильтруем по успешности
+            try:
+                success = float(metadata.get("success", "0.0"))
+                if success < min_success:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            
+            # Парсим информацию из документа
+            task_info = self._parse_memory_document(document, metadata)
+            
+            similar_tasks.append(task_info)
+            
+            if len(similar_tasks) >= max_results:
+                break
+        
+        if similar_tasks:
+            logger.info(f"✅ Найдено {len(similar_tasks)} похожих успешных задач")
+        else:
+            logger.info("ℹ️ Похожих задач в памяти не найдено")
+        
+        return similar_tasks
+
+    def get_recommendations(
+        self,
+        current_task: str,
+        intent_type: str
+    ) -> str:
+        """Получает рекомендации на основе прошлого опыта.
+        
+        Args:
+            current_task: Текущая задача
+            intent_type: Тип намерения
+            
+        Returns:
+            Текст с рекомендациями на основе прошлого опыта
+        """
+        similar_tasks = self.find_similar_tasks(
+            query=current_task,
+            intent_type=intent_type,
+            min_success=0.7,
+            max_results=2
+        )
+        
+        if not similar_tasks:
+            return ""
+        
+        recommendations_parts: List[str] = []
+        recommendations_parts.append("[Рекомендации из памяти]")
+        recommendations_parts.append("В прошлый раз для похожей задачи сработало:")
+        
+        for i, task_info in enumerate(similar_tasks, 1):
+            recommendations_parts.append(f"\n{i}. Задача: {task_info['task'][:100]}...")
+            recommendations_parts.append(f"   Успешность: {task_info['success']:.2f}")
+            
+            if task_info.get("what_worked"):
+                recommendations_parts.append(f"   Что сработало: {task_info['what_worked'][:200]}")
+            
+            if task_info.get("key_decisions"):
+                recommendations_parts.append(f"   Ключевые решения: {task_info['key_decisions'][:200]}")
+        
+        return "\n".join(recommendations_parts)
+
+    def _format_memory_text(self, task_memory: TaskMemory) -> str:
+        """Форматирует TaskMemory в текст для сохранения в RAG.
+        
+        Args:
+            task_memory: Экземпляр TaskMemory
+            
+        Returns:
+            Отформатированный текст
+        """
+        parts: List[str] = []
+        
+        parts.append(f"Задача: {task_memory.task}")
+        parts.append(f"Тип намерения: {task_memory.intent_type}")
+        parts.append(f"Успешность: {task_memory.overall_score:.2f}")
+        
+        if task_memory.what_worked:
+            parts.append(f"Что сработало: {task_memory.what_worked}")
+        
+        if task_memory.key_decisions:
+            parts.append(f"Ключевые решения: {task_memory.key_decisions}")
+        
+        if task_memory.prompts_used:
+            parts.append(f"Промпты/стратегии: {task_memory.prompts_used}")
+        
+        if task_memory.what_didnt_work:
+            parts.append(f"Что не сработало: {task_memory.what_didnt_work}")
+        
+        return "\n".join(parts)
+
+    def _parse_memory_document(self, document: str, metadata: Dict[str, str]) -> Dict[str, Any]:
+        """Парсит документ из памяти обратно в структурированный формат.
+        
+        Args:
+            document: Текст документа из RAG
+            metadata: Метаданные из RAG
+            
+        Returns:
+            Словарь с информацией о задаче
+        """
+        task_info: Dict[str, Any] = {
+            "task": "",
+            "intent_type": metadata.get("intent_type", ""),
+            "success": float(metadata.get("success", "0.0")),
+            "what_worked": "",
+            "key_decisions": "",
+            "metadata": metadata
+        }
+        
+        # Парсим текст документа
+        lines = document.split("\n")
+        current_field = None
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            if "Задача:" in stripped:
+                task_info["task"] = stripped.split(":", 1)[-1].strip()
+            elif "Что сработало:" in stripped:
+                current_field = "what_worked"
+                task_info["what_worked"] = stripped.split(":", 1)[-1].strip()
+            elif "Ключевые решения:" in stripped:
+                current_field = "key_decisions"
+                task_info["key_decisions"] = stripped.split(":", 1)[-1].strip()
+            elif current_field and stripped:
+                # Продолжение предыдущего поля
+                task_info[current_field] += " " + stripped
+        
+        return task_info

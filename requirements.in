@@ -1,0 +1,32 @@
+# requirements.in — зависимости без жёстких версий
+# Для генерации requirements.txt с точными версиями используйте:
+# pip-compile --upgrade --output-file=requirements.txt requirements.in
+
+# Backend и API
+fastapi[all]
+uvicorn[standard]
+sse-starlette
+pydantic
+
+# LLM и RAG
+ollama
+chromadb
+
+# Workflow (согласно core_vision.md: "LangGraph для workflow")
+langgraph
+
+# Веб-поиск
+requests
+beautifulsoup4
+
+# Тестирование и валидация
+pytest
+pytest-cov
+mypy
+bandit
+
+# UI утилиты (согласно russian_ui.md: "прогресс-бары (tqdm)")
+tqdm
+
+# Конфигурация (для Python < 3.11)
+tomli; python_version < "3.11"
