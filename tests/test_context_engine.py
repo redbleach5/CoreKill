@@ -7,7 +7,8 @@ from infrastructure.context_engine import (
     RelevanceScorer,
     ContextComposer,
     ContextEngine,
-    CodeChunk
+    CodeChunk,
+    ScoredChunk
 )
 
 

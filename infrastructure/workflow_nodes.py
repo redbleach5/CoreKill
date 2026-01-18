@@ -235,8 +235,8 @@ def researcher_node(state: AgentState) -> AgentState:
     return state
 
 
-def test_generator_node(state: AgentState) -> AgentState:
-    """Узел для генерации тестов.
+def generator_node(state: AgentState) -> AgentState:
+    """Узел для генерации тестов (test generator node).
     
     Args:
         state: Текущий state

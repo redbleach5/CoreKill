@@ -110,19 +110,26 @@ class CodeChunker:
                 end_line
             )
             
+            chunk_content = self._extract_content(lines, start_line - 1, end_line)
             chunk = CodeChunk(
                 id=f"{file_path}:{start_line}-{end_line}",
                 file_path=file_path,
                 start_line=start_line,
                 end_line=end_line,
-                content=self._extract_content(lines, start_line - 1, end_line),
+                content=chunk_content,
                 chunk_type=element['type'],
                 name=element['name'],
                 signature=signature,
                 docstring=docstring
             )
             
-            chunks.append(chunk)
+            # Если чанк слишком большой, разбиваем его
+            if chunk.estimated_tokens() > self.max_chunk_tokens:
+                # Разбиваем большой чанк на меньшие части
+                sub_chunks = self._split_large_chunk(chunk)
+                chunks.extend(sub_chunks)
+            else:
+                chunks.append(chunk)
         
         return chunks
     
@@ -216,6 +223,43 @@ class CodeChunker:
         
         return signature, docstring
     
+    def _split_large_chunk(self, chunk: CodeChunk) -> List[CodeChunk]:
+        """Разбивает большой чанк на меньшие части.
+        
+        Args:
+            chunk: Большой чанк для разбиения
+            
+        Returns:
+            Список меньших чанков
+        """
+        sub_chunks: List[CodeChunk] = []
+        lines = chunk.content.split('\n')
+        
+        # Простое разбиение по строкам
+        chunk_size_lines = max(1, (self.max_chunk_tokens * 4) // 80)  # ~80 символов на строку
+        
+        for i in range(0, len(lines), chunk_size_lines):
+            sub_lines = lines[i:i + chunk_size_lines]
+            sub_content = '\n'.join(sub_lines)
+            
+            if not sub_content.strip():
+                continue
+            
+            sub_chunk = CodeChunk(
+                id=f"{chunk.id}:part{i // chunk_size_lines}",
+                file_path=chunk.file_path,
+                start_line=chunk.start_line + i,
+                end_line=min(chunk.start_line + i + len(sub_lines) - 1, chunk.end_line),
+                content=sub_content,
+                chunk_type=chunk.chunk_type,
+                name=f"{chunk.name}_part{i // chunk_size_lines}",
+                signature=chunk.signature if i == 0 else "",
+                docstring=chunk.docstring if i == 0 else ""
+            )
+            sub_chunks.append(sub_chunk)
+        
+        return sub_chunks if sub_chunks else [chunk]
+    
     def _create_module_chunk(self, file_path: str, content: str, start: int, end: int) -> CodeChunk:
         """Создаёт чанк для модуля без классов/функций."""
         return CodeChunk(
@@ -246,8 +290,11 @@ class RelevanceScorer:
         Returns:
             Список оцененных чанков, отсортированный по релевантности
         """
-        if not query.strip() or not chunks:
+        if not chunks:
             return []
+        
+        if not query.strip():
+            return [ScoredChunk(chunk=ch, score=0.0) for ch in chunks]
         
         query_terms = self._tokenize(query)
         if not query_terms:
@@ -272,10 +319,19 @@ class RelevanceScorer:
         return scored
     
     def _tokenize(self, text: str) -> List[str]:
-        """Разбивает текст на токены (ключевые слова)."""
-        # Простая токенизация: разбиваем по пробелам и знакам препинания
+        """Разбивает текст на токены (ключевые слова).
+        
+        Поддерживает CamelCase и snake_case.
+        """
+        # Сначала разбиваем CamelCase на отдельные слова
+        # ConfigManager -> Config Manager
+        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+        # Заменяем snake_case на пробелы
+        text = text.replace('_', ' ')
         # Приводим к нижнему регистру
-        tokens = re.findall(r'\b\w+\b', text.lower())
+        text = text.lower()
+        # Разбиваем по пробелам и знакам препинания
+        tokens = re.findall(r'\b\w+\b', text)
         # Фильтруем очень короткие токены и стоп-слова
         stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'to', 'of', 'in', 'on', 'at', 'for', 'with', 'by'}
         return [t for t in tokens if len(t) > 2 and t not in stop_words]
@@ -291,24 +347,26 @@ class RelevanceScorer:
                 continue
             
             # Считаем, в скольких чанках встречается термин
+            # Используем _tokenize для правильной обработки CamelCase
             doc_freq = sum(
                 1 for chunk in chunks
-                if term in chunk.content.lower() or
-                   term in chunk.name.lower() or
-                   term in chunk.signature.lower()
+                if term in self._tokenize(chunk.content) or
+                   term in self._tokenize(chunk.name) or
+                   term in self._tokenize(chunk.signature)
             )
             
-            # IDF = log(total_docs / docs_with_term)
-            # +1 чтобы избежать деления на 0
+            # IDF = log((total_docs - docs_with_term + 0.5) / (docs_with_term + 0.5))
+            # Используем BM25 IDF формулу для избежания нулевых значений
             if doc_freq > 0:
-                self.idf_cache[term] = math.log((total_chunks + 1) / (doc_freq + 1))
+                self.idf_cache[term] = math.log((total_chunks - doc_freq + 0.5) / (doc_freq + 0.5) + 1.0)
             else:
-                self.idf_cache[term] = 0.0
+                # Если термин не найден, даем максимальный IDF
+                self.idf_cache[term] = math.log(total_chunks + 1.0)
     
     def _score_chunk(self, query_terms: List[str], chunk: CodeChunk, all_chunks: List[CodeChunk]) -> Tuple[float, List[str]]:
         """Оценивает один чанк по запросу."""
-        # Собираем текст чанка для поиска
-        chunk_text = f"{chunk.name} {chunk.signature} {chunk.docstring} {chunk.content}".lower()
+        # Собираем текст чанка для поиска (НЕ lowercase, чтобы сохранить CamelCase)
+        chunk_text = f"{chunk.name} {chunk.signature} {chunk.docstring} {chunk.content}"
         
         score = 0.0
         matched = []

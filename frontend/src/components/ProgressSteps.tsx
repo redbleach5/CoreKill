@@ -1,32 +1,23 @@
 import { StageStatus } from '../hooks/useAgentStream'
+import { CheckCircle2, Circle, Loader2, XCircle, Brain, FileSearch, TestTube, Code2, Shield, RefreshCw, ListTodo } from 'lucide-react'
 
 interface ProgressStepsProps {
   stages: Record<string, StageStatus>
 }
 
-const stageLabels: Record<string, string> = {
-  intent: 'Определение намерения',
-  planning: 'Планирование',
-  research: 'Исследование',
-  testing: 'Генерация тестов',
-  coding: 'Генерация кода',
-  validation: 'Валидация',
-  reflection: 'Рефлексия'
+const stageConfig: Record<string, { label: string; icon: typeof Circle }> = {
+  intent: { label: 'Анализ намерения', icon: Brain },
+  planning: { label: 'Планирование', icon: ListTodo },
+  research: { label: 'Исследование', icon: FileSearch },
+  testing: { label: 'Генерация тестов', icon: TestTube },
+  coding: { label: 'Генерация кода', icon: Code2 },
+  validation: { label: 'Валидация', icon: Shield },
+  reflection: { label: 'Рефлексия', icon: RefreshCw }
 }
 
-const stageIcons: Record<string, string> = {
-  intent: '🔍',
-  planning: '📋',
-  research: '📚',
-  testing: '🧪',
-  coding: '💻',
-  validation: '🔍',
-  reflection: '🤔'
-}
+const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection']
 
 export function ProgressSteps({ stages }: ProgressStepsProps) {
-  const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection']
-
   const getStageStatus = (stage: string): 'idle' | 'active' | 'completed' | 'error' => {
     const stageData = stages[stage]
     if (!stageData || stageData.status === 'idle') return 'idle'
@@ -35,49 +26,115 @@ export function ProgressSteps({ stages }: ProgressStepsProps) {
     return 'active'
   }
 
+  const getStatusLabel = (status: 'idle' | 'active' | 'completed' | 'error'): string => {
+    switch (status) {
+      case 'active':
+        return 'Выполняется...'
+      case 'completed':
+        return 'Готово'
+      case 'error':
+        return 'Ошибка'
+      default:
+        return 'Ожидание'
+    }
+  }
+
+  const getStageProgress = (stage: string): number => {
+    const stageData = stages[stage]
+    return stageData?.progress || 0
+  }
+
   return (
-    <div className="space-y-3">
-      <h3 className="text-lg font-semibold mb-4">Прогресс выполнения</h3>
+    <div className="relative">
       {stageOrder.map((stage, index) => {
         const status = getStageStatus(stage)
-        const stageData = stages[stage]
-        const label = stageLabels[stage] || stage
-        const icon = stageIcons[stage] || '•'
+        const config = stageConfig[stage]
+        const Icon = config?.icon || Circle
+        const progress = getStageProgress(stage)
+        const isLast = index === stageOrder.length - 1
 
         return (
-          <div key={stage} className="flex items-start space-x-3">
-            <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm ${
-              status === 'completed' ? 'bg-green-500 text-white' :
-              status === 'active' ? 'bg-blue-500 text-white animate-pulse' :
-              status === 'error' ? 'bg-red-500 text-white' :
-              'bg-gray-300 text-gray-600'
-            }`}>
-              {status === 'completed' ? '✓' : icon}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className={`text-sm font-medium ${
-                status === 'active' ? 'text-blue-600' :
-                status === 'completed' ? 'text-green-600' :
-                status === 'error' ? 'text-red-600' :
-                'text-gray-500'
-              }`}>
-                {label}
+          <div key={stage} className="relative">
+            {/* Вертикальная линия соединения */}
+            {!isLast && (
+              <div className="absolute left-[15px] top-[36px] w-[2px] h-[calc(100%-8px)]">
+                <div 
+                  className={`w-full h-full transition-all duration-500 ${
+                    status === 'completed' ? 'bg-green-500' :
+                    status === 'active' ? 'bg-gradient-to-b from-blue-500 to-gray-600' :
+                    'bg-gray-700'
+                  }`}
+                />
               </div>
-              {stageData && stageData.message && (
-                <div className="text-xs text-gray-600 mt-1">
-                  {stageData.message}
+            )}
+            
+            <div className={`flex items-start gap-4 py-3 px-2 rounded-lg transition-all duration-300 ${
+              status === 'active' ? 'bg-blue-500/10 border border-blue-500/30' : ''
+            }`}>
+              {/* Иконка статуса */}
+              <div className={`relative flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-all duration-300 ${
+                status === 'active' ? 'bg-blue-500/20 ring-2 ring-blue-500 ring-offset-2 ring-offset-gray-900' :
+                status === 'completed' ? 'bg-green-500/20' :
+                status === 'error' ? 'bg-red-500/20' :
+                'bg-gray-700/50'
+              }`}>
+                {status === 'active' ? (
+                  <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+                ) : status === 'completed' ? (
+                  <CheckCircle2 className="w-4 h-4 text-green-400" />
+                ) : status === 'error' ? (
+                  <XCircle className="w-4 h-4 text-red-400" />
+                ) : (
+                  <Icon className="w-4 h-4 text-gray-500" />
+                )}
+                
+                {/* Пульсация для активного состояния */}
+                {status === 'active' && (
+                  <span className="absolute inset-0 rounded-full animate-ping bg-blue-500/30" />
+                )}
+              </div>
+
+              {/* Контент */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between">
+                  <span className={`font-medium transition-colors duration-300 ${
+                    status === 'active' ? 'text-blue-300' :
+                    status === 'completed' ? 'text-green-300' :
+                    status === 'error' ? 'text-red-300' :
+                    'text-gray-400'
+                  }`}>
+                    {config?.label || stage}
+                  </span>
+                  <span className={`text-xs px-2 py-0.5 rounded-full transition-all duration-300 ${
+                    status === 'active' ? 'bg-blue-500/20 text-blue-300' :
+                    status === 'completed' ? 'bg-green-500/20 text-green-300' :
+                    status === 'error' ? 'bg-red-500/20 text-red-300' :
+                    'text-gray-500'
+                  }`}>
+                    {getStatusLabel(status)}
+                  </span>
                 </div>
-              )}
-              {stageData && stageData.progress !== undefined && (
-                <div className="mt-2">
-                  <div className="w-full bg-gray-200 rounded-full h-2">
-                    <div
-                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                      style={{ width: `${stageData.progress * 100}%` }}
-                    />
+                
+                {/* Прогресс-бар для активного состояния */}
+                {status === 'active' && (
+                  <div className="mt-2 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-300 relative"
+                      style={{ width: progress > 0 ? `${progress}%` : '30%' }}
+                    >
+                      {/* Эффект shimmer */}
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+
+                {/* Сообщение об ошибке */}
+                {status === 'error' && stages[stage]?.error && (
+                  <p className="mt-1 text-xs text-red-400 truncate">
+                    {stages[stage].error}
+                  </p>
+                )}
+              </div>
             </div>
           </div>
         )

@@ -14,9 +14,12 @@ def check_model_available(model_name: str) -> bool:
     """
     try:
         models = ollama.list()
-        model_names = [model.get("name", "") for model in models.get("models", [])]
+        model_names = [
+            model.model if hasattr(model, 'model') else getattr(model, 'name', '')
+            for model in models.models if hasattr(models, 'models')
+        ] if hasattr(models, 'models') else []
         return model_name in model_names
-    except Exception:
+    except Exception as e:
         return False
 
 
@@ -83,11 +86,13 @@ def get_all_available_models() -> List[str]:
     """
     try:
         models = ollama.list()
-        model_names = [
-            model.get("name", "") 
-            for model in models.get("models", []) 
-            if model.get("name")
-        ]
+        model_names = []
+        if hasattr(models, 'models'):
+            for model in models.models:
+                # Ollama возвращает объекты Model с атрибутом 'model'
+                model_name = model.model if hasattr(model, 'model') else getattr(model, 'name', '')
+                if model_name:
+                    model_names.append(model_name)
         return sorted(model_names)
-    except Exception:
+    except Exception as e:
         return []

@@ -5,7 +5,7 @@ from infrastructure.workflow_nodes import (
     intent_node,
     planner_node,
     researcher_node,
-    test_generator_node,
+    generator_node,
     coder_node,
     validator_node,
     debugger_node,
@@ -49,7 +49,7 @@ def create_workflow_graph() -> StateGraph:
     workflow.add_node("intent", intent_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("researcher", researcher_node)
-    workflow.add_node("test_generator", test_generator_node)
+    workflow.add_node("test_generator", generator_node)
     workflow.add_node("coder", coder_node)
     workflow.add_node("validator", validator_node)
     workflow.add_node("debugger", debugger_node)

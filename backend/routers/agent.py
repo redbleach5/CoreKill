@@ -109,10 +109,30 @@ async def run_workflow_stream(
     # Определяем модель для использования
     from utils.model_checker import check_model_available, get_any_available_model
     
-    model_to_use = model if model else None
-    if model_to_use and not check_model_available(model_to_use):
+    # Если модель не указана или пустая, выбираем автоматически
+    model_to_use = (model.strip() if model and isinstance(model, str) and model.strip() else None)
+    if not model_to_use:
+        # Автоматически выбираем доступную модель
+        model_to_use = get_any_available_model()
+        if model_to_use:
+            logger.info(f"🤖 Автоматически выбрана модель: {model_to_use}")
+        else:
+            logger.error("❌ Нет доступных моделей Ollama!")
+            yield await SSEManager.stream_error(
+                stage="initialization",
+                error_message="Нет доступных моделей Ollama. Установите хотя бы одну модель."
+            )
+            return
+    elif not check_model_available(model_to_use):
         logger.warning(f"⚠️ Модель {model_to_use} недоступна, выбираю альтернативу")
         model_to_use = get_any_available_model()
+        if not model_to_use:
+            logger.error("❌ Нет доступных моделей Ollama!")
+            yield await SSEManager.stream_error(
+                stage="initialization",
+                error_message="Нет доступных моделей Ollama. Установите хотя бы одну модель."
+            )
+            return
     
     # Создаём начальный state
     initial_state: AgentState = {
@@ -131,7 +151,7 @@ async def run_workflow_stream(
         "reflection_result": None,
         "iteration": 0,
         "task_id": task_id,
-        "enable_sse": True  # Флаг для SSE стриминга
+        "enable_sse": True,  # Флаг для SSE стриминга
         "file_path": None,
         "file_context": None
     }
@@ -149,54 +169,70 @@ async def run_workflow_stream(
                 if node_name == "intent":
                     intent_result = node_state.get("intent_result")
                     if intent_result:
-                        yield await SSEManager.stream_stage_start(
+                        logger.info(f"📤 Отправляю stage_start для intent")
+                        event1 = await SSEManager.stream_stage_start(
                             stage="intent",
                             message="Определяю намерение..."
                         )
-                        yield await SSEManager.stream_stage_end(
+                        yield event1
+                        logger.info(f"✅ Отправлено stage_start, длина: {len(event1)}")
+                        
+                        logger.info(f"📤 Отправляю stage_end для intent")
+                        event2 = await SSEManager.stream_stage_end(
                             stage="intent",
                             message=f"Намерение определено: {intent_result.type}",
                             result={"type": intent_result.type, "confidence": intent_result.confidence}
                         )
+                        yield event2
+                        logger.info(f"✅ Отправлено stage_end, длина: {len(event2)}")
                         
                         # Если greeting, отправляем специальное сообщение
                         if intent_result.type == "greeting":
-                            greeting_message = (
-                                "👋 Привет! Я локальная многоагентная система генерации кода.\n\n"
-                                "Я могу помочь вам:\n"
-                                "• Создать новый код (create)\n"
-                                "• Изменить существующий код (modify)\n"
-                                "• Найти и исправить ошибки (debug)\n"
-                                "• Оптимизировать код (optimize)\n"
-                                "• Объяснить как работает код (explain)\n"
-                                "• Написать тесты (test)\n"
-                                "• Рефакторить код (refactor)\n\n"
-                                "Просто опишите задачу, и я помогу вам!"
-                            )
-                            yield await SSEManager.stream_stage_end(
-                                stage="greeting",
-                                message=greeting_message,
-                                result={"type": "greeting", "message": greeting_message}
-                            )
-                            yield await SSEManager.stream_final_result(
-                                task_id=task_id,
-                                results={
-                                    "task": task,
-                                    "intent": {
-                                        "type": "greeting",
-                                        "confidence": intent_result.confidence,
-                                        "description": intent_result.description
+                                greeting_message = (
+                                    "👋 Привет! Я локальная многоагентная система генерации кода.\n\n"
+                                    "Я могу помочь вам:\n"
+                                    "• Создать новый код (create)\n"
+                                    "• Изменить существующий код (modify)\n"
+                                    "• Найти и исправить ошибки (debug)\n"
+                                    "• Оптимизировать код (optimize)\n"
+                                    "• Объяснить как работает код (explain)\n"
+                                    "• Написать тесты (test)\n"
+                                    "• Рефакторить код (refactor)\n\n"
+                                    "Просто опишите задачу, и я помогу вам!"
+                                )
+                                logger.info(f"📤 Отправляю greeting stage_end")
+                                event3 = await SSEManager.stream_stage_end(
+                                    stage="greeting",
+                                    message=greeting_message,
+                                    result={"type": "greeting", "message": greeting_message}
+                                )
+                                yield event3
+                                logger.info(f"✅ Отправлено greeting, длина: {len(event3)}")
+                                
+                                logger.info(f"📤 Отправляю final_result (complete)")
+                                event4 = await SSEManager.stream_final_result(
+                                    task_id=task_id,
+                                    results={
+                                        "task": task,
+                                        "intent": {
+                                            "type": "greeting",
+                                            "confidence": intent_result.confidence,
+                                            "description": intent_result.description
+                                        }
+                                    },
+                                    metrics={
+                                        "planning": 0.0,
+                                        "research": 0.0,
+                                        "testing": 0.0,
+                                        "coding": 0.0,
+                                        "overall": 0.0
                                     }
-                                },
-                                metrics={
-                                    "planning": 0.0,
-                                    "research": 0.0,
-                                    "testing": 0.0,
-                                    "coding": 0.0,
-                                    "overall": 0.0
-                                }
-                            )
-                            return
+                                )
+                                yield event4
+                                logger.info(f"✅ Отправлено complete, длина: {len(event4)}")
+                                # Даем время на отправку последнего события перед завершением
+                                await asyncio.sleep(0.2)
+                                break  # Выходим из цикла astream вместо return
                 
                 elif node_name == "planner":
                     plan = node_state.get("plan", "")
@@ -978,14 +1014,24 @@ async def stream_task_results(
     from fastapi.responses import StreamingResponse
     
     async def generate() -> AsyncGenerator[str, None]:
-        async for event in run_workflow_stream(
-            task=task,
-            model=model,
-            temperature=temperature,
-            disable_web_search=disable_web_search,
-            max_iterations=max_iterations
-        ):
-            yield event
+        try:
+            async for event in run_workflow_stream(
+                task=task,
+                model=model,
+                temperature=temperature,
+                disable_web_search=disable_web_search,
+                max_iterations=max_iterations
+            ):
+                yield event
+                # Небольшая задержка для гарантии отправки каждого события
+                await asyncio.sleep(0.01)
+        except Exception as e:
+            logger.error(f"❌ Ошибка в generate(): {e}", error=e)
+            error_event = await SSEManager.stream_error(
+                stage="workflow",
+                error_message=f"Ошибка выполнения: {str(e)}"
+            )
+            yield error_event
     
     return StreamingResponse(
         generate(),
@@ -993,7 +1039,8 @@ async def stream_task_results(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff"
         }
     )
 

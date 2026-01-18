@@ -7,7 +7,7 @@ from infrastructure.workflow_nodes import (
     intent_node,
     planner_node,
     researcher_node,
-    test_generator_node,
+    generator_node,
     coder_node,
     validator_node,
     debugger_node,
@@ -34,9 +34,9 @@ class TestWorkflowGraph:
         assert hasattr(graph, "invoke")
         assert hasattr(graph, "astream")
     
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    @patch('agents.intent.IntentAgent.is_greeting_fast')
-    def test_intent_node_greeting(self, mock_greeting, mock_init):
+    @patch('infrastructure.workflow_nodes.IntentAgent.is_greeting_fast')
+    @patch('infrastructure.workflow_nodes._intent_agent', new=Mock())
+    def test_intent_node_greeting(self, mock_greeting):
         """Тест узла intent для greeting."""
         mock_greeting.return_value = True
         
@@ -290,7 +290,7 @@ class TestWorkflowGraph:
     
     @patch('infrastructure.workflow_nodes._initialize_agents')
     @patch('infrastructure.workflow_nodes._test_generator')
-    def test_test_generator_node(self, mock_agent, mock_init):
+    def test_generator_node(self, mock_agent, mock_init):
         """Тест узла test_generator."""
         mock_agent.generate_tests.return_value = "def test_function(): pass"
         
@@ -319,7 +319,7 @@ class TestWorkflowGraph:
             "file_context": None
         }
         
-        result = test_generator_node(state)
+        result = generator_node(state)
         
         assert result["tests"] == "def test_function(): pass"
     

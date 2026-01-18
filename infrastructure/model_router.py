@@ -128,9 +128,21 @@ class SimpleModelRouter(ModelRouter):
         if model:
             return ModelSelection(model=model, confidence=0.7)
         
-        # Последний fallback - используем значение из конфига даже если недоступно
-        model = preferred_model or self.config.default_model
-        return ModelSelection(model=model, confidence=0.5)
+        # Последний fallback - пробуем модель из конфига, если она доступна
+        config_model = preferred_model or self.config.default_model
+        if config_model and check_model_available(config_model):
+            return ModelSelection(model=config_model, confidence=0.5)
+        
+        # Если ничего не найдено, выбрасываем исключение - модель обязательна
+        available = get_all_available_models()
+        if not available:
+            raise RuntimeError(
+                "Нет доступных моделей Ollama. "
+                "Установите хотя бы одну модель через: ollama pull <model_name>"
+            )
+        
+        # Если дошли сюда, что-то пошло не так, но модели есть
+        return ModelSelection(model=available[0], confidence=0.3)
     
     def select_model_roster(
         self,

@@ -45,6 +45,13 @@ class ProjectRunner:
         self.backend_url = f"http://localhost:{self.backend_port}"
         self.frontend_url = f"http://localhost:{self.frontend_port}"
         
+        # Определяем Python из виртуального окружения, если оно есть
+        venv_python = self.project_root / ".venv" / "bin" / "python3"
+        if venv_python.exists():
+            self.python_executable = str(venv_python)
+        else:
+            self.python_executable = sys.executable
+        
         self.backend_process: Optional[subprocess.Popen] = None
         self.frontend_process: Optional[subprocess.Popen] = None
         
@@ -155,14 +162,37 @@ class ProjectRunner:
     
     def check_dependencies(self) -> bool:
         """Проверяет установленные зависимости."""
-        # Проверяем Python зависимости
+        # Проверяем наличие виртуального окружения
+        venv_path = self.project_root / ".venv"
+        if venv_path.exists():
+            self.print_info(f"Виртуальное окружение найдено: {venv_path}")
+        else:
+            self.print_warning("Виртуальное окружение не найдено. Создайте его: python3 -m venv .venv")
+        
+        # Проверяем Python зависимости используя правильный Python
         try:
-            import fastapi
-            import uvicorn
-            self.print_success("Python зависимости установлены")
-        except ImportError as e:
-            self.print_error(f"Python зависимости не установлены: {e}")
-            self.print_info("Запустите: pip install -r requirements.txt")
+            # Пробуем импортировать с помощью правильного Python
+            result = subprocess.run(
+                [self.python_executable, "-c", "import fastapi, uvicorn"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                self.print_success("Python зависимости установлены")
+            else:
+                self.print_error(f"Python зависимости не установлены: {result.stderr}")
+                pip_cmd = str(Path(self.python_executable).parent / "pip3")
+                if not Path(pip_cmd).exists():
+                    pip_cmd = "pip3"
+                self.print_info(f"Запустите: {pip_cmd} install -r requirements.txt")
+                return False
+        except Exception as e:
+            self.print_error(f"Ошибка при проверке зависимостей: {e}")
+            pip_cmd = str(Path(self.python_executable).parent / "pip3")
+            if not Path(pip_cmd).exists():
+                pip_cmd = "pip3"
+            self.print_info(f"Запустите: {pip_cmd} install -r requirements.txt")
             return False
         
         # Проверяем Node.js зависимости
@@ -218,7 +248,7 @@ class ProjectRunner:
         try:
             self.backend_process = subprocess.Popen(
                 [
-                    sys.executable, "-m", "uvicorn",
+                    self.python_executable, "-m", "uvicorn",
                     "backend.api:app",
                     "--reload",
                     "--port", str(self.backend_port),

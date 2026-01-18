@@ -63,11 +63,11 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
   }
 
   return (
-    <div className="space-y-6 p-4">
-      <h2 className="text-lg font-semibold">Настройки</h2>
+    <div className="space-y-6 p-4 animate-fade-in">
+      <h2 className="text-lg font-semibold text-gray-100">Настройки</h2>
 
       <div>
-        <label htmlFor="model" className="block text-sm font-medium mb-2">
+        <label htmlFor="model" className="block text-sm font-medium mb-2 text-gray-300">
           Модель Ollama:
         </label>
         <select
@@ -75,7 +75,10 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
           value={options.model}
           onChange={handleModelChange}
           disabled={modelsLoading}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:cursor-not-allowed"
+          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-gray-100 rounded-lg 
+                     focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+                     disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed
+                     transition-all duration-200"
         >
           {modelsLoading ? (
             <option>Загрузка моделей...</option>
@@ -92,8 +95,8 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
       </div>
 
       <div>
-        <label htmlFor="temperature" className="block text-sm font-medium mb-2">
-          Температура: {options.temperature.toFixed(2)}
+        <label htmlFor="temperature" className="block text-sm font-medium mb-2 text-gray-300">
+          Температура: <span className="text-blue-400 font-mono">{options.temperature.toFixed(2)}</span>
         </label>
         <input
           id="temperature"
@@ -103,30 +106,44 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
           step="0.05"
           value={options.temperature}
           onChange={handleTemperatureChange}
-          className="w-full"
+          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer
+                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 
+                     [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-blue-500 
+                     [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer
+                     [&::-webkit-slider-thumb]:transition-all [&::-webkit-slider-thumb]:hover:bg-blue-400
+                     [&::-webkit-slider-thumb]:hover:scale-110"
         />
         <div className="flex justify-between text-xs text-gray-500 mt-1">
-          <span>0.1</span>
-          <span>0.7</span>
+          <span>Точнее</span>
+          <span>Креативнее</span>
         </div>
       </div>
 
-      <div className="flex items-center space-x-2">
-        <input
-          id="disableWebSearch"
-          type="checkbox"
-          checked={options.disableWebSearch}
-          onChange={handleWebSearchToggle}
-          className="w-4 h-4"
-        />
-        <label htmlFor="disableWebSearch" className="text-sm">
+      <div className="flex items-center space-x-3">
+        <div className="relative">
+          <input
+            id="disableWebSearch"
+            type="checkbox"
+            checked={options.disableWebSearch}
+            onChange={handleWebSearchToggle}
+            className="sr-only peer"
+          />
+          <div className="w-10 h-5 bg-gray-700 rounded-full peer 
+                          peer-checked:bg-blue-600 peer-checked:after:translate-x-5
+                          after:content-[''] after:absolute after:top-0.5 after:left-0.5 
+                          after:bg-white after:rounded-full after:h-4 after:w-4 
+                          after:transition-all cursor-pointer" 
+               onClick={() => handleWebSearchToggle({ target: { checked: !options.disableWebSearch } } as any)}
+          />
+        </div>
+        <label htmlFor="disableWebSearch" className="text-sm text-gray-300 cursor-pointer">
           Без веб-поиска
         </label>
       </div>
 
       <div>
-        <label htmlFor="maxIterations" className="block text-sm font-medium mb-2">
-          Макс. итераций: {options.maxIterations}
+        <label htmlFor="maxIterations" className="block text-sm font-medium mb-2 text-gray-300">
+          Макс. итераций: <span className="text-blue-400 font-mono">{options.maxIterations}</span>
         </label>
         <input
           id="maxIterations"
@@ -135,8 +152,18 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
           max="3"
           value={options.maxIterations}
           onChange={handleMaxIterationsChange}
-          className="w-full"
+          className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer
+                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 
+                     [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-blue-500 
+                     [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer
+                     [&::-webkit-slider-thumb]:transition-all [&::-webkit-slider-thumb]:hover:bg-blue-400
+                     [&::-webkit-slider-thumb]:hover:scale-110"
         />
+        <div className="flex justify-between text-xs text-gray-500 mt-1">
+          <span>1</span>
+          <span>2</span>
+          <span>3</span>
+        </div>
       </div>
     </div>
   )

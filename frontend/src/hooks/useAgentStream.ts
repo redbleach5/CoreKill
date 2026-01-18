@@ -81,7 +81,13 @@ export function useAgentStream(): UseAgentStreamReturn {
   }, [])
 
   const startTask = useCallback((task: string, options: TaskOptions) => {
-    // Останавливаем предыдущее подключение если есть
+    // Защита от повторных вызовов - если задача уже выполняется, не создаем новое соединение
+    if (isRunning || eventSourceRef.current) {
+      console.warn('Задача уже выполняется, новый запрос проигнорирован')
+      return
+    }
+
+    // Останавливаем предыдущее подключение если есть (на всякий случай)
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
       eventSourceRef.current = null
@@ -114,10 +120,11 @@ export function useAgentStream(): UseAgentStreamReturn {
     eventSourceRef.current = eventSource
 
     eventSource.onopen = () => {
-      console.log('SSE подключение установлено')
+      console.log('✅ SSE подключение установлено')
     }
 
     eventSource.onmessage = (event: MessageEvent) => {
+      console.log('📨 Получено сообщение через onmessage:', event.type, event.data?.substring(0, 100))
       try {
         // Проверяем наличие данных перед парсингом
         if (!event.data || event.data.trim() === '') {
@@ -229,30 +236,38 @@ export function useAgentStream(): UseAgentStreamReturn {
 
     eventSource.addEventListener('complete', (event: MessageEvent) => {
       try {
+        console.log('✅ Получено событие complete:', event.data)
         if (!event.data || event.data.trim() === '') {
           console.warn('Получено пустое событие complete')
           isCompletedRef.current = true
           setIsRunning(false)
           // Закрываем соединение и предотвращаем переподключение
-          eventSource.close()
-          eventSourceRef.current = null
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close()
+            eventSourceRef.current = null
+          }
           return
         }
         const data = JSON.parse(event.data)
+        console.log('✅ Парсинг complete успешен:', data)
         setResults(data.results || {})
         setMetrics(data.metrics || metrics)
         isCompletedRef.current = true
         setIsRunning(false)
         // Закрываем соединение и предотвращаем переподключение
-        eventSource.close()
-        eventSourceRef.current = null
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
+        }
       } catch (err) {
-        console.error('Ошибка парсинга complete:', err, event.data)
+        console.error('❌ Ошибка парсинга complete:', err, event.data)
         isCompletedRef.current = true
         setIsRunning(false)
         // Закрываем соединение и предотвращаем переподключение
-        eventSource.close()
-        eventSourceRef.current = null
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
+        }
       }
     })
 
@@ -274,45 +289,50 @@ export function useAgentStream(): UseAgentStreamReturn {
       // onerror вызывается с Event, а не MessageEvent, поэтому нет event.data
       // Это ошибка подключения, а не ошибка от backend
       
-      // Если задача уже завершена, закрываем соединение и предотвращаем переподключение
+      // Если задача уже завершена, сразу закрываем и предотвращаем переподключение
       if (isCompletedRef.current) {
-        eventSource.close()
-        eventSourceRef.current = null
+        console.log('ℹ️ SSE onerror вызван, но задача уже завершена - игнорируем')
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
+        }
         return
       }
       
       // Проверяем состояние подключения
       if (eventSource.readyState === EventSource.CLOSED) {
-        // Подключение закрыто - это нормально если задача завершена
-        // Не устанавливаем ошибку если задача уже завершена корректно
-        if (!isCompletedRef.current) {
-          console.warn('SSE подключение закрыто во время выполнения задачи')
-          setError('Подключение к серверу закрыто. Задача была прервана. При перезапуске backend задачи не сохраняются и не продолжают выполняться.')
-          setIsRunning(false)
-          // Закрываем соединение и предотвращаем переподключение
-          eventSource.close()
-          eventSourceRef.current = null
-        }
+        // Подключение закрыто - если задача не завершена, это ошибка
+        // НО: если поток завершился нормально (после complete), onerror может сработать
+        // Поэтому ждем немного перед установкой ошибки
+        setTimeout(() => {
+          if (!isCompletedRef.current && eventSourceRef.current) {
+            console.warn('⚠️ SSE подключение закрыто во время выполнения задачи')
+            setError('Подключение к серверу закрыто. Задача была прервана.')
+            setIsRunning(false)
+            isCompletedRef.current = true
+            eventSourceRef.current.close()
+            eventSourceRef.current = null
+          }
+        }, 100)
       } else if (eventSource.readyState === EventSource.CONNECTING) {
         // Попытка переподключения - предотвращаем если задача завершена
-        if (isCompletedRef.current) {
-          eventSource.close()
+        if (isCompletedRef.current && eventSourceRef.current) {
+          console.log('ℹ️ Предотвращаем переподключение - задача завершена')
+          eventSourceRef.current.close()
           eventSourceRef.current = null
         }
-        // Иначе EventSource автоматически пытается переподключиться - это нормально
+      } else if (eventSource.readyState === EventSource.OPEN) {
+        // Соединение открыто - ничего не делаем, это нормально
+        // onerror может срабатывать даже при открытом соединении (например, при сетевых проблемах)
       } else {
-        // Другая ошибка подключения
-        if (!isCompletedRef.current) {
-          console.error('SSE ошибка подключения:', err)
-          setError('Ошибка подключения к серверу. Задача была прервана. При перезапуске backend задачи не сохраняются и не продолжают выполняться.')
-          setIsRunning(false)
-          // Закрываем соединение и предотвращаем переподключение
-          eventSource.close()
+        // Неизвестное состояние - закрываем на всякий случай если задача завершена
+        if (isCompletedRef.current && eventSourceRef.current) {
+          eventSourceRef.current.close()
           eventSourceRef.current = null
         }
       }
     }
-  }, [updateStage, metrics])
+  }, [updateStage, isRunning])
 
   const handleSSEEvent = (data: any) => {
     // Обработка стандартных SSE событий через data поля
