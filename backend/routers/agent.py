@@ -102,6 +102,80 @@ async def run_workflow_stream(
     """
     task_id = str(uuid.uuid4())
     
+    # БЫСТРАЯ ПРОВЕРКА ПРИВЕТСТВИЯ БЕЗ ИНИЦИАЛИЗАЦИИ WORKFLOW
+    from agents.intent import IntentAgent
+    if IntentAgent.is_greeting_fast(task):
+        logger.info("🚀 Обнаружено приветствие - быстрый ответ без workflow")
+        greeting_message = (
+            "👋 Привет! Я локальная многоагентная система генерации кода.\n\n"
+            "Я могу помочь вам:\n"
+            "• Создать новый код (create)\n"
+            "• Изменить существующий код (modify)\n"
+            "• Найти и исправить ошибки (debug)\n"
+            "• Оптимизировать код (optimize)\n"
+            "• Объяснить как работает код (explain)\n"
+            "• Написать тесты (test)\n"
+            "• Рефакторить код (refactor)\n\n"
+            "Просто опишите задачу, и я помогу вам!"
+        )
+        
+        # АДАПТИВНЫЕ ЗАДЕРЖКИ: отправляем события с задержками для гарантии доставки frontend
+        # Задержки адаптированы под скорость обработки событий frontend
+        logger.info("📤 Отправляю stage_start для intent (greeting)")
+        event1 = await SSEManager.stream_stage_start(
+            stage="intent",
+            message="Определяю намерение..."
+        )
+        yield event1
+        await asyncio.sleep(0.02)  # Адаптивная задержка для stage_start
+        logger.info(f"✅ Отправлено stage_start, длина: {len(event1)}")
+        
+        logger.info("📤 Отправляю stage_end для intent (greeting)")
+        event2 = await SSEManager.stream_stage_end(
+            stage="intent",
+            message="Намерение определено: greeting",
+            result={"type": "greeting", "confidence": 0.95}
+        )
+        yield event2
+        await asyncio.sleep(0.02)  # Адаптивная задержка для stage_end
+        logger.info(f"✅ Отправлено stage_end для intent, длина: {len(event2)}")
+        
+        logger.info("📤 Отправляю greeting stage_end")
+        event3 = await SSEManager.stream_stage_end(
+            stage="greeting",
+            message=greeting_message,
+            result={"type": "greeting", "message": greeting_message}
+        )
+        yield event3
+        await asyncio.sleep(0.02)  # Адаптивная задержка для greeting
+        logger.info(f"✅ Отправлено greeting, длина: {len(event3)}")
+        
+        logger.info("📤 Отправляю final_result (complete) для greeting")
+        event4 = await SSEManager.stream_final_result(
+            task_id=task_id,
+            results={
+                "task": task,
+                "intent": {
+                    "type": "greeting",
+                    "confidence": 0.95,
+                    "description": "Приветствие пользователя"
+                },
+                "greeting_message": greeting_message  # Добавляем greeting message для frontend
+            },
+            metrics={
+                "planning": 0.0,
+                "research": 0.0,
+                "testing": 0.0,
+                "coding": 0.0,
+                "overall": 0.0
+            }
+        )
+        yield event4
+        await asyncio.sleep(0.3)  # Увеличенная задержка перед завершением - даем время frontend обработать greeting stage_end
+        logger.info(f"✅ Отправлено complete, длина: {len(event4)}")
+        logger.info("✅ Все события для greeting отправлены")
+        return  # Выходим БЕЗ инициализации workflow
+    
     # Ограничиваем max_iterations
     config = get_config()
     max_iterations = min(max_iterations, config.max_iterations, 5)
@@ -981,13 +1055,41 @@ async def create_task(request: TaskRequest) -> Dict[str, str]:
 async def get_models() -> Dict[str, Any]:
     """Возвращает список доступных моделей Ollama.
     
+    Модели отсортированы по приоритету: быстрые coder модели первые.
+    
     Returns:
         Словарь с списком доступных моделей
     """
-    models = get_all_available_models()
+    all_models = get_all_available_models()
+    
+    # Приоритетные модели (быстрые и качественные для кода)
+    priority_order = [
+        'qwen2.5-coder:1.5b',  # Лучший баланс скорость/качество
+        'gemma3:1b',
+        'stable-code:latest',
+        'phi3:mini',
+        'llama3.2:3b',
+        'gemma3:4b',
+        'qwen2.5-coder:7b',
+        'deepseek-coder:6.7b',
+        'codellama:7b',
+    ]
+    
+    # Сортируем: приоритетные первые, остальные в конце
+    def sort_key(model: str) -> int:
+        try:
+            return priority_order.index(model)
+        except ValueError:
+            # Embed модели в конец
+            if 'embed' in model.lower():
+                return 1000
+            return 100
+    
+    sorted_models = sorted(all_models, key=sort_key)
+    
     return {
-        "models": models,
-        "count": len(models)
+        "models": sorted_models,
+        "count": len(sorted_models)
     }
 
 
@@ -1015,6 +1117,7 @@ async def stream_task_results(
     
     async def generate() -> AsyncGenerator[str, None]:
         try:
+            event_count = 0
             async for event in run_workflow_stream(
                 task=task,
                 model=model,
@@ -1022,9 +1125,15 @@ async def stream_task_results(
                 disable_web_search=disable_web_search,
                 max_iterations=max_iterations
             ):
+                event_count += 1
+                logger.info(f"📤 [generate] Отправляю событие #{event_count}, длина: {len(event)}")
                 yield event
                 # Небольшая задержка для гарантии отправки каждого события
                 await asyncio.sleep(0.01)
+            logger.info(f"✅ [generate] Всего отправлено событий: {event_count}")
+            # ВАЖНО: Задержка перед закрытием генератора, чтобы frontend успел получить события
+            await asyncio.sleep(0.5)
+            logger.info("✅ [generate] Генератор завершен после задержки")
         except Exception as e:
             logger.error(f"❌ Ошибка в generate(): {e}", error=e)
             error_event = await SSEManager.stream_error(
@@ -1037,10 +1146,13 @@ async def stream_task_results(
         generate(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
-            "X-Content-Type-Options": "nosniff"
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Allow-Origin": "http://localhost:5173",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Headers": "*"
         }
     )
 

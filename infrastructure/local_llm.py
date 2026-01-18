@@ -2,37 +2,11 @@
 import ollama
 from typing import Optional, Dict, Any
 import time
-import signal
-from contextlib import contextmanager
 
 from utils.logger import get_logger
 
 
 logger = get_logger()
-
-
-@contextmanager
-def timeout_context(seconds: int):
-    """Контекстный менеджер для таймаута операций.
-    
-    Args:
-        seconds: Время таймаута в секундах
-    """
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Операция превысила таймаут {seconds} сек")
-    
-    # Устанавливаем обработчик сигнала (только на Unix)
-    if hasattr(signal, 'SIGALRM'):
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(seconds)
-        try:
-            yield
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
-    else:
-        # На Windows или если SIGALRM недоступен - без таймаута
-        yield
 
 
 class LocalLLM:
@@ -104,25 +78,22 @@ class LocalLLM:
         
         for attempt in range(self.max_retries + 1):
             try:
-                # Проверяем что Ollama доступен
-                try:
-                    ollama.list()  # Простой ping к Ollama
-                except Exception as e:
-                    logger.warning(f"⚠️ Ollama недоступен, проверьте что сервис запущен: {e}")
-                    return ""
+                # Проверяем что Ollama доступен (только на первой попытке)
+                if attempt == 0:
+                    try:
+                        ollama.list()
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ollama недоступен, проверьте что сервис запущен: {e}")
+                        return ""
                 
-                # Используем таймаут для предотвращения зависаний
-                try:
-                    with timeout_context(self.timeout):
-                        response = ollama.generate(
-                            model=self.model,
-                            prompt=prompt,
-                            options=options,
-                            **{k: v for k, v in kwargs.items() if k != "options"}
-                        )
-                except TimeoutError as e:
-                    logger.warning(f"⏱️ Таймаут запроса к Ollama: {e}")
-                    raise e
+                # Прямой вызов без дополнительных потоков/таймаутов
+                # Ollama сам обрабатывает таймауты на уровне HTTP
+                response = ollama.generate(
+                    model=self.model,
+                    prompt=prompt,
+                    options=options,
+                    **{k: v for k, v in kwargs.items() if k != "options"}
+                )
                 
                 result = response.get("response", "").strip()
                 if result:
@@ -131,7 +102,7 @@ class LocalLLM:
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    time.sleep(1)  # Небольшая задержка перед повтором
+                    time.sleep(1)
                     continue
                 else:
                     break

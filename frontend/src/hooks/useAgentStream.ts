@@ -31,6 +31,7 @@ export interface AgentResults {
     improvements: string
     should_retry: boolean
   }
+  greeting_message?: string  // Добавлено для greeting
 }
 
 export interface Metrics {
@@ -81,16 +82,43 @@ export function useAgentStream(): UseAgentStreamReturn {
   }, [])
 
   const startTask = useCallback((task: string, options: TaskOptions) => {
-    // Защита от повторных вызовов - если задача уже выполняется, не создаем новое соединение
-    if (isRunning || eventSourceRef.current) {
-      console.warn('Задача уже выполняется, новый запрос проигнорирован')
+    // АДАПТИВНАЯ ЗАЩИТА: если задача уже выполняется или есть активное соединение, блокируем новый запрос
+    if (isRunning) {
+      console.warn('⚠️ Задача уже выполняется, новый запрос заблокирован')
       return
     }
-
-    // Останавливаем предыдущее подключение если есть (на всякий случай)
+    
     if (eventSourceRef.current) {
+      const currentState = eventSourceRef.current.readyState
+      if (currentState === EventSource.OPEN || currentState === EventSource.CONNECTING) {
+        console.warn('⚠️ Активное SSE соединение существует, новый запрос заблокирован')
+        return
+      }
+      // Если соединение закрыто, закрываем его явно перед созданием нового
       eventSourceRef.current.close()
       eventSourceRef.current = null
+    }
+
+    // АДАПТИВНАЯ ЗАДЕРЖКА: ждем завершения предыдущей задачи (если флаг завершения еще не сброшен)
+    if (isCompletedRef.current) {
+      // Небольшая задержка для гарантии очистки состояния
+      setTimeout(() => {
+        // Сброс состояния
+        setStages({})
+        setResults({})
+        setMetrics({
+          planning: 0,
+          research: 0,
+          testing: 0,
+          coding: 0,
+          overall: 0
+        })
+        setError(null)
+        setIsRunning(true)
+        isCompletedRef.current = false
+        _createEventSource(task, options)
+      }, 100)
+      return
     }
 
     // Сброс состояния
@@ -106,6 +134,12 @@ export function useAgentStream(): UseAgentStreamReturn {
     setError(null)
     setIsRunning(true)
     isCompletedRef.current = false  // Сбрасываем флаг завершения для новой задачи
+    
+    _createEventSource(task, options)
+  }, [isRunning, updateStage])
+
+  // Выносим создание EventSource в отдельную функцию для переиспользования
+  const _createEventSource = useCallback((task: string, options: TaskOptions) => {
 
     // Формируем URL для SSE
     const params = new URLSearchParams({
@@ -116,11 +150,24 @@ export function useAgentStream(): UseAgentStreamReturn {
       max_iterations: options.maxIterations.toString()
     })
 
-    const eventSource = new EventSource(`/api/stream?${params.toString()}`)
+    // В dev режиме подключаемся напрямую к backend (Vite proxy не поддерживает SSE)
+    // В production можно использовать прокси
+    // Используем явную проверку - Vite всегда определяет import.meta.env.DEV
+    const isDev = import.meta.env.MODE === 'development' || !import.meta.env.PROD
+    const apiUrl = isDev
+      ? `http://localhost:8000/api/stream?${params.toString()}`
+      : `/api/stream?${params.toString()}`
+    
+    console.log('🔌 Создаю EventSource:', apiUrl, { isDev, mode: import.meta.env.MODE })
+    const eventSource = new EventSource(apiUrl)
     eventSourceRef.current = eventSource
 
     eventSource.onopen = () => {
-      console.log('✅ SSE подключение установлено')
+      console.log('✅ SSE подключение установлено', {
+        url: apiUrl,
+        readyState: eventSource.readyState,
+        withCredentials: eventSource.withCredentials
+      })
     }
 
     eventSource.onmessage = (event: MessageEvent) => {
@@ -175,11 +222,31 @@ export function useAgentStream(): UseAgentStreamReturn {
 
     eventSource.addEventListener('stage_end', (event: MessageEvent) => {
       try {
+        console.log('📨 Получено событие stage_end:', event.type, event.data?.substring(0, 200))
         if (!event.data || event.data.trim() === '') {
           console.warn('Получено пустое событие stage_end')
           return
         }
         const data = JSON.parse(event.data)
+        console.log('✅ Парсинг stage_end успешен:', data.stage, data.message?.substring(0, 50))
+        console.log('📦 stage_end data.result:', data.result)
+        
+        // Для greeting логируем детально и сохраняем message
+        if (data.stage === 'greeting') {
+          console.log('🎉 GREETING STAGE_END ПОЛУЧЕН!')
+          console.log('  - message:', data.message?.substring(0, 100))
+          console.log('  - result:', JSON.stringify(data.result))
+          console.log('  - result.message:', data.result?.message?.substring(0, 100))
+          
+          // Сохраняем greeting message в results как fallback
+          if (data.result?.message) {
+            setResults(prev => ({
+              ...prev,
+              greeting_message: data.result.message
+            }))
+          }
+        }
+        
         updateStage(data.stage, {
           stage: data.stage,
           status: 'end',
@@ -198,7 +265,7 @@ export function useAgentStream(): UseAgentStreamReturn {
           })
         }
       } catch (err) {
-        console.error('Ошибка парсинга stage_end:', err, event.data)
+        console.error('❌ Ошибка парсинга stage_end:', err, event.data)
       }
     })
 
@@ -236,7 +303,7 @@ export function useAgentStream(): UseAgentStreamReturn {
 
     eventSource.addEventListener('complete', (event: MessageEvent) => {
       try {
-        console.log('✅ Получено событие complete:', event.data)
+        console.log('✅ Получено событие complete:', event.data?.substring(0, 300))
         if (!event.data || event.data.trim() === '') {
           console.warn('Получено пустое событие complete')
           isCompletedRef.current = true
@@ -250,7 +317,11 @@ export function useAgentStream(): UseAgentStreamReturn {
         }
         const data = JSON.parse(event.data)
         console.log('✅ Парсинг complete успешен:', data)
-        setResults(data.results || {})
+        console.log('📦 complete data.results:', data.results)
+        console.log('📦 complete data.results.intent:', data.results?.intent)
+        // ВАЖНО: объединяем с существующими results, а не перезаписываем
+        // Это сохраняет greeting_message, установленный в stage_end
+        setResults(prev => ({ ...prev, ...(data.results || {}) }))
         setMetrics(data.metrics || metrics)
         isCompletedRef.current = true
         setIsRunning(false)

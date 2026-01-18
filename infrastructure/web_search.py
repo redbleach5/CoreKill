@@ -1,12 +1,24 @@
 """Минимальный безопасный веб-поиск через Google."""
-import requests
-from bs4 import BeautifulSoup
 from typing import List, Dict
 
 from utils.logger import get_logger
 
-
 logger = get_logger()
+
+# Опциональные импорты для веб-поиска
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    logger.warning("⚠️ requests недоступен. Веб-поиск будет отключен.")
+
+try:
+    from bs4 import BeautifulSoup
+    BEAUTIFULSOUP_AVAILABLE = True
+except ImportError:
+    BEAUTIFULSOUP_AVAILABLE = False
+    logger.warning("⚠️ beautifulsoup4 недоступен. Веб-поиск будет отключен.")
 
 
 def simple_google_search(query: str, max_results: int = 3, timeout: int = 10) -> List[Dict[str, str]]:
@@ -19,8 +31,12 @@ def simple_google_search(query: str, max_results: int = 3, timeout: int = 10) ->
         
     Returns:
         Список словарей с полями: title, url, snippet.
-        Пустой список в случае ошибки.
+        Пустой список в случае ошибки или если зависимости недоступны.
     """
+    if not REQUESTS_AVAILABLE or not BEAUTIFULSOUP_AVAILABLE:
+        logger.debug("Веб-поиск недоступен: отсутствуют необходимые зависимости")
+        return []
+    
     if not query.strip():
         return []
     

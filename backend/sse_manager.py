@@ -40,7 +40,8 @@ class SSEManager:
         lines.append(f"data: {json_data}")
         lines.append("")  # Пустая строка для завершения события
         
-        return "\n".join(lines)
+        # SSE требует двойной перевод строки (\n\n) для завершения события
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     async def stream_stage_start(

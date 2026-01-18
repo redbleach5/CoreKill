@@ -206,38 +206,88 @@ class ProjectRunner:
         self.print_success("Node.js зависимости установлены")
         return True
     
+    def _kill_process_on_port(self, port: int) -> bool:
+        """Убивает процесс, занимающий указанный порт.
+        
+        Args:
+            port: Номер порта
+            
+        Returns:
+            True если порт освобождён, False если не удалось
+        """
+        try:
+            # Получаем PID процесса на порту
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode != 0 or not result.stdout.strip():
+                # Порт свободен или lsof не нашёл процесс
+                return True
+            
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                pid = pid.strip()
+                if pid:
+                    try:
+                        subprocess.run(
+                            ["kill", "-9", pid],
+                            capture_output=True,
+                            timeout=5
+                        )
+                        self.print_info(f"Процесс {pid} на порту {port} остановлен")
+                    except Exception:
+                        pass
+            
+            # Даём время на освобождение порта
+            time.sleep(1)
+            return True
+            
+        except Exception as e:
+            self.print_warning(f"Не удалось освободить порт {port}: {e}")
+            return False
+    
     def check_ports(self) -> bool:
-        """Проверяет доступность портов."""
+        """Проверяет и при необходимости освобождает порты."""
         import socket
         
         ports_ok = True
         
-        # Проверяем backend порт
+        # Проверяем и освобождаем backend порт
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             result = sock.connect_ex(('localhost', self.backend_port))
             if result == 0:
-                self.print_warning(f"Порт {self.backend_port} уже занят")
-                ports_ok = False
+                self.print_warning(f"Порт {self.backend_port} занят, освобождаю...")
+                if self._kill_process_on_port(self.backend_port):
+                    self.print_success(f"Порт {self.backend_port} освобождён")
+                else:
+                    ports_ok = False
         except Exception:
             pass
         finally:
             sock.close()
         
-        # Проверяем frontend порт
+        # Проверяем и освобождаем frontend порт
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             result = sock.connect_ex(('localhost', self.frontend_port))
             if result == 0:
-                self.print_warning(f"Порт {self.frontend_port} уже занят")
-                ports_ok = False
+                self.print_warning(f"Порт {self.frontend_port} занят, освобождаю...")
+                if self._kill_process_on_port(self.frontend_port):
+                    self.print_success(f"Порт {self.frontend_port} освобождён")
+                else:
+                    ports_ok = False
         except Exception:
             pass
         finally:
             sock.close()
         
         if ports_ok:
-            self.print_success("Порты доступны")
+            self.print_success("Порты готовы")
         
         return ports_ok
     
@@ -506,9 +556,10 @@ class ProjectRunner:
         if not self.check_dependencies():
             checks_passed = False
         
-        # Проверяем порты
+        # Проверяем и освобождаем порты
         if not self.check_ports():
-            self.print_warning("Порты заняты, но продолжаем...")
+            self.print_error("Не удалось освободить порты")
+            return 1
         
         if not checks_passed:
             self.print_error("Проверки не пройдены. Исправьте ошибки и попробуйте снова.")

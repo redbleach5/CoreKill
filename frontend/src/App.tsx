@@ -130,6 +130,13 @@ function App() {
   
   // Проверяем приветствие
   const isGreeting = results.intent?.type === 'greeting' || stages['greeting']
+  
+  // Debug логирование (отключено в production)
+  // useEffect(() => {
+  //   if (process.env.NODE_ENV === 'development') {
+  //     console.log('🔍 DEBUG:', { isGreeting, stages: Object.keys(stages) })
+  //   }
+  // }, [isGreeting, stages])
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-gray-100 flex flex-col">
@@ -353,10 +360,10 @@ function App() {
                     </div>
 
                     {/* Greeting Response */}
-                    {isGreeting && stages['greeting']?.result?.message && (
+                    {isGreeting && (stages['greeting']?.result?.message || results.greeting_message) && (
                       <div className="p-4 bg-gradient-to-br from-blue-500/10 to-violet-500/10 border border-white/10 rounded-xl">
                         <pre className="text-sm text-gray-300 whitespace-pre-wrap font-sans">
-                          {stages['greeting'].result.message}
+                          {stages['greeting']?.result?.message || results.greeting_message}
                         </pre>
                       </div>
                     )}

@@ -12,6 +12,7 @@ from utils.model_checker import (
     check_model_available,
     get_any_available_model,
     get_light_model,
+    get_coder_model,
     get_all_available_models
 )
 from utils.config import get_config
@@ -113,15 +114,21 @@ class SimpleModelRouter(ModelRouter):
             if model:
                 return ModelSelection(model=model, confidence=0.9)
         
-        # Для остальных задач используем модели из конфига
-        if task_type in ["coding", "testing", "reflection"]:
+        # Для задач генерации кода используем специализированные coder модели
+        if task_type in ["coding", "testing", "reflection", "debug"]:
+            # Сначала пробуем get_coder_model() - он выбирает оптимальную модель
+            coder = get_coder_model()
+            if coder:
+                return ModelSelection(model=coder, confidence=0.95)
+            
+            # Fallback на конфиг
             preferred = self.config.default_model
             fallback = self.config.fallback_model
             
             if check_model_available(preferred):
-                return ModelSelection(model=preferred, confidence=0.95)
+                return ModelSelection(model=preferred, confidence=0.85)
             elif check_model_available(fallback):
-                return ModelSelection(model=fallback, confidence=0.85)
+                return ModelSelection(model=fallback, confidence=0.75)
         
         # Используем любую доступную модель
         model = get_any_available_model()

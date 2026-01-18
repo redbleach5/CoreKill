@@ -17,28 +17,29 @@ export default defineConfig({
         changeOrigin: true,
         ws: false,
         timeout: 0,
+        buffer: false,  // КРИТИЧНО: отключаем буферизацию для SSE
         configure: (proxy, _options) => {
           proxy.on('proxyReq', (proxyReq, req, res) => {
             if (req.url?.includes('/stream')) {
               proxyReq.setHeader('Accept', 'text/event-stream')
               proxyReq.setHeader('Cache-Control', 'no-cache')
+              proxyReq.setHeader('Connection', 'keep-alive')
             }
           })
           proxy.on('proxyRes', (proxyRes, req, res) => {
             if (req.url?.includes('/stream')) {
-              // Отключаем буферизацию для SSE
+              // КРИТИЧНО: удаляем content-length для chunked encoding
               delete proxyRes.headers['content-length']
-              proxyRes.headers['cache-control'] = 'no-cache'
-              proxyRes.headers['connection'] = 'keep-alive'
-              proxyRes.headers['x-accel-buffering'] = 'no'
-              // Отключаем буферизацию в Node.js
-              res.setHeader('Cache-Control', 'no-cache')
+              // Устанавливаем правильные заголовки для SSE
+              res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+              res.setHeader('Cache-Control', 'no-cache, no-transform')
               res.setHeader('Connection', 'keep-alive')
               res.setHeader('X-Accel-Buffering', 'no')
+              // Отключаем буферизацию ответа
+              if (res.flushHeaders) {
+                res.flushHeaders()
+              }
             }
-          })
-          proxy.on('proxyReqWs', (proxyReq, req, socket) => {
-            // Для WebSocket но мы не используем
           })
         }
       },

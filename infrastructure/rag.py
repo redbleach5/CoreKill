@@ -1,14 +1,20 @@
 """RAG-система на базе ChromaDB для локального поиска по документам."""
-import chromadb
-from chromadb.config import Settings
 from typing import List, Dict, Optional, Any
 import os
 import ollama
 from utils.config import get_config
 from utils.logger import get_logger
 
-
 logger = get_logger()
+
+# Опциональный импорт ChromaDB
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    logger.warning("⚠️ ChromaDB недоступен. RAG будет работать в режиме без векторной БД.")
 
 
 class RAGSystem:
@@ -26,26 +32,40 @@ class RAGSystem:
         """
         self.collection_name = collection_name
         self.persist_directory = persist_directory
+        self.enabled = CHROMADB_AVAILABLE
         config = get_config()
         self.embedding_model = getattr(config, 'embedding_model', 'nomic-embed-text')
         
-        # Создаём директорию если её нет
-        os.makedirs(persist_directory, exist_ok=True)
-        
-        # Инициализируем клиент ChromaDB
-        self.client = chromadb.PersistentClient(
-            path=persist_directory,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        
-        # Получаем или создаём коллекцию
-        try:
-            self.collection = self.client.get_collection(name=collection_name)
-        except Exception:
-            self.collection = self.client.create_collection(
-                name=collection_name,
-                metadata={"description": "Codebase documentation and context"}
-            )
+        # Инициализируем ChromaDB только если доступен
+        if self.enabled:
+            try:
+                # Создаём директорию если её нет
+                os.makedirs(persist_directory, exist_ok=True)
+                
+                # Инициализируем клиент ChromaDB
+                self.client = chromadb.PersistentClient(
+                    path=persist_directory,
+                    settings=Settings(anonymized_telemetry=False)
+                )
+                
+                # Получаем или создаём коллекцию
+                try:
+                    self.collection = self.client.get_collection(name=collection_name)
+                except Exception:
+                    self.collection = self.client.create_collection(
+                        name=collection_name,
+                        metadata={"description": "Codebase documentation and context"}
+                    )
+                logger.info(f"✅ RAG система инициализирована с ChromaDB (коллекция: {collection_name})")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка инициализации ChromaDB: {e}. RAG будет работать без векторной БД.")
+                self.enabled = False
+                self.client = None
+                self.collection = None
+        else:
+            self.client = None
+            self.collection = None
+            logger.info("ℹ️ RAG система работает без ChromaDB (векторная БД недоступна)")
 
     def _get_embedding(self, text: str) -> List[float]:
         """Получает embedding для текста через Ollama.
@@ -75,6 +95,10 @@ class RAGSystem:
             documents: Список текстов документов
             metadatas: Опциональные метаданные для каждого документа
         """
+        if not self.enabled or not self.collection:
+            logger.debug("RAG без ChromaDB: документы не сохраняются")
+            return
+        
         if not documents:
             return
         
@@ -114,6 +138,9 @@ class RAGSystem:
         Returns:
             Объединённый контекст из найденных документов. Пустая строка если ничего не найдено.
         """
+        if not self.enabled or not self.collection:
+            return ""  # RAG без ChromaDB не может искать
+        
         if not query.strip():
             return ""
         
@@ -159,6 +186,9 @@ class RAGSystem:
         Returns:
             Список словарей с полями: document, metadata, distance
         """
+        if not self.enabled or not self.collection:
+            return []  # RAG без ChromaDB не может искать
+        
         if not query.strip():
             return []
         
