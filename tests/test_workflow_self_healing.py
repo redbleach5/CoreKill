@@ -49,10 +49,7 @@ def test_add():
 def add(a, b):
     return a + b
 """
-            mock_coder_instance.fix_code.return_value = """
-def add(a, b):
-    return 5
-"""
+            mock_coder_instance.fix_code.return_value = "def add(a, b): return 5"
             mock_coder.return_value = mock_coder_instance
             
             mock_debugger_instance = Mock()

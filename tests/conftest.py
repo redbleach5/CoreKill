@@ -7,6 +7,16 @@ from pathlib import Path
 root_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(root_dir))
 
+# Конфигурация pytest-asyncio
+pytest_plugins = ('pytest_asyncio',)
+
+
+def pytest_configure(config):
+    """Регистрация кастомных маркеров."""
+    config.addinivalue_line(
+        "markers", "asyncio: mark test as async"
+    )
+
 
 @pytest.fixture
 def mock_ollama_response():

@@ -15,7 +15,8 @@ class TestDebuggerAgent:
             mock_router_instance.select_model.return_value = Mock(model="test-model")
             mock_router.return_value = mock_router_instance
             
-            with patch('agents.debugger.LocalLLM'):
+            with patch('agents.debugger.create_llm_for_stage') as mock_llm:
+                mock_llm.return_value = Mock()
                 agent = DebuggerAgent(model="test-model")
                 return agent
     
@@ -128,8 +129,7 @@ class TestDebuggerAgent:
         assert "pytest ошибки" in prompt or "pytest" in prompt.lower()
         assert "ИНСТРУКЦИИ_ДЛЯ_ИСПРАВЛЕНИЯ" in prompt or "ИНСТРУКЦИИ" in prompt
     
-    @patch('agents.debugger.LocalLLM')
-    def test_analyze_errors(self, mock_llm_class, validation_results_pytest_fail):
+    def test_analyze_errors(self, validation_results_pytest_fail):
         """Тест анализа ошибок через LLM."""
         # Настраиваем мок LLM
         mock_llm = Mock()
@@ -145,27 +145,29 @@ Fix the add function to return 5 instead of 3 when called with (1, 2)
 
 УВЕРЕННОСТЬ: 0.9
 """
-        mock_llm_class.return_value = mock_llm
         
         with patch('agents.debugger.get_model_router') as mock_router:
             mock_router_instance = Mock()
             mock_router_instance.select_model.return_value = Mock(model="test-model")
             mock_router.return_value = mock_router_instance
             
-            agent = DebuggerAgent(model="test-model")
-            
-            result = agent.analyze_errors(
-                validation_results=validation_results_pytest_fail,
-                code="def add(a, b): return a + b",
-                tests="def test_add(): assert add(1, 2) == 5",
-                task="Test task"
-            )
-            
-            assert isinstance(result, DebugResult)
-            assert result.error_type == "pytest"
-            assert result.confidence > 0.0
-            assert len(result.fix_instructions) > 0
-            assert "Fix" in result.fix_instructions or "fix" in result.fix_instructions.lower()
+            with patch('agents.debugger.create_llm_for_stage') as mock_llm_factory:
+                mock_llm_factory.return_value = mock_llm
+                
+                agent = DebuggerAgent(model="test-model")
+                
+                result = agent.analyze_errors(
+                    validation_results=validation_results_pytest_fail,
+                    code="def add(a, b): return a + b",
+                    tests="def test_add(): assert add(1, 2) == 5",
+                    task="Test task"
+                )
+                
+                assert isinstance(result, DebugResult)
+                assert result.error_type == "pytest"
+                assert result.confidence > 0.0
+                assert len(result.fix_instructions) > 0
+                assert "Fix" in result.fix_instructions or "fix" in result.fix_instructions.lower()
     
     def test_parse_analysis_response(self, debugger_agent):
         """Тест парсинга ответа от LLM."""

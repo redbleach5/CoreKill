@@ -1,5 +1,6 @@
 """Тесты для PlannerAgent."""
 import pytest
+from unittest.mock import Mock, patch
 from agents.planner import PlannerAgent
 
 
@@ -9,17 +10,38 @@ class TestPlannerAgent:
     @pytest.fixture
     def agent(self):
         """Создаёт экземпляр PlannerAgent для тестов."""
-        return PlannerAgent(temperature=0.25)
+        with patch('agents.planner.get_model_router') as mock_router:
+            mock_router_instance = Mock()
+            mock_router_instance.select_model.return_value = Mock(model="test-model")
+            mock_router.return_value = mock_router_instance
+            
+            with patch('agents.planner.create_llm_for_stage') as mock_llm:
+                mock_llm.return_value = Mock(model="test-model", temperature=0.25)
+                return PlannerAgent(temperature=0.25)
     
     def test_init(self, agent):
         """Тест инициализации агента."""
         assert agent is not None
         assert hasattr(agent, 'llm')
-        assert hasattr(agent, 'prompt_enhancer')
     
     def test_init_with_custom_model(self):
         """Тест инициализации с кастомной моделью."""
-        agent = PlannerAgent(model="test-model", temperature=0.3)
-        assert agent is not None
-        assert agent.llm.model == "test-model"
-        assert agent.llm.temperature == 0.3
+        with patch('agents.planner.get_model_router') as mock_router:
+            mock_router_instance = Mock()
+            mock_router_instance.select_model.return_value = Mock(model="custom-model")
+            mock_router.return_value = mock_router_instance
+            
+            with patch('agents.planner.create_llm_for_stage') as mock_llm:
+                mock_llm_instance = Mock(model="custom-model", temperature=0.3)
+                mock_llm.return_value = mock_llm_instance
+                
+                agent = PlannerAgent(model="custom-model", temperature=0.3)
+                assert agent is not None
+                
+                # Проверяем что create_llm_for_stage вызван с правильными параметрами
+                mock_llm.assert_called_once_with(
+                    stage="planning",
+                    model="custom-model",
+                    temperature=0.3,
+                    top_p=0.9
+                )

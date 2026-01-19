@@ -1,5 +1,6 @@
 """Тесты для ReflectionAgent."""
 import pytest
+from unittest.mock import Mock, patch
 from agents.reflection import ReflectionAgent, ReflectionResult
 
 
@@ -9,7 +10,14 @@ class TestReflectionAgent:
     @pytest.fixture
     def agent(self):
         """Создаёт экземпляр ReflectionAgent для тестов."""
-        return ReflectionAgent(temperature=0.25)
+        with patch('agents.reflection.get_model_router') as mock_router:
+            mock_router_instance = Mock()
+            mock_router_instance.select_model.return_value = Mock(model="test-model")
+            mock_router.return_value = mock_router_instance
+            
+            with patch('agents.reflection.create_llm_for_stage') as mock_llm:
+                mock_llm.return_value = Mock()
+                return ReflectionAgent(temperature=0.25)
     
     def test_init(self, agent):
         """Тест инициализации агента."""
