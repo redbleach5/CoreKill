@@ -62,9 +62,7 @@ function App() {
           const data = await response.json()
           const models = data.models || []
           setAvailableModels(models)
-          if (models.length > 0 && !options.model) {
-            setOptions(prev => ({ ...prev, model: models[0] }))
-          }
+          // Не устанавливаем модель автоматически — по умолчанию "Авто" (пустая строка)
         }
       } catch {
         // Игнорируем ошибки загрузки моделей
@@ -78,9 +76,22 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, stages, isRunning])
 
-  // Автопереключение в split режим когда начинается генерация кода
+  // Синхронизация режима агента с layout
   useEffect(() => {
-    if (!isRunning) return
+    // Режим "Код" — всегда split
+    if (options.mode === 'code' && layoutMode !== 'split') {
+      setLayoutMode('split')
+    }
+    // Режим "Диалог" — всегда только чат
+    if (options.mode === 'chat' && layoutMode !== 'chat') {
+      setLayoutMode('chat')
+    }
+    // Режим "Авто" — не меняем layout принудительно, пользователь выбирает сам
+  }, [options.mode])
+
+  // Автопереключение в split режим когда начинается генерация кода (только для режима Авто)
+  useEffect(() => {
+    if (!isRunning || options.mode !== 'auto') return
     
     const codingStage = stages['coding']
     const isCodingStarted = codingStage && (codingStage.status === 'start' || codingStage.status === 'progress')
@@ -89,7 +100,7 @@ function App() {
       previousLayoutRef.current = layoutMode
       setLayoutMode('split')
     }
-  }, [stages, isRunning, layoutMode])
+  }, [stages, isRunning, layoutMode, options.mode])
 
   // Обновляем сообщение ассистента при изменении stages/results
   useEffect(() => {
@@ -340,17 +351,49 @@ function App() {
       onCodeChange={handleCodeChange}
       onExecute={handleCodeExecute}
       isExecuting={isExecuting}
+      projectPath={options.projectPath}
+      fileExtensions={options.fileExtensions}
+      onProjectPathChange={(path) => setOptions(prev => ({ ...prev, projectPath: path }))}
+      onFileExtensionsChange={(ext) => setOptions(prev => ({ ...prev, fileExtensions: ext }))}
     />
   )
 
   // Рендер Split View
   const renderSplitView = () => (
-    <div className="flex gap-4 h-full">
-      <div className="flex-1 flex flex-col min-w-0">
-        {renderChatMessages()}
-        {renderChatInput()}
+    <div className="flex gap-4 h-full min-h-0">
+      {/* Левая панель: чат */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+            {messages.length === 0 && (
+              <WelcomeScreen 
+                mode={options.mode as InteractionMode} 
+                onSuggestionClick={setTaskInput} 
+              />
+            )}
+            <MessageList
+              ref={messagesEndRef}
+              messages={messages}
+              stages={stages}
+              error={error}
+              onCopy={handleCopy}
+              onDownload={handleDownload}
+            />
+          </div>
+        </div>
+        <div className="flex-shrink-0">
+          <ChatInput
+            ref={inputRef}
+            value={taskInput}
+            onChange={setTaskInput}
+            onSubmit={handleSubmit}
+            onStop={stopTask}
+            isRunning={isRunning}
+          />
+        </div>
       </div>
-      <div className="w-1/2 flex flex-col min-w-0">
+      {/* Правая панель: IDE */}
+      <div className="w-1/2 flex flex-col min-w-0 min-h-0">
         {renderIDEView()}
       </div>
     </div>
@@ -417,7 +460,7 @@ function App() {
             </div>
           )}
           {layoutMode === 'split' && (
-            <div className="flex-1 p-4">
+            <div className="flex-1 p-4 min-h-0">
               {renderSplitView()}
             </div>
           )}

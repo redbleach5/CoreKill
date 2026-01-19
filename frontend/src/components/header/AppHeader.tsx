@@ -134,12 +134,13 @@ export function AppHeader({
         {/* Model selector */}
         {availableModels.length > 0 && (
           <select
-            value={options.model}
+            value={options.model || ''}
             onChange={(e) => onOptionsChange({ ...options, model: e.target.value })}
             disabled={isRunning}
             className="text-xs bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-gray-300 
                        focus:outline-none focus:border-blue-500/50 disabled:opacity-50"
           >
+            <option value="" className="bg-gray-900">🎯 Авто (умный выбор)</option>
             {availableModels.map(m => (
               <option key={m} value={m} className="bg-gray-900">{m}</option>
             ))}
