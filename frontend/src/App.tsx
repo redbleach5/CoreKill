@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { useAgentStream } from './hooks/useAgentStream'
 import { TaskOptions } from './components/SidebarOptions'
+import { SettingsPanel } from './components/SettingsPanel'
 import { 
   Zap, Send, Square, Settings, ChevronRight, 
   Brain, ListTodo, Search, TestTube, Code2, Shield, RefreshCw,
   CheckCircle2, Loader2, AlertCircle, Copy, Download, ThumbsUp, ThumbsDown,
-  Sparkles, FileCode, MessageCircle, Bot, User
+  Sparkles, FileCode, MessageCircle, Bot, User, Sliders
 } from 'lucide-react'
 
 // Типы сообщений в чате
@@ -54,6 +55,7 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [taskInput, setTaskInput] = useState<string>('')
   const [showSettings, setShowSettings] = useState(false)
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
   const [availableModels, setAvailableModels] = useState<string[]>([])
   const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -181,6 +183,24 @@ function App() {
     a.download = 'generated_code.py'
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // Обработчик сохранения расширенных настроек
+  const handleAdvancedSettingsSave = (settings: {
+    model: string
+    temperature: number
+    maxIterations: number
+    enableWebSearch: boolean
+    enableRAG: boolean
+    maxTokens: number
+  }) => {
+    setOptions(prev => ({
+      ...prev,
+      model: settings.model || prev.model,
+      temperature: settings.temperature,
+      maxIterations: settings.maxIterations,
+      disableWebSearch: !settings.enableWebSearch
+    }))
   }
 
   const getStageStatus = (stage: string, stageData: Record<string, any>) => {
@@ -476,9 +496,24 @@ function App() {
               />
               Без веб-поиска
             </label>
+            <button
+              onClick={() => setShowAdvancedSettings(true)}
+              className="flex items-center gap-2 text-gray-400 hover:text-white transition-colors"
+            >
+              <Sliders className="w-4 h-4" />
+              Расширенные
+            </button>
           </div>
         </div>
       )}
+
+      {/* Advanced Settings Modal */}
+      <SettingsPanel
+        isOpen={showAdvancedSettings}
+        onClose={() => setShowAdvancedSettings(false)}
+        onSave={handleAdvancedSettingsSave}
+        availableModels={availableModels}
+      />
 
       {/* Chat Area */}
       <main className="flex-1 overflow-hidden flex flex-col">

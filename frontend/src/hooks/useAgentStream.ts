@@ -53,7 +53,7 @@ interface UseAgentStreamReturn {
   reset: () => void
 }
 
-interface TaskOptions {
+export interface TaskOptions {
   model: string
   temperature: number
   disableWebSearch: boolean

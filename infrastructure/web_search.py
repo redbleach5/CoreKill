@@ -15,6 +15,7 @@ from urllib.parse import quote as url_quote
 import os
 
 from utils.logger import get_logger
+from infrastructure.cache import cached
 
 logger = get_logger()
 
@@ -321,13 +322,16 @@ def google_search(query: str, max_results: int = 3, timeout: int = 10) -> List[D
 
 # === Unified Search API ===
 
+@cached(ttl=1800)  # Кэш на 30 минут — веб-результаты не меняются часто
 def web_search(query: str, max_results: int = 3, timeout: int = 10) -> List[Dict[str, str]]:
-    """Выполняет веб-поиск с автоматическим fallback.
+    """Выполняет веб-поиск с автоматическим fallback и кэшированием.
     
     Порядок приоритета:
     1. Tavily (AI-native, лучшее качество)
     2. DuckDuckGo (приватный, без API)
     3. Google (fallback, может блокировать)
+    
+    Результаты кэшируются на 30 минут для экономии API запросов.
     
     Args:
         query: Текст поискового запроса

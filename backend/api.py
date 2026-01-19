@@ -1,5 +1,6 @@
 """Основной FastAPI приложение для веб-интерфейса."""
 import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -7,27 +8,55 @@ from fastapi.responses import JSONResponse
 from backend.routers import agent
 from backend.middleware.log_filter import setup_log_filter
 from backend.middleware.rate_limiter import RateLimiterMiddleware
+from infrastructure.connection_pool import get_ollama_pool, close_ollama_pool
+from infrastructure.cache import get_cache
 from utils.logger import get_logger
 
 # Инициализируем систему логирования при старте приложения
 logger = get_logger()
-logger.info("🚀 Backend API запущен")
 
-# Создаём FastAPI приложение
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager для FastAPI — startup/shutdown."""
+    # Startup
+    logger.info("🚀 Backend API запущен")
+    setup_log_filter()
+    
+    # Инициализируем connection pool (lazy — при первом использовании)
+    # get_ollama_pool() будет вызван при первом запросе
+    logger.info("✅ Lifespan startup завершён")
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Backend API завершает работу...")
+    
+    # Закрываем connection pool
+    try:
+        await close_ollama_pool()
+        logger.info("✅ Connection pool закрыт")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при закрытии connection pool: {e}")
+    
+    # Очищаем кэш
+    try:
+        cache = get_cache()
+        cache.clear()
+        logger.info("✅ Кэш очищен")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка при очистке кэша: {e}")
+
+# Создаём FastAPI приложение с lifespan manager
 app = FastAPI(
     title="Cursor Killer API",
     description="API для многоагентной системы генерации кода",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Настраиваем фильтр логов для uvicorn (убирает model из логов для greeting)
-# Вызываем сразу после создания app и также при старте приложения
+# Настраиваем фильтр логов для uvicorn
 setup_log_filter()
-
-@app.on_event("startup")
-async def setup_logging_filter() -> None:
-    """Настраивает фильтр логов при старте приложения (повторно для надёжности)."""
-    setup_log_filter()
 
 
 # Определяем разрешённые origins в зависимости от окружения

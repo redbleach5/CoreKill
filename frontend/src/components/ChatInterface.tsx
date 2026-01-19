@@ -1,7 +1,13 @@
-"""Улучшенный интерфейс чата."""
+/**
+ * Альтернативный интерфейс чата.
+ * 
+ * Примечание: Этот компонент предоставляет упрощённый чат-интерфейс.
+ * Основной интерфейс реализован в App.tsx.
+ * Для полной функциональности используйте App.tsx.
+ */
 import React, { useRef, useEffect, useState } from 'react'
 import { Send, Settings, Copy, Download, AlertCircle, CheckCircle2 } from 'lucide-react'
-import { useAgentStream } from '../hooks/useAgentStream'
+import { useAgentStream, type TaskOptions as AgentTaskOptions } from '../hooks/useAgentStream'
 
 interface ChatMessage {
   id: string
@@ -13,24 +19,74 @@ interface ChatMessage {
 
 interface ChatInterfaceProps {
   onSettingsClick?: () => void
+  taskOptions?: AgentTaskOptions
 }
 
-export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onSettingsClick }) => {
+const DEFAULT_OPTIONS: AgentTaskOptions = {
+  model: 'codellama:7b',
+  temperature: 0.25,
+  disableWebSearch: false,
+  maxIterations: 3
+}
+
+export const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
+  onSettingsClick,
+  taskOptions = DEFAULT_OPTIONS
+}) => {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
+  const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
-  const { stream } = useAgentStream()
+  
+  const { 
+    stages, 
+    results, 
+    isRunning, 
+    error,
+    startTask, 
+    reset 
+  } = useAgentStream()
 
   // Автоскролл к последнему сообщению
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const handleSendMessage = async (e: React.FormEvent) => {
+  // Обновляем сообщение ассистента при изменении stages/results
+  useEffect(() => {
+    if (!currentAssistantId) return
+
+    setMessages(prev => prev.map(msg => {
+      if (msg.id !== currentAssistantId) return msg
+
+      const hasCode = !!results.code
+      const greetingMessage = results.greeting_message
+
+      return {
+        ...msg,
+        content: greetingMessage || (hasCode ? '' : 'Обработка...'),
+        metadata: {
+          ...msg.metadata,
+          stages,
+          code: results.code,
+          tests: results.tests,
+          intent: results.intent
+        }
+      }
+    }))
+  }, [stages, results, currentAssistantId])
+
+  // Завершение генерации
+  useEffect(() => {
+    if (!isRunning && currentAssistantId) {
+      setTimeout(() => setCurrentAssistantId(null), 100)
+    }
+  }, [isRunning, currentAssistantId])
+
+  const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault()
     
-    if (!input.trim() || isLoading) return
+    if (!input.trim() || isRunning) return
 
     // Добавляем сообщение пользователя
     const userMessage: ChatMessage = {
@@ -40,74 +96,22 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onSettingsClick })
       timestamp: Date.now()
     }
 
-    setMessages(prev => [...prev, userMessage])
-    setInput('')
-    setIsLoading(true)
-
-    try {
-      // Стримим ответ от агента
-      const assistantMessage: ChatMessage = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: '',
-        metadata: {},
-        timestamp: Date.now()
-      }
-
-      setMessages(prev => [...prev, assistantMessage])
-
-      for await (const event of stream(input)) {
-        if (event.type === 'stage_start') {
-          // Обновляем метаданные этапа
-          setMessages(prev => {
-            const updated = [...prev]
-            const lastMsg = updated[updated.length - 1]
-            if (lastMsg.role === 'assistant') {
-              lastMsg.metadata = {
-                ...lastMsg.metadata,
-                [event.stage]: { status: 'start', message: event.message }
-              }
-            }
-            return updated
-          })
-        } else if (event.type === 'stage_end') {
-          // Обновляем результат этапа
-          setMessages(prev => {
-            const updated = [...prev]
-            const lastMsg = updated[updated.length - 1]
-            if (lastMsg.role === 'assistant') {
-              lastMsg.metadata = {
-                ...lastMsg.metadata,
-                [event.stage]: { status: 'end', result: event.result }
-              }
-            }
-            return updated
-          })
-        } else if (event.type === 'final_result') {
-          // Обновляем финальный результат
-          setMessages(prev => {
-            const updated = [...prev]
-            const lastMsg = updated[updated.length - 1]
-            if (lastMsg.role === 'assistant') {
-              lastMsg.content = event.results.code || ''
-              lastMsg.metadata = event.results
-            }
-            return updated
-          })
-        }
-      }
-    } catch (error) {
-      console.error('Ошибка при отправке сообщения:', error)
-      // Добавляем сообщение об ошибке
-      setMessages(prev => [...prev, {
-        id: `error-${Date.now()}`,
-        role: 'assistant',
-        content: 'Произошла ошибка при обработке запроса. Пожалуйста, попробуйте ещё раз.',
-        timestamp: Date.now()
-      }])
-    } finally {
-      setIsLoading(false)
+    const assistantId = `assistant-${Date.now()}`
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      metadata: {},
+      timestamp: Date.now()
     }
+
+    setMessages(prev => [...prev, userMessage, assistantMessage])
+    setCurrentAssistantId(assistantId)
+    setInput('')
+
+    // Reset и start
+    reset()
+    startTask(input.trim(), taskOptions)
   }
 
   const copyToClipboard = (text: string) => {
