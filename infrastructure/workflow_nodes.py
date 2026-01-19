@@ -4,7 +4,11 @@
 Агенты инициализируются лениво при первом вызове.
 MemoryAgent используется через DependencyContainer (Singleton).
 Checkpoint сохраняется после каждого узла для возможности восстановления.
+
+ВАЖНО: Все узлы теперь асинхронные (async def) для совместимости с FastAPI.
+Тяжёлые LLM операции выполняются через asyncio.to_thread() чтобы не блокировать event loop.
 """
+import asyncio
 from typing import TYPE_CHECKING
 from infrastructure.workflow_state import AgentState
 from infrastructure.task_checkpointer import get_task_checkpointer
@@ -127,8 +131,8 @@ def _initialize_agents(state: AgentState) -> None:
 
 
 
-def intent_node(state: AgentState) -> AgentState:
-    """Узел для определения намерения пользователя.
+async def intent_node(state: AgentState) -> AgentState:
+    """Узел для определения намерения пользователя (async).
     
     Args:
         state: Текущий state
@@ -143,7 +147,7 @@ def intent_node(state: AgentState) -> AgentState:
     logger.info("📋 Определяю намерение...")
     
     try:
-        # Быстрая проверка на greeting
+        # Быстрая проверка на greeting (не требует LLM)
         if _intent_agent and IntentAgent.is_greeting_fast(task):
             intent_result = IntentResult(
                 type="greeting",
@@ -151,7 +155,10 @@ def intent_node(state: AgentState) -> AgentState:
                 description="Приветствие пользователя"
             )
         elif _intent_agent:
-            intent_result = _intent_agent.determine_intent(task)
+            # LLM вызов в отдельном потоке чтобы не блокировать event loop
+            intent_result = await asyncio.to_thread(
+                _intent_agent.determine_intent, task
+            )
         else:
             # Fallback если агент не инициализирован
             intent_result = IntentResult(
@@ -178,8 +185,8 @@ def intent_node(state: AgentState) -> AgentState:
     return state
 
 
-def planner_node(state: AgentState) -> AgentState:
-    """Узел для создания плана выполнения задачи.
+async def planner_node(state: AgentState) -> AgentState:
+    """Узел для создания плана выполнения задачи (async).
     
     Args:
         state: Текущий state
@@ -205,7 +212,9 @@ def planner_node(state: AgentState) -> AgentState:
     
     try:
         if _planner_agent:
-            plan = _planner_agent.create_plan(
+            # LLM вызов в отдельном потоке
+            plan = await asyncio.to_thread(
+                _planner_agent.create_plan,
                 task=task,
                 intent_type=intent_result.type
             )
@@ -224,8 +233,8 @@ def planner_node(state: AgentState) -> AgentState:
     return state
 
 
-def researcher_node(state: AgentState) -> AgentState:
-    """Узел для сбора контекста (codebase + RAG + веб-поиск).
+async def researcher_node(state: AgentState) -> AgentState:
+    """Узел для сбора контекста (codebase + RAG + веб-поиск) (async).
     
     Args:
         state: Текущий state
@@ -258,7 +267,7 @@ def researcher_node(state: AgentState) -> AgentState:
         file_context = None
         
         if file_path and intent_result.type in ['modify', 'debug']:
-            file_content = read_file_context(file_path)
+            file_content = await asyncio.to_thread(read_file_context, file_path)
             if file_content:
                 file_context = prepare_modify_context(task, file_content)
                 state["file_path"] = file_path
@@ -267,7 +276,9 @@ def researcher_node(state: AgentState) -> AgentState:
         
         # Собираем контекст через Researcher (включая codebase если указан project_path)
         if _researcher_agent:
-            context = _researcher_agent.research(
+            # RAG и веб-поиск в отдельном потоке
+            context = await asyncio.to_thread(
+                _researcher_agent.research,
                 query=task,
                 intent_type=intent_result.type,
                 disable_web_search=disable_web_search,
@@ -294,8 +305,8 @@ def researcher_node(state: AgentState) -> AgentState:
     return state
 
 
-def generator_node(state: AgentState) -> AgentState:
-    """Узел для генерации тестов (test generator node).
+async def generator_node(state: AgentState) -> AgentState:
+    """Узел для генерации тестов (test generator node) (async).
     
     Args:
         state: Текущий state
@@ -322,7 +333,9 @@ def generator_node(state: AgentState) -> AgentState:
     
     try:
         if _test_generator:
-            tests = _test_generator.generate_tests(
+            # LLM вызов в отдельном потоке
+            tests = await asyncio.to_thread(
+                _test_generator.generate_tests,
                 plan=plan,
                 context=context,
                 intent_type=intent_result.type
@@ -345,8 +358,8 @@ def generator_node(state: AgentState) -> AgentState:
     return state
 
 
-def coder_node(state: AgentState) -> AgentState:
-    """Узел для генерации кода.
+async def coder_node(state: AgentState) -> AgentState:
+    """Узел для генерации кода (async).
     
     Args:
         state: Текущий state
@@ -374,7 +387,9 @@ def coder_node(state: AgentState) -> AgentState:
     
     try:
         if _coder_agent:
-            code = _coder_agent.generate_code(
+            # LLM вызов в отдельном потоке (самый тяжёлый)
+            code = await asyncio.to_thread(
+                _coder_agent.generate_code,
                 plan=plan,
                 tests=tests,
                 context=context,
@@ -398,8 +413,8 @@ def coder_node(state: AgentState) -> AgentState:
     return state
 
 
-def validator_node(state: AgentState) -> AgentState:
-    """Узел для валидации кода.
+async def validator_node(state: AgentState) -> AgentState:
+    """Узел для валидации кода (async).
     
     Args:
         state: Текущий state
@@ -413,7 +428,12 @@ def validator_node(state: AgentState) -> AgentState:
     logger.info("🔍 Валидирую код...")
     
     try:
-        validation_results = validate_code(code_str=code, test_str=tests if tests else None)
+        # Валидация запускает subprocess (pytest, mypy, bandit) — выносим в поток
+        validation_results = await asyncio.to_thread(
+            validate_code,
+            code_str=code,
+            test_str=tests if tests else None
+        )
         state["validation_results"] = validation_results
         
         if validation_results.get("all_passed", False):
@@ -435,8 +455,8 @@ def validator_node(state: AgentState) -> AgentState:
     return state
 
 
-def debugger_node(state: AgentState) -> AgentState:
-    """Узел для анализа ошибок через Debugger Agent.
+async def debugger_node(state: AgentState) -> AgentState:
+    """Узел для анализа ошибок через Debugger Agent (async).
     
     Args:
         state: Текущий state
@@ -455,7 +475,9 @@ def debugger_node(state: AgentState) -> AgentState:
     
     try:
         if _debugger_agent:
-            debug_result = _debugger_agent.analyze_errors(
+            # LLM вызов в отдельном потоке
+            debug_result = await asyncio.to_thread(
+                _debugger_agent.analyze_errors,
                 validation_results=validation_results,
                 code=code,
                 tests=tests,
@@ -476,8 +498,8 @@ def debugger_node(state: AgentState) -> AgentState:
     return state
 
 
-def fixer_node(state: AgentState) -> AgentState:
-    """Узел для исправления кода по инструкциям от Debugger.
+async def fixer_node(state: AgentState) -> AgentState:
+    """Узел для исправления кода по инструкциям от Debugger (async).
     
     Args:
         state: Текущий state
@@ -504,7 +526,9 @@ def fixer_node(state: AgentState) -> AgentState:
     
     try:
         if _coder_agent:
-            fixed_code = _coder_agent.fix_code(
+            # LLM вызов в отдельном потоке
+            fixed_code = await asyncio.to_thread(
+                _coder_agent.fix_code,
                 code=code,
                 instructions=debug_result.fix_instructions,
                 tests=tests,
@@ -526,8 +550,8 @@ def fixer_node(state: AgentState) -> AgentState:
     return state
 
 
-def reflection_node(state: AgentState) -> AgentState:
-    """Узел для рефлексии и оценки результатов.
+async def reflection_node(state: AgentState) -> AgentState:
+    """Узел для рефлексии и оценки результатов (async).
     
     Args:
         state: Текущий state
@@ -549,7 +573,9 @@ def reflection_node(state: AgentState) -> AgentState:
     
     try:
         if _reflection_agent and intent_result:
-            reflection_result = _reflection_agent.reflect(
+            # LLM вызов в отдельном потоке
+            reflection_result = await asyncio.to_thread(
+                _reflection_agent.reflect,
                 task=task,
                 plan=plan,
                 context=context,
@@ -561,7 +587,8 @@ def reflection_node(state: AgentState) -> AgentState:
             
             # Сохраняем опыт в память через DependencyContainer
             memory_agent = _get_memory_agent()
-            memory_agent.save_task_experience(
+            await asyncio.to_thread(
+                memory_agent.save_task_experience,
                 task=task,
                 intent_type=intent_result.type,
                 reflection_result=reflection_result,
@@ -583,8 +610,8 @@ def reflection_node(state: AgentState) -> AgentState:
     return state
 
 
-def critic_node(state: AgentState) -> AgentState:
-    """Узел для критического анализа сгенерированного кода.
+async def critic_node(state: AgentState) -> AgentState:
+    """Узел для критического анализа сгенерированного кода (async).
     
     Args:
         state: Текущий state
@@ -603,7 +630,9 @@ def critic_node(state: AgentState) -> AgentState:
     
     try:
         if _critic_agent and code:
-            critic_report = _critic_agent.analyze(
+            # LLM вызов в отдельном потоке
+            critic_report = await asyncio.to_thread(
+                _critic_agent.analyze,
                 code=code,
                 tests=tests,
                 task_description=task,

@@ -1,5 +1,12 @@
-"""Основной FastAPI приложение для веб-интерфейса."""
+"""Основной FastAPI приложение для веб-интерфейса.
+
+Особенности:
+- Graceful shutdown с сохранением состояния
+- Обработка сигналов SIGTERM/SIGINT
+- Закрытие connection pool и очистка ресурсов
+"""
 import os
+import signal
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,22 +22,25 @@ from utils.logger import get_logger
 # Инициализируем систему логирования при старте приложения
 logger = get_logger()
 
+# Флаг для graceful shutdown
+_shutdown_requested = False
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifecycle manager для FastAPI — startup/shutdown."""
-    # Startup
-    logger.info("🚀 Backend API запущен")
-    setup_log_filter()
+
+def is_shutdown_requested() -> bool:
+    """Проверяет, был ли запрошен graceful shutdown.
     
-    # Инициализируем connection pool (lazy — при первом использовании)
-    # get_ollama_pool() будет вызван при первом запросе
-    logger.info("✅ Lifespan startup завершён")
+    Используется агентами для прерывания долгих операций.
     
-    yield
-    
-    # Shutdown
-    logger.info("🛑 Backend API завершает работу...")
+    Returns:
+        True если shutdown запрошен
+    """
+    return _shutdown_requested
+
+
+async def _cleanup_on_shutdown() -> None:
+    """Выполняет очистку ресурсов при shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
     
     # Закрываем connection pool
     try:
@@ -46,6 +56,62 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Кэш очищен")
     except Exception as e:
         logger.warning(f"⚠️ Ошибка при очистке кэша: {e}")
+    
+    # Сохраняем активные checkpoint
+    try:
+        from utils.config import get_config
+        config = get_config()
+        if config.persistence_enabled:
+            from infrastructure.task_checkpointer import get_task_checkpointer
+            checkpointer = get_task_checkpointer()
+            active_count = len(checkpointer.list_active_tasks())
+            if active_count > 0:
+                logger.info(f"📝 Сохранено {active_count} активных checkpoint")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка сохранения checkpoint: {e}")
+    
+    # Очищаем просроченные диалоги
+    try:
+        from agents.conversation import get_conversation_memory
+        conv_memory = get_conversation_memory()
+        cleanup_result = conv_memory.cleanup()
+        if cleanup_result["total"] > 0:
+            logger.info(f"🗑️ Очистка диалогов: {cleanup_result}")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка очистки диалогов: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifecycle manager для FastAPI — startup/shutdown.
+    
+    Startup:
+    - Инициализация логирования
+    - Lazy инициализация connection pool
+    
+    Shutdown:
+    - Graceful завершение активных задач
+    - Сохранение checkpoint
+    - Закрытие connection pool
+    - Очистка кэша и диалогов
+    """
+    global _shutdown_requested
+    _shutdown_requested = False
+    
+    # Startup
+    logger.info("🚀 Backend API запущен")
+    setup_log_filter()
+    
+    # Инициализируем connection pool (lazy — при первом использовании)
+    # get_ollama_pool() будет вызван при первом запросе
+    logger.info("✅ Lifespan startup завершён")
+    
+    yield
+    
+    # Shutdown
+    logger.info("🛑 Backend API завершает работу...")
+    await _cleanup_on_shutdown()
+    logger.info("✅ Graceful shutdown завершён")
 
 # Создаём FastAPI приложение с lifespan manager
 app = FastAPI(

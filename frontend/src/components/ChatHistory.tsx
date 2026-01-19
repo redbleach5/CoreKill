@@ -158,9 +158,11 @@ export function ChatHistory({
     }
   }, [currentConversationId, fetchConversations])
 
-  // Генерация заголовка из превью
+  // Получение заголовка диалога (приоритет: title от backend, затем preview)
   const getTitle = (conv: ConversationPreview): string => {
+    // Заголовок теперь приходит с backend (первое сообщение пользователя)
     if (conv.title) return conv.title
+    // Fallback на preview если title отсутствует
     if (conv.preview) {
       const text = conv.preview.trim()
       return text.length > 40 ? text.slice(0, 40) + '...' : text

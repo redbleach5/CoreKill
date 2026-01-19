@@ -1,4 +1,13 @@
-"""Обёртка для работы с локальными LLM через Ollama."""
+"""Обёртка для работы с локальными LLM через Ollama.
+
+Поддерживает два режима работы:
+- Синхронный (generate) — для CLI и простых скриптов
+- Асинхронный (generate_async) — для FastAPI и многопользовательского режима
+
+Асинхронный режим использует asyncio.to_thread() для совместимости с существующим кодом,
+а также может использовать httpx через OllamaConnectionPool для лучшей производительности.
+"""
+import asyncio
 import ollama
 from typing import Optional, Dict, Any
 import time
@@ -235,3 +244,179 @@ class LocalLLM:
         error_msg = f"Ошибка Ollama chat после {self.max_retries + 1} попыток: {last_error}"
         logger.error(f"❌ {error_msg}", error=last_error)
         return ""
+    
+    # === ASYNC МЕТОДЫ ===
+    # Используют asyncio.to_thread() для совместимости с существующим синхронным кодом
+    # Это позволяет не блокировать event loop FastAPI при LLM запросах
+    
+    async def generate_async(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        num_predict: int = 4096,
+        **kwargs: Any
+    ) -> str:
+        """Асинхронная генерация текста на основе промпта.
+        
+        Использует asyncio.to_thread() для выполнения синхронного ollama.generate()
+        в отдельном потоке, не блокируя event loop.
+        
+        Args:
+            prompt: Текст промпта
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            num_predict: Максимальное количество токенов
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Сгенерированный текст. Пустая строка в случае ошибки.
+        """
+        return await asyncio.to_thread(
+            self.generate,
+            prompt,
+            temperature,
+            top_p,
+            num_predict,
+            **kwargs
+        )
+    
+    async def chat_async(
+        self,
+        messages: list[Dict[str, str]],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        **kwargs: Any
+    ) -> str:
+        """Асинхронная генерация ответа в формате чата.
+        
+        Использует asyncio.to_thread() для выполнения синхронного ollama.chat()
+        в отдельном потоке, не блокируя event loop.
+        
+        Args:
+            messages: Список сообщений
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Ответ модели. Пустая строка в случае ошибки.
+        """
+        return await asyncio.to_thread(
+            self.chat,
+            messages,
+            temperature,
+            top_p,
+            **kwargs
+        )
+
+
+class AsyncLocalLLM:
+    """Полностью асинхронный класс для работы с Ollama через httpx.
+    
+    Использует OllamaConnectionPool для HTTP/2 и connection pooling.
+    Рекомендуется для production и многопользовательского режима.
+    
+    Примечание: Требует инициализации пула через get_ollama_pool().
+    """
+    
+    def __init__(
+        self,
+        model: str,
+        temperature: float = 0.25,
+        top_p: float = 0.9,
+        num_predict: int = 4096
+    ) -> None:
+        """Инициализация AsyncLocalLLM.
+        
+        Args:
+            model: Название модели Ollama
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            num_predict: Максимальное количество токенов по умолчанию
+        """
+        self.model = model
+        self.temperature = temperature
+        self.top_p = top_p
+        self.num_predict = num_predict
+    
+    async def generate(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        num_predict: Optional[int] = None,
+        **kwargs: Any
+    ) -> str:
+        """Асинхронная генерация текста через httpx.
+        
+        Args:
+            prompt: Текст промпта
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            num_predict: Максимальное количество токенов
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Сгенерированный текст
+        """
+        from infrastructure.connection_pool import get_ollama_pool
+        
+        pool = await get_ollama_pool()
+        
+        options = {
+            "temperature": temperature if temperature is not None else self.temperature,
+            "top_p": top_p if top_p is not None else self.top_p,
+            "num_predict": num_predict if num_predict is not None else self.num_predict
+        }
+        
+        try:
+            result = await pool.generate(
+                model=self.model,
+                prompt=prompt,
+                options=options
+            )
+            return result.strip() if result else ""
+        except Exception as e:
+            logger.error(f"❌ AsyncLocalLLM ошибка: {e}", error=e)
+            return ""
+    
+    async def chat(
+        self,
+        messages: list[Dict[str, str]],
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        **kwargs: Any
+    ) -> str:
+        """Асинхронная генерация ответа в формате чата через httpx.
+        
+        Args:
+            messages: Список сообщений
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Ответ модели
+        """
+        from infrastructure.connection_pool import get_ollama_pool
+        
+        pool = await get_ollama_pool()
+        
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature if temperature is not None else self.temperature,
+                "top_p": top_p if top_p is not None else self.top_p
+            }
+        }
+        
+        try:
+            response = await pool.post("/api/chat", json=payload)
+            data = response.json()
+            return data.get("message", {}).get("content", "").strip()
+        except Exception as e:
+            logger.error(f"❌ AsyncLocalLLM chat ошибка: {e}", error=e)
+            return ""

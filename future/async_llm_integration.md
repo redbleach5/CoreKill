@@ -1,6 +1,6 @@
 # Интеграция асинхронного Ollama Connection Pool
 
-## Статус: Запланировано
+## Статус: ✅ РЕАЛИЗОВАНО
 
 ## Текущее состояние
 
@@ -108,34 +108,37 @@ async def lifespan(app: FastAPI):
 2. **Отладка**: Async код сложнее отлаживать
 3. **Тестирование**: Нужен pytest-asyncio
 
-## Когда делать
+## Реализация (выполнено)
 
-- Когда появится необходимость в многопользовательском режиме
-- Когда текущее решение станет узким местом (bottleneck)
-- После стабилизации основного функционала
+### Что сделано:
 
-## Файлы для изменения
+1. **AsyncLocalLLM** — полностью асинхронный класс в `infrastructure/local_llm.py`
+   - Использует `OllamaConnectionPool` с httpx
+   - HTTP/2 и connection pooling
+   
+2. **LocalLLM.generate_async()** — async метод для совместимости
+   - Использует `asyncio.to_thread()` для обёртки синхронного кода
+   - Не блокирует event loop
+
+3. **Async workflow_nodes.py** — все узлы переписаны на async
+   - `async def intent_node()`, `planner_node()`, `coder_node()` и т.д.
+   - LLM вызовы через `asyncio.to_thread()`
+   
+4. **Graceful shutdown** в `backend/api.py`
+   - Закрытие connection pool
+   - Сохранение checkpoint
+   - Очистка кэша и диалогов
+
+## Файлы изменённые
 
 ```
 infrastructure/
-├── connection_pool.py    # ✅ Готов
-├── async_local_llm.py    # Создать
-├── local_llm.py          # Deprecate или оставить для CLI
-├── workflow_nodes.py     # Переписать на async
+├── connection_pool.py    # ✅ Готов (был)
+├── local_llm.py          # ✅ Добавлены async методы + AsyncLocalLLM
+├── workflow_nodes.py     # ✅ Переписаны на async
 ├── workflow_graph.py     # Без изменений (LangGraph уже async)
 
-agents/
-├── intent.py             # Добавить async execute()
-├── planner.py            # Добавить async execute()
-├── researcher.py         # Добавить async execute()
-├── test_generator.py     # Добавить async execute()
-├── coder.py              # Добавить async execute()
-├── debugger.py           # Добавить async execute()
-├── reflection.py         # Добавить async execute()
-├── critic.py             # Добавить async execute()
-└── memory.py             # Без изменений (ChromaDB sync)
-
 backend/
-├── api.py                # Обновить lifespan
-└── routers/agent.py      # Уже async
+├── api.py                # ✅ Обновлён lifespan + graceful shutdown
+└── routers/agent.py      # Уже async (был)
 ```

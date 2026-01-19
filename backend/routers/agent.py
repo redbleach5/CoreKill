@@ -8,6 +8,7 @@
 - code: Полный workflow генерации кода (TDD)
 """
 import asyncio
+import re
 import uuid
 from typing import Dict, Any, Optional, AsyncGenerator, List
 from fastapi import APIRouter, HTTPException
@@ -1156,6 +1157,29 @@ async def get_settings() -> Dict[str, Any]:
     }
 
 
+def _get_conversation_title(messages: list) -> str:
+    """Генерирует заголовок диалога из первого сообщения пользователя.
+    
+    Args:
+        messages: Список сообщений диалога
+        
+    Returns:
+        Заголовок диалога (до 50 символов)
+    """
+    # Ищем первое сообщение пользователя
+    for msg in messages:
+        if msg.role == "user":
+            text = msg.content.strip()
+            # Убираем markdown разметку
+            text = re.sub(r'[#*_`~\[\]()>]', '', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            # Обрезаем до 50 символов
+            if len(text) > 50:
+                return text[:47] + '...'
+            return text if text else 'Новый диалог'
+    return 'Новый диалог'
+
+
 @router.get("/conversations")
 async def list_conversations() -> Dict[str, Any]:
     """Возвращает список диалогов.
@@ -1167,13 +1191,25 @@ async def list_conversations() -> Dict[str, Any]:
     
     conversations = []
     for conv_id, conv in conv_memory.conversations.items():
+        # Заголовок — первое сообщение пользователя
+        title = _get_conversation_title(conv.messages)
+        
+        # Preview — последнее сообщение (для поиска)
+        preview = ""
+        if conv.messages:
+            last_msg = conv.messages[-1].content[:100]
+            # Убираем markdown из preview тоже
+            preview = re.sub(r'[#*_`~\[\]()>]', '', last_msg)
+            preview = re.sub(r'\s+', ' ', preview).strip()
+        
         conversations.append({
             "id": conv_id,
             "created_at": conv.created_at.isoformat(),
             "updated_at": conv.updated_at.isoformat(),
             "message_count": len(conv.messages),
             "has_summary": conv.summary is not None,
-            "preview": conv.messages[-1].content[:100] if conv.messages else ""
+            "preview": preview,
+            "title": title  # Новое поле — заголовок диалога
         })
     
     # Сортируем по дате обновления (новые первые)

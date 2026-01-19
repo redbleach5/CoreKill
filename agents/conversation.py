@@ -159,6 +159,8 @@ class ConversationMemory:
     - Автоматическая суммаризация при превышении лимита
     - Персистентность на диск (опционально)
     - Получение контекста для LLM
+    - TTL для автоочистки старых диалогов
+    - Лимит на количество диалогов в памяти
     """
     
     SUMMARIZATION_PROMPT = """Суммаризируй следующий диалог в 2-3 предложения.
@@ -169,11 +171,17 @@ class ConversationMemory:
 
 Краткое содержание:"""
     
+    # Лимиты по умолчанию
+    DEFAULT_MAX_CONVERSATIONS = 100  # Максимум диалогов в памяти
+    DEFAULT_TTL_HOURS = 72  # Время жизни неактивного диалога в часах
+    
     def __init__(
         self,
         max_messages_before_summary: int = 20,
         persist_dir: Optional[str] = None,
-        summarization_model: Optional[str] = None
+        summarization_model: Optional[str] = None,
+        max_conversations: int = DEFAULT_MAX_CONVERSATIONS,
+        ttl_hours: int = DEFAULT_TTL_HOURS
     ):
         """Инициализирует ConversationMemory.
         
@@ -181,19 +189,30 @@ class ConversationMemory:
             max_messages_before_summary: Лимит сообщений до суммаризации
             persist_dir: Директория для сохранения (None = без персистентности)
             summarization_model: Модель для суммаризации (None = auto)
+            max_conversations: Максимальное количество диалогов в памяти
+            ttl_hours: Время жизни неактивного диалога в часах
         """
         self.max_messages = max_messages_before_summary
         self.persist_dir = Path(persist_dir) if persist_dir else None
         self.conversations: Dict[str, Conversation] = {}
         self._llm: Optional[LocalLLM] = None
         self._summarization_model = summarization_model
+        self.max_conversations = max_conversations
+        self.ttl_hours = ttl_hours
         
         # Создаём директорию если нужно
         if self.persist_dir:
             self.persist_dir.mkdir(parents=True, exist_ok=True)
             self._load_conversations()
         
-        logger.info(f"✅ ConversationMemory инициализирован (лимит: {max_messages_before_summary} сообщений)")
+        # Очищаем просроченные диалоги при старте
+        self._cleanup_expired()
+        
+        logger.info(
+            f"✅ ConversationMemory инициализирован "
+            f"(лимит: {max_messages_before_summary} сообщений, "
+            f"макс. диалогов: {max_conversations}, TTL: {ttl_hours}ч)"
+        )
     
     def _get_llm(self) -> LocalLLM:
         """Ленивая инициализация LLM для суммаризации."""
@@ -212,6 +231,9 @@ class ConversationMemory:
         """
         if conversation_id and conversation_id in self.conversations:
             return self.conversations[conversation_id]
+        
+        # Проверяем лимит перед созданием нового диалога
+        self._enforce_limit()
         
         # Создаём новый диалог
         new_id = conversation_id or str(uuid.uuid4())
@@ -375,6 +397,73 @@ class ConversationMemory:
                 filepath.unlink()
         
         logger.info("🗑️ Все диалоги очищены")
+    
+    def _cleanup_expired(self) -> int:
+        """Удаляет просроченные диалоги по TTL.
+        
+        Returns:
+            Количество удалённых диалогов
+        """
+        from datetime import timedelta
+        
+        now = datetime.utcnow()
+        ttl_delta = timedelta(hours=self.ttl_hours)
+        expired_ids = []
+        
+        for conv_id, conv in self.conversations.items():
+            if now - conv.updated_at > ttl_delta:
+                expired_ids.append(conv_id)
+        
+        for conv_id in expired_ids:
+            self.delete_conversation(conv_id)
+        
+        if expired_ids:
+            logger.info(f"🗑️ Удалено {len(expired_ids)} просроченных диалогов (TTL: {self.ttl_hours}ч)")
+        
+        return len(expired_ids)
+    
+    def _enforce_limit(self) -> int:
+        """Удаляет самые старые диалоги при превышении лимита.
+        
+        Returns:
+            Количество удалённых диалогов
+        """
+        if len(self.conversations) <= self.max_conversations:
+            return 0
+        
+        # Сортируем по времени обновления (старые первые)
+        sorted_convs = sorted(
+            self.conversations.items(),
+            key=lambda x: x[1].updated_at
+        )
+        
+        # Удаляем самые старые
+        to_remove = len(self.conversations) - self.max_conversations
+        removed = 0
+        
+        for conv_id, _ in sorted_convs[:to_remove]:
+            if self.delete_conversation(conv_id):
+                removed += 1
+        
+        if removed:
+            logger.info(f"🗑️ Удалено {removed} диалогов (превышен лимит {self.max_conversations})")
+        
+        return removed
+    
+    def cleanup(self) -> Dict[str, int]:
+        """Выполняет полную очистку: TTL + лимит.
+        
+        Returns:
+            Словарь с количеством удалённых диалогов по причине
+        """
+        expired = self._cleanup_expired()
+        over_limit = self._enforce_limit()
+        
+        return {
+            "expired": expired,
+            "over_limit": over_limit,
+            "total": expired + over_limit
+        }
 
 
 # Singleton
