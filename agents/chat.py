@@ -100,14 +100,14 @@ class ChatAgent:
         try:
             response = self.llm.generate(
                 prompt=full_prompt,
-                max_tokens=self.max_tokens
+                num_predict=self.max_tokens
             )
             
             logger.info(f"✅ ChatAgent: получен ответ ({len(response)} символов)")
             
             return ChatResponse(
                 content=response,
-                model_used=self.llm.model_name or "",
+                model_used=self.llm.model or "",
                 finish_reason="stop"
             )
             
@@ -229,15 +229,17 @@ class ChatAgent:
         )
 
 
-# Singleton для ChatAgent
-_chat_agent: Optional[ChatAgent] = None
+# Кэш ChatAgent по модели
+_chat_agents: dict[str, ChatAgent] = {}
 
 
 def get_chat_agent(
     model: Optional[str] = None,
     temperature: float = 0.3
 ) -> ChatAgent:
-    """Возвращает singleton экземпляр ChatAgent.
+    """Возвращает экземпляр ChatAgent для указанной модели.
+    
+    Кэширует агентов по модели для переиспользования.
     
     Args:
         model: Модель Ollama
@@ -246,14 +248,17 @@ def get_chat_agent(
     Returns:
         Экземпляр ChatAgent
     """
-    global _chat_agent
-    if _chat_agent is None:
-        _chat_agent = ChatAgent(model=model, temperature=temperature)
-    return _chat_agent
+    global _chat_agents
+    cache_key = f"{model or 'default'}_{temperature}"
+    
+    if cache_key not in _chat_agents:
+        _chat_agents[cache_key] = ChatAgent(model=model, temperature=temperature)
+    
+    return _chat_agents[cache_key]
 
 
 def reset_chat_agent() -> None:
-    """Сбрасывает singleton ChatAgent."""
-    global _chat_agent
-    _chat_agent = None
-    logger.info("🔄 ChatAgent сброшен")
+    """Сбрасывает кэш ChatAgent."""
+    global _chat_agents
+    _chat_agents.clear()
+    logger.info("🔄 ChatAgent кэш очищен")

@@ -2,8 +2,9 @@
 
 Поддерживает:
 - Выбор одной модели (текущая реализация)
+- Умный выбор по сложности задачи
+- Динамическое сканирование доступных моделей
 - Роевое использование моделей (будущее расширение)
-- Разные стратегии выбора моделей
 """
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any
@@ -13,9 +14,17 @@ from utils.model_checker import (
     get_any_available_model,
     get_light_model,
     get_coder_model,
-    get_all_available_models
+    get_all_available_models,
+    get_best_model_for_complexity,
+    scan_available_models,
+    invalidate_models_cache,
+    TaskComplexity,
+    ModelInfo
 )
 from utils.config import get_config
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 @dataclass
@@ -23,6 +32,7 @@ class ModelSelection:
     """Результат выбора модели."""
     model: str
     confidence: float = 1.0
+    reason: str = ""  # Почему выбрана эта модель
     metadata: Optional[Dict[str, Any]] = None
 
 
@@ -39,6 +49,7 @@ class ModelRouter(ABC):
     
     Позволяет реализовать разные стратегии выбора моделей:
     - Single model (текущая реализация)
+    - Complexity-based selection (умный выбор по сложности)
     - Model roster/ensemble (будущее расширение)
     """
     
@@ -54,10 +65,29 @@ class ModelRouter(ABC):
         Args:
             task_type: Тип задачи (intent, planning, coding, testing, reflection)
             preferred_model: Предпочтительная модель (если указана)
-            context: Дополнительный контекст для выбора
+            context: Дополнительный контекст для выбора (complexity, agent, etc.)
             
         Returns:
             ModelSelection с выбранной моделью
+        """
+        pass
+    
+    @abstractmethod
+    def select_model_for_complexity(
+        self,
+        complexity: TaskComplexity,
+        task_type: str = "coding",
+        preferred_model: Optional[str] = None
+    ) -> ModelSelection:
+        """Выбирает модель на основе сложности задачи.
+        
+        Args:
+            complexity: Сложность задачи (simple, medium, complex)
+            task_type: Тип задачи
+            preferred_model: Предпочтительная модель (если указана и подходит)
+            
+        Returns:
+            ModelSelection с оптимальной моделью
         """
         pass
     
@@ -68,7 +98,7 @@ class ModelRouter(ABC):
         preferred_models: Optional[List[str]] = None,
         context: Optional[Dict[str, Any]] = None
     ) -> Optional[ModelRosterSelection]:
-        """Выбирает рое моделей для задачи (опционально).
+        """Выбирает рой моделей для задачи (опционально).
         
         Args:
             task_type: Тип задачи
@@ -79,22 +109,52 @@ class ModelRouter(ABC):
             ModelRosterSelection или None если роевое использование отключено
         """
         pass
-
-
-class SimpleModelRouter(ModelRouter):
-    """Простая реализация роутера - выбирает одну модель.
     
-    Текущая реализация, совместимая с существующим кодом.
+    @abstractmethod
+    def refresh_models(self) -> List[ModelInfo]:
+        """Принудительно обновляет список доступных моделей.
+        
+        Returns:
+            Список информации о доступных моделях
+        """
+        pass
+
+
+class SmartModelRouter(ModelRouter):
+    """Умный роутер моделей с выбором по сложности задачи.
+    
+    Особенности:
+    - Динамическое сканирование моделей при старте
+    - Выбор модели по сложности задачи
+    - Приоритет качества для сложных задач
+    - Приоритет скорости для простых задач
     """
     
+    # Минимальное качество модели для каждой сложности
+    MIN_QUALITY_THRESHOLDS = {
+        TaskComplexity.SIMPLE: 0.3,   # Любая модель от 1.5B
+        TaskComplexity.MEDIUM: 0.55,  # Минимум 7B или хорошая coder
+        TaskComplexity.COMPLEX: 0.7,  # Минимум 7B coder или 13B+
+    }
+    
     def __init__(self, enable_roster: bool = False) -> None:
-        """Инициализация простого роутера.
+        """Инициализация умного роутера.
         
         Args:
             enable_roster: Включить поддержку роя моделей (по умолчанию False)
         """
         self.enable_roster = enable_roster
         self.config = get_config()
+        # Сканируем модели при инициализации
+        self._models = scan_available_models(force_refresh=True)
+        logger.info(f"🔍 SmartModelRouter инициализирован, найдено {len(self._models)} моделей")
+    
+    def refresh_models(self) -> List[ModelInfo]:
+        """Принудительно обновляет список доступных моделей."""
+        invalidate_models_cache()
+        self._models = scan_available_models(force_refresh=True)
+        logger.info(f"🔄 Модели обновлены, найдено {len(self._models)} моделей")
+        return list(self._models.values())
     
     def select_model(
         self,
@@ -102,45 +162,58 @@ class SimpleModelRouter(ModelRouter):
         preferred_model: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None
     ) -> ModelSelection:
-        """Выбирает одну модель для задачи."""
+        """Выбирает модель для задачи с учётом контекста.
+        
+        Если в context передана complexity, использует её для умного выбора.
+        """
+        context = context or {}
+        
         # Если указана предпочтительная модель и она доступна, используем её
         if preferred_model and check_model_available(preferred_model):
-            return ModelSelection(model=preferred_model, confidence=1.0)
+            return ModelSelection(
+                model=preferred_model, 
+                confidence=1.0,
+                reason="Указана пользователем"
+            )
         
-        # Выбираем модель в зависимости от типа задачи
+        # Если передана сложность в контексте, используем умный выбор
+        complexity = context.get("complexity")
+        if complexity and isinstance(complexity, TaskComplexity):
+            return self.select_model_for_complexity(
+                complexity=complexity,
+                task_type=task_type,
+                preferred_model=preferred_model
+            )
+        
+        # Для intent и planning используем лёгкие модели (скорость важнее)
         if task_type in ["intent", "planning"]:
-            # Для быстрых операций предпочитаем легкие модели
             model = get_light_model()
             if model:
-                return ModelSelection(model=model, confidence=0.9)
+                return ModelSelection(
+                    model=model, 
+                    confidence=0.9,
+                    reason="Лёгкая модель для быстрых операций"
+                )
         
-        # Для задач генерации кода используем специализированные coder модели
+        # Для генерации кода выбираем лучшую coder модель
         if task_type in ["coding", "testing", "reflection", "debug"]:
-            # Сначала пробуем get_coder_model() - он выбирает оптимальную модель
-            coder = get_coder_model()
-            if coder:
-                return ModelSelection(model=coder, confidence=0.95)
-            
-            # Fallback на конфиг
-            preferred = self.config.default_model
-            fallback = self.config.fallback_model
-            
-            if check_model_available(preferred):
-                return ModelSelection(model=preferred, confidence=0.85)
-            elif check_model_available(fallback):
-                return ModelSelection(model=fallback, confidence=0.75)
+            # По умолчанию предполагаем medium сложность для кода
+            return self.select_model_for_complexity(
+                complexity=TaskComplexity.MEDIUM,
+                task_type=task_type,
+                preferred_model=preferred_model
+            )
         
-        # Используем любую доступную модель
+        # Fallback: любая доступная модель
         model = get_any_available_model()
         if model:
-            return ModelSelection(model=model, confidence=0.7)
+            return ModelSelection(
+                model=model, 
+                confidence=0.7,
+                reason="Fallback: любая доступная модель"
+            )
         
-        # Последний fallback - пробуем модель из конфига, если она доступна
-        config_model = preferred_model or self.config.default_model
-        if config_model and check_model_available(config_model):
-            return ModelSelection(model=config_model, confidence=0.5)
-        
-        # Если ничего не найдено, выбрасываем исключение - модель обязательна
+        # Если ничего не найдено
         available = get_all_available_models()
         if not available:
             raise RuntimeError(
@@ -148,8 +221,180 @@ class SimpleModelRouter(ModelRouter):
                 "Установите хотя бы одну модель через: ollama pull <model_name>"
             )
         
-        # Если дошли сюда, что-то пошло не так, но модели есть
-        return ModelSelection(model=available[0], confidence=0.3)
+        return ModelSelection(
+            model=available[0], 
+            confidence=0.3,
+            reason="Крайний fallback"
+        )
+    
+    def select_model_for_complexity(
+        self,
+        complexity: TaskComplexity,
+        task_type: str = "coding",
+        preferred_model: Optional[str] = None
+    ) -> ModelSelection:
+        """Выбирает оптимальную модель на основе сложности задачи.
+        
+        Логика:
+        - SIMPLE: быстрая модель (1.5B-4B), скорость важнее качества
+        - MEDIUM: баланс (7B coder), хорошее качество и приемлемая скорость
+        - COMPLEX: максимальное качество (7B+ coder или 13B+), качество важнее скорости
+        
+        Учитывает hardware лимиты из конфига:
+        - max_model_vram_gb: максимальный размер модели
+        - allow_heavy_models: разрешить 30B+ модели
+        - allow_ultra_models: разрешить 100B+ модели
+        """
+        # Обновляем модели для актуальности
+        self._models = scan_available_models()
+        
+        if not self._models:
+            raise RuntimeError("Нет доступных моделей Ollama")
+        
+        # Фильтруем модели по hardware лимитам
+        available_models = self._filter_by_hardware_limits(self._models)
+        
+        if not available_models:
+            logger.warning("⚠️ Все модели отфильтрованы по hardware лимитам, используем все доступные")
+            available_models = self._models
+        
+        # Если указана предпочтительная модель, проверяем её качество
+        if preferred_model and preferred_model in available_models:
+            model_info = available_models[preferred_model]
+            min_quality = self.MIN_QUALITY_THRESHOLDS[complexity]
+            
+            if model_info.estimated_quality >= min_quality:
+                logger.info(
+                    f"✅ Используется предпочтительная модель {preferred_model} "
+                    f"(качество {model_info.estimated_quality:.2f} >= {min_quality})"
+                )
+                return ModelSelection(
+                    model=preferred_model,
+                    confidence=0.95,
+                    reason=f"Предпочтительная модель подходит для {complexity.value} задачи",
+                    metadata={"quality": model_info.estimated_quality, "tier": model_info.tier}
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Модель {preferred_model} (качество {model_info.estimated_quality:.2f}) "
+                    f"недостаточна для {complexity.value} задачи (требуется >= {min_quality})"
+                )
+        
+        # Выбираем лучшую модель для сложности с учётом фильтров
+        best_model = self._select_best_from_filtered(
+            available_models,
+            complexity=complexity,
+            prefer_coder=(task_type in ["coding", "testing", "debug"])
+        )
+        
+        if best_model:
+            model_info = available_models.get(best_model)
+            quality = model_info.estimated_quality if model_info else 0.5
+            tier = model_info.tier if model_info else "unknown"
+            
+            logger.info(
+                f"🤖 Выбрана модель {best_model} для {complexity.value} задачи "
+                f"(качество: {quality:.2f}, tier: {tier})"
+            )
+            
+            return ModelSelection(
+                model=best_model,
+                confidence=0.9,
+                reason=f"Оптимальная модель для {complexity.value} задачи",
+                metadata={"quality": quality, "complexity": complexity.value, "tier": tier}
+            )
+        
+        # Крайний fallback
+        first_model = list(available_models.keys())[0]
+        return ModelSelection(
+            model=first_model,
+            confidence=0.5,
+            reason="Fallback: первая доступная модель"
+        )
+    
+    def _filter_by_hardware_limits(
+        self, 
+        models: Dict[str, ModelInfo]
+    ) -> Dict[str, ModelInfo]:
+        """Фильтрует модели по hardware лимитам из конфига.
+        
+        Args:
+            models: Словарь моделей
+            
+        Returns:
+            Отфильтрованный словарь моделей
+        """
+        max_vram = self.config.max_model_vram_gb
+        allow_heavy = self.config.allow_heavy_models
+        allow_ultra = self.config.allow_ultra_models
+        
+        filtered = {}
+        for name, info in models.items():
+            # Пропускаем embed модели
+            if 'embed' in name.lower():
+                continue
+            
+            # Проверяем VRAM лимит
+            if max_vram > 0 and info.estimated_vram_gb > max_vram:
+                logger.debug(f"⏭️ Модель {name} пропущена: VRAM {info.estimated_vram_gb}GB > лимит {max_vram}GB")
+                continue
+            
+            # Проверяем tier лимиты
+            if info.tier == 'heavy' and not allow_heavy:
+                logger.debug(f"⏭️ Модель {name} пропущена: heavy модели отключены")
+                continue
+            
+            if info.tier == 'ultra' and not allow_ultra:
+                logger.debug(f"⏭️ Модель {name} пропущена: ultra модели отключены")
+                continue
+            
+            filtered[name] = info
+        
+        return filtered
+    
+    def _select_best_from_filtered(
+        self,
+        models: Dict[str, ModelInfo],
+        complexity: TaskComplexity,
+        prefer_coder: bool = True
+    ) -> Optional[str]:
+        """Выбирает лучшую модель из отфильтрованного списка.
+        
+        Args:
+            models: Отфильтрованные модели
+            complexity: Сложность задачи
+            prefer_coder: Предпочитать coder модели
+            
+        Returns:
+            Название лучшей модели
+        """
+        if not models:
+            return None
+        
+        candidates = list(models.values())
+        min_quality = self.MIN_QUALITY_THRESHOLDS[complexity]
+        
+        # Фильтруем по минимальному качеству
+        suitable = [m for m in candidates if m.estimated_quality >= min_quality]
+        
+        if not suitable:
+            # Берём лучшую из доступных
+            suitable = candidates
+        
+        # Для coder задач предпочитаем coder модели
+        if prefer_coder:
+            coder_models = [m for m in suitable if m.is_coder]
+            if coder_models:
+                suitable = coder_models
+        
+        # Для SIMPLE выбираем минимально подходящую (быстрее)
+        # Для MEDIUM/COMPLEX выбираем лучшую
+        if complexity == TaskComplexity.SIMPLE:
+            best = min(suitable, key=lambda m: m.estimated_quality)
+        else:
+            best = max(suitable, key=lambda m: m.estimated_quality)
+        
+        return best.name
     
     def select_model_roster(
         self,
@@ -157,13 +402,16 @@ class SimpleModelRouter(ModelRouter):
         preferred_models: Optional[List[str]] = None,
         context: Optional[Dict[str, Any]] = None
     ) -> Optional[ModelRosterSelection]:
-        """Выбирает рое моделей (опционально, по умолчанию отключено)."""
+        """Выбирает рой моделей (опционально, по умолчанию отключено)."""
         if not self.enable_roster:
             return None
         
         # Будущая реализация роя моделей
-        # Пока возвращаем None, чтобы не нарушать текущую архитектуру
         return None
+
+
+# Legacy alias для обратной совместимости
+SimpleModelRouter = SmartModelRouter
 
 
 # Глобальный экземпляр роутера (можно заменить на другую реализацию)
@@ -172,6 +420,8 @@ _default_router: Optional[ModelRouter] = None
 
 def get_model_router() -> ModelRouter:
     """Возвращает глобальный экземпляр ModelRouter.
+    
+    Использует SmartModelRouter с умным выбором по сложности.
     
     Returns:
         ModelRouter экземпляр
@@ -182,7 +432,7 @@ def get_model_router() -> ModelRouter:
         config = get_config()
         # Проверяем конфиг на наличие настройки роя моделей
         enable_roster = getattr(config, 'enable_model_roster', False)
-        _default_router = SimpleModelRouter(enable_roster=enable_roster)
+        _default_router = SmartModelRouter(enable_roster=enable_roster)
     
     return _default_router
 
@@ -195,3 +445,13 @@ def set_model_router(router: ModelRouter) -> None:
     """
     global _default_router
     _default_router = router
+
+
+def reset_model_router() -> None:
+    """Сбрасывает глобальный роутер для пересоздания.
+    
+    Полезно после добавления/удаления моделей Ollama.
+    """
+    global _default_router
+    _default_router = None
+    invalidate_models_cache()

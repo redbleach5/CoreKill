@@ -2,11 +2,11 @@
 
 ## Требования
 
-- Python 3.9+
-- Node.js 16+
-- Ollama (для локальных LLM моделей)
-- 8GB+ RAM (рекомендуется 16GB)
-- 50GB+ свободного места на диске
+- **Python 3.12+**
+- **Node.js 18+**
+- **Ollama** (локальные LLM модели)
+- 8GB+ RAM (рекомендуется 16GB для 7B моделей)
+- 20GB+ места на диске (для моделей)
 
 ## Development
 
@@ -17,173 +17,136 @@
 pip install -r requirements.txt
 
 # Frontend
-cd frontend
-npm install
-cd ..
+cd frontend && npm install && cd ..
 ```
 
-### 2. Запуск Ollama
+### 2. Установка моделей Ollama
 
 ```bash
-# Скачайте и запустите Ollama
+# Запустите Ollama
 ollama serve
 
-# В другом терминале, скачайте модели
-ollama pull codellama:7b
-ollama pull phi3:mini
-ollama pull nomic-embed-text
+# Установите модели (в другом терминале)
+ollama pull qwen2.5-coder:7b    # Основная модель для кода
+ollama pull phi3:mini            # Лёгкая модель для chat
+ollama pull nomic-embed-text     # Embeddings для RAG
+
+# Опционально: лёгкая fallback модель
+ollama pull tinyllama:1.1b
 ```
 
-### 3. Запуск приложения
+### 3. Запуск
 
 ```bash
-# Backend (в одном терминале)
 python run.py
-
-# Frontend (в другом терминале)
-cd frontend
-npm run dev
 ```
 
-Приложение будет доступно на http://localhost:5173
+Приложение: http://localhost:5173
 
 ## Production
 
 ### 1. Подготовка сервера
 
 ```bash
-# Обновляем систему
+# Ubuntu/Debian
 sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3.12 python3.12-venv nodejs npm nginx
 
-# Устанавливаем зависимости
-sudo apt install -y python3.11 python3.11-venv nodejs npm nginx supervisor
-
-# Создаём пользователя для приложения
+# Создаём пользователя
 sudo useradd -m -s /bin/bash cursor-killer
 sudo su - cursor-killer
 ```
 
-### 2. Установка приложения
+### 2. Установка Ollama
 
 ```bash
-# Клонируем репозиторий
-git clone https://github.com/redbleach5/-2121.git cursor-killer
-cd cursor-killer
+curl -fsSL https://ollama.com/install.sh | sh
 
-# Создаём виртуальное окружение
-python3.11 -m venv venv
-source venv/bin/activate
+# Запуск как сервис
+sudo systemctl enable ollama
+sudo systemctl start ollama
 
-# Устанавливаем зависимости
-pip install -r requirements.txt
-
-# Собираем frontend
-cd frontend
-npm install
-npm run build
-cd ..
+# Установка моделей
+ollama pull qwen2.5-coder:7b
+ollama pull phi3:mini
+ollama pull nomic-embed-text
 ```
 
-### 3. Конфигурация
+### 3. Установка приложения
 
 ```bash
-# Копируем пример конфигурации
-cp .env.example .env
+git clone <repository-url> cursor-killer
+cd cursor-killer
 
-# Редактируем .env для production
+# Виртуальное окружение
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+# Зависимости
+pip install -r requirements.txt
+
+# Frontend build
+cd frontend && npm install && npm run build && cd ..
+```
+
+### 4. Конфигурация
+
+```bash
+# Копируем и редактируем конфиг
+cp .env.example .env
 nano .env
 ```
 
 Важные переменные для production:
 
-```env
+```bash
 ENVIRONMENT=production
-ALLOWED_ORIGINS=https://yourdomain.com
 DEBUG=false
-LOG_LEVEL=WARNING
+ALLOWED_ORIGINS=https://your-domain.com
 ```
 
-### 4. Настройка Ollama
+### 5. Systemd сервис
 
 ```bash
-# Устанавливаем Ollama
-curl https://ollama.ai/install.sh | sh
-
-# Запускаем как сервис
-sudo systemctl start ollama
-sudo systemctl enable ollama
-
-# Скачиваем модели
-ollama pull codellama:7b
-ollama pull phi3:mini
-ollama pull nomic-embed-text
+sudo nano /etc/systemd/system/cursor-killer.service
 ```
-
-### 5. Настройка Supervisor для Backend
-
-```bash
-# Создаём конфиг supervisor
-sudo nano /etc/supervisor/conf.d/cursor-killer.conf
-```
-
-Содержимое:
 
 ```ini
-[program:cursor-killer-backend]
-directory=/home/cursor-killer/cursor-killer
-command=/home/cursor-killer/cursor-killer/venv/bin/uvicorn backend.api:app --host 127.0.0.1 --port 8000 --workers 4
-user=cursor-killer
-autostart=true
-autorestart=true
-stderr_logfile=/var/log/cursor-killer-backend.err.log
-stdout_logfile=/var/log/cursor-killer-backend.out.log
-environment=ENVIRONMENT=production
+[Unit]
+Description=Cursor Killer Backend
+After=network.target ollama.service
+
+[Service]
+Type=simple
+User=cursor-killer
+WorkingDirectory=/home/cursor-killer/cursor-killer
+Environment="PATH=/home/cursor-killer/cursor-killer/.venv/bin"
+ExecStart=/home/cursor-killer/cursor-killer/.venv/bin/uvicorn backend.api:app --host 0.0.0.0 --port 8000 --workers 4
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Запуск:
-
 ```bash
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo supervisorctl start cursor-killer-backend
+sudo systemctl daemon-reload
+sudo systemctl enable cursor-killer
+sudo systemctl start cursor-killer
 ```
 
-### 6. Настройка Nginx
+### 6. Nginx reverse proxy
 
 ```bash
-# Создаём конфиг Nginx
 sudo nano /etc/nginx/sites-available/cursor-killer
 ```
 
-Содержимое:
-
 ```nginx
-upstream cursor_killer_backend {
-    server 127.0.0.1:8000;
-}
-
 server {
     listen 80;
-    server_name yourdomain.com;
+    server_name your-domain.com;
 
-    # Редирект на HTTPS
-    return 301 https://$server_name$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name yourdomain.com;
-
-    ssl_certificate /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
-
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-
-    # Frontend
+    # Frontend (static files)
     location / {
         root /home/cursor-killer/cursor-killer/frontend/dist;
         try_files $uri $uri/ /index.html;
@@ -191,166 +154,146 @@ server {
 
     # Backend API
     location /api {
-        proxy_pass http://cursor_killer_backend;
+        proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection 'upgrade';
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # SSE support
         proxy_buffering off;
-        proxy_request_buffering off;
-    }
-
-    # Health check
-    location /health {
-        proxy_pass http://cursor_killer_backend;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
     }
 }
 ```
-
-Активируем сайт:
 
 ```bash
 sudo ln -s /etc/nginx/sites-available/cursor-killer /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl restart nginx
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 7. SSL сертификат (Let's Encrypt)
+### 7. SSL (Let's Encrypt)
 
 ```bash
-# Устанавливаем Certbot
-sudo apt install -y certbot python3-certbot-nginx
-
-# Получаем сертификат
-sudo certbot certonly --nginx -d yourdomain.com
-
-# Автоматическое обновление
-sudo systemctl enable certbot.timer
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d your-domain.com
 ```
 
-### 8. Мониторинг
+## Docker (альтернатива)
+
+### Dockerfile
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Код
+COPY . .
+
+# Frontend build
+RUN cd frontend && npm install && npm run build
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+    depends_on:
+      - ollama
+
+volumes:
+  ollama_data:
+```
+
+## Hardware рекомендации
+
+| Модель | RAM | VRAM | Рекомендуется для |
+|--------|-----|------|-------------------|
+| tinyllama:1.1b | 4GB | 2GB | Быстрые ответы, chat |
+| phi3:mini | 8GB | 4GB | Chat, простые задачи |
+| qwen2.5-coder:7b | 16GB | 8GB | Генерация кода |
+| qwen2.5-coder:14b | 32GB | 16GB | Сложные задачи |
+| qwen2.5-coder:32b | 64GB | 24GB | Enterprise |
+
+## Мониторинг
+
+### Логи
 
 ```bash
-# Проверяем статус приложения
-sudo supervisorctl status cursor-killer-backend
+# Backend логи
+journalctl -u cursor-killer -f
 
-# Просмотр логов
-tail -f /var/log/cursor-killer-backend.out.log
-tail -f /var/log/cursor-killer-backend.err.log
+# Ollama логи
+journalctl -u ollama -f
 
-# Проверяем health
-curl https://yourdomain.com/health
+# Приложение логи
+tail -f logs/app.jsonl | jq
 ```
 
-## Масштабирование
-
-### Несколько инстансов Backend
-
-```ini
-[program:cursor-killer-backend-1]
-command=/home/cursor-killer/cursor-killer/venv/bin/uvicorn backend.api:app --host 127.0.0.1 --port 8001 --workers 2
-
-[program:cursor-killer-backend-2]
-command=/home/cursor-killer/cursor-killer/venv/bin/uvicorn backend.api:app --host 127.0.0.1 --port 8002 --workers 2
-
-[program:cursor-killer-backend-3]
-command=/home/cursor-killer/cursor-killer/venv/bin/uvicorn backend.api:app --host 127.0.0.1 --port 8003 --workers 2
-```
-
-Обновляем Nginx:
-
-```nginx
-upstream cursor_killer_backend {
-    server 127.0.0.1:8001;
-    server 127.0.0.1:8002;
-    server 127.0.0.1:8003;
-}
-```
-
-## Резервное копирование
+### Health check
 
 ```bash
-# Создаём скрипт резервного копирования
-cat > /home/cursor-killer/backup.sh << 'EOF'
-#!/bin/bash
-BACKUP_DIR="/backups/cursor-killer"
-mkdir -p $BACKUP_DIR
+# Backend
+curl http://localhost:8000/api/health
 
-# Резервируем базу данных
-tar -czf $BACKUP_DIR/db-$(date +%Y%m%d-%H%M%S).tar.gz /home/cursor-killer/cursor-killer/data/
-
-# Удаляем старые резервные копии (старше 30 дней)
-find $BACKUP_DIR -name "*.tar.gz" -mtime +30 -delete
-EOF
-
-chmod +x /home/cursor-killer/backup.sh
-
-# Добавляем в cron (ежедневно в 2 часа ночи)
-(crontab -l 2>/dev/null; echo "0 2 * * * /home/cursor-killer/backup.sh") | crontab -
-```
-
-## Обновление
-
-```bash
-cd /home/cursor-killer/cursor-killer
-
-# Получаем обновления
-git pull origin main
-
-# Обновляем зависимости
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Собираем frontend
-cd frontend
-npm install
-npm run build
-cd ..
-
-# Перезагружаем приложение
-sudo supervisorctl restart cursor-killer-backend
+# Ollama
+curl http://localhost:11434/api/tags
 ```
 
 ## Troubleshooting
 
-### Проблема: Ollama не подключается
+### Ollama не запускается
 
 ```bash
-# Проверяем, запущена ли Ollama
-curl http://localhost:11434/api/tags
+# Проверьте статус
+sudo systemctl status ollama
 
-# Перезагружаем Ollama
+# Перезапустите
 sudo systemctl restart ollama
 ```
 
-### Проблема: Недостаточно памяти
+### Медленная генерация
+
+1. Проверьте что используется GPU: `nvidia-smi`
+2. Уменьшите размер модели в `config.toml`
+3. Включите `allow_heavy_models = false` для использования меньших моделей
+
+### Out of Memory
 
 ```bash
-# Проверяем использование памяти
-free -h
-
-# Увеличиваем swap
-sudo fallocate -l 4G /swapfile
+# Увеличьте swap
+sudo fallocate -l 16G /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 ```
 
-### Проблема: Медленная работа
+### CORS ошибки
 
-```bash
-# Проверяем логи
-tail -f /var/log/cursor-killer-backend.out.log
-
-# Увеличиваем количество workers
-# В supervisor config измените --workers 4 на --workers 8
-```
-
-## Лицензия
-
-MIT
+Проверьте `ALLOWED_ORIGINS` в `.env` — должен содержать URL фронтенда.

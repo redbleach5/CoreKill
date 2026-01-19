@@ -2,236 +2,240 @@
 
 ## Обзор
 
-Cursor Killer — это локальная многоагентная система для генерации и редактирования кода. Система использует LangGraph для управления workflow и Ollama для локальных LLM моделей.
+Cursor Killer — локальная многоагентная система для генерации кода с гибридным UX и умным выбором моделей. Использует LangGraph для workflow и Ollama для LLM.
+
+## Ключевые принципы
+
+- **Dependency Inversion** — зависимости инжектируются через `backend/dependencies.py`
+- **Явные контракты** — каждый слой имеет чёткий интерфейс
+- **UI не знает о реализации агентов** — frontend общается только через API
+- **Любая фича отключаема** — через `config.toml` или переменные окружения
+- **Масштабируемость** — поддержка моделей от 1B до 405B
 
 ## Структура проекта
 
 ```
 cursor-killer/
-├── agents/              # Агенты системы
-│   ├── intent.py       # Определение намерения пользователя
-│   ├── planner.py      # Планирование выполнения задачи
-│   ├── researcher.py   # Сбор контекста (RAG + веб)
-│   ├── test_generator.py  # Генерация тестов (TDD)
-│   ├── coder.py        # Генерация кода
-│   ├── debugger.py     # Анализ ошибок и self-healing
-│   ├── critic.py       # Критический анализ кода
-│   ├── reflection.py   # Рефлексия и оценка
-│   └── memory.py       # Система памяти (RAG)
-├── backend/            # FastAPI backend
-│   ├── api.py         # Главное приложение
-│   ├── dependencies.py # Управление зависимостями (DI)
-│   ├── error_handler.py # Обработка ошибок и retry логика
-│   ├── validators.py   # Валидация входных данных
-│   ├── types.py       # Типы и модели данных
-│   ├── sse_manager.py # Управление SSE событиями
-│   ├── sse_helpers.py # Вспомогательные функции SSE
-│   ├── middleware/
-│   │   ├── log_filter.py
-│   │   └── rate_limiter.py  # Rate limiting для защиты
+├── agents/                 # Агенты системы
+│   ├── intent.py           # Определение намерения + сложности
+│   ├── chat.py             # Агент для диалогов (chat режим)
+│   ├── conversation.py     # Управление историей диалогов
+│   ├── planner.py          # Планирование задачи
+│   ├── researcher.py       # Сбор контекста (RAG + веб)
+│   ├── test_generator.py   # Генерация тестов (TDD)
+│   ├── coder.py            # Генерация кода
+│   ├── debugger.py         # Self-healing
+│   ├── critic.py           # Критический анализ
+│   ├── reflection.py       # Рефлексия и оценка
+│   └── memory.py           # Система памяти (RAG)
+├── backend/                # FastAPI backend
+│   ├── api.py              # Главное приложение
+│   ├── dependencies.py     # Dependency Injection
+│   ├── types.py            # Типы и модели данных
+│   ├── sse_manager.py      # Управление SSE
 │   └── routers/
-│       └── agent.py    # API endpoints
-├── frontend/          # React + TypeScript + Vite
+│       └── agent.py        # API endpoints + роутинг режимов
+├── frontend/               # React + TypeScript + Vite
 │   └── src/
-│       ├── App.tsx     # Главный компонент
-│       ├── components/ # React компоненты
-│       ├── hooks/      # React хуки (useAgentStream)
-│       └── lib/        # Утилиты
-├── infrastructure/    # Инфраструктура
-│   ├── local_llm.py    # Интеграция с Ollama
-│   ├── model_router.py # Маршрутизация моделей
-│   ├── prompt_enhancer.py # Улучшение промптов
-│   ├── rag.py         # Retrieval-Augmented Generation
-│   ├── web_search.py  # Веб-поиск
-│   ├── cache.py       # Кэширование результатов
-│   ├── workflow_state.py  # State схема для LangGraph
-│   ├── workflow_nodes.py  # Узлы графа
-│   ├── workflow_edges.py  # Условные переходы
-│   └── workflow_graph.py  # Граф LangGraph
-├── utils/            # Утилиты
-│   ├── config.py      # Конфигурация (TOML)
-│   ├── env_config.py  # Конфигурация из переменных окружения
-│   ├── logger.py      # Логирование
-│   ├── model_checker.py # Проверка доступности моделей
-│   ├── token_counter.py # Подсчёт токенов
-│   ├── validation.py  # Валидация
-│   └── artifact_saver.py # Сохранение артефактов
-├── tests/            # Тесты
-├── config.toml       # Конфигурация (TOML)
-├── .env.example      # Пример переменных окружения
-└── requirements.txt  # Python зависимости
+│       ├── App.tsx         # Главный компонент
+│       ├── components/
+│       │   ├── AgentProgress.tsx  # Прогресс workflow
+│       │   └── ...
+│       └── hooks/
+│           └── useAgentStream.ts  # SSE hook
+├── infrastructure/         # Инфраструктура
+│   ├── local_llm.py        # Интеграция с Ollama
+│   ├── model_router.py     # SmartModelRouter — выбор модели по сложности
+│   ├── rag.py              # RAG с ChromaDB
+│   ├── web_search.py       # Веб-поиск
+│   ├── workflow_state.py   # State схема LangGraph
+│   ├── workflow_nodes.py   # Узлы графа
+│   ├── workflow_edges.py   # Условные переходы
+│   └── workflow_graph.py   # Граф LangGraph
+├── utils/
+│   ├── config.py           # Конфигурация из config.toml
+│   ├── model_checker.py    # Сканирование моделей Ollama
+│   └── ...
+└── config.toml             # Конфигурация
 ```
 
-## Основные компоненты
+## Гибридная система режимов
 
-### 1. Агенты (agents/)
+### Режимы взаимодействия
 
-Каждый агент отвечает за определённый этап выполнения задачи:
+```
+┌─────────────────────────────────────────────────────────┐
+│                    stream_task_results                   │
+│                                                          │
+│  mode=auto ──► IntentAgent.is_greeting_fast() ──► chat  │
+│           │                                              │
+│           └─► code_keywords? ──► code                   │
+│           │                                              │
+│           └─► LLM determine_intent() ──► recommended    │
+│                                                          │
+│  mode=chat ──────────────────────────────► run_chat_stream │
+│  mode=code ──────────────────────────────► run_workflow_stream │
+└─────────────────────────────────────────────────────────┘
+```
 
-- **IntentAgent**: Определяет тип намерения пользователя (create, modify, debug, etc.)
-- **PlannerAgent**: Создаёт план выполнения задачи
-- **ResearcherAgent**: Собирает контекст из RAG и веб-поиска
-- **TestGeneratorAgent**: Генерирует pytest тесты (TDD подход)
-- **CoderAgent**: Генерирует рабочий код на основе тестов
-- **DebuggerAgent**: Анализирует ошибки и исправляет код (self-healing)
-- **CriticAgent**: Проводит критический анализ кода
-- **ReflectionAgent**: Оценивает качество результатов
-- **MemoryAgent**: Управляет памятью и RAG
+### Умный выбор моделей (SmartModelRouter)
 
-### 2. Backend (backend/)
+```python
+# Логика выбора модели по сложности:
+SIMPLE  → минимально подходящая модель (быстрота)   → phi3:mini, gemma:1b
+MEDIUM  → баланс качества и скорости                → qwen2.5-coder:7b
+COMPLEX → максимальное качество                     → 13B+, 30B+, 70B+
+```
 
-FastAPI приложение с поддержкой:
+**Определение сложности:**
+- `IntentAgent._estimate_complexity_heuristic()` — по ключевым словам
+- `IntentAgent.determine_intent()` — через LLM
+- Технические термины (async, decorator, etc.) → MEDIUM
+- Системные задачи (игра, приложение) → COMPLEX
 
-- **API Endpoints**: REST API для управления задачами
-- **SSE Streaming**: Real-time стриминг прогресса
-- **Dependency Injection**: Управление зависимостями
-- **Error Handling**: Обработка ошибок и retry логика
-- **Rate Limiting**: Защита от DoS атак
-- **Validation**: Валидация входных данных
-- **CORS**: Безопасная работа с frontend
+**Hardware лимиты:**
+```toml
+[hardware]
+max_model_vram_gb = 0       # 0 = без лимита
+allow_heavy_models = true   # 30-70B модели
+allow_ultra_models = false  # 100B+ модели
+```
 
-### 3. Frontend (frontend/)
-
-React приложение с:
-
-- **Real-time UI**: Обновление интерфейса через SSE
-- **Chat Interface**: Интерфейс чата для взаимодействия
-- **Progress Tracking**: Отслеживание прогресса выполнения
-- **Code Display**: Красивый вывод сгенерированного кода
-- **Settings Panel**: Настройка параметров
-
-### 4. Инфраструктура (infrastructure/)
-
-- **LocalLLM**: Интеграция с Ollama
-- **ModelRouter**: Маршрутизация запросов к моделям
-- **PromptEnhancer**: Динамическое улучшение промптов
-- **RAG**: Retrieval-Augmented Generation с ChromaDB
-- **WebSearch**: Интеграция с веб-поиском
-- **Cache**: Кэширование результатов
-- **LangGraph**: Workflow управление
-
-## Workflow выполнения
+## Workflow Code режима
 
 ```
 Пользовательский запрос
     ↓
-[Intent Agent] → Определение намерения
+[Intent Agent] → greeting/help? → END (быстрый ответ)
     ↓
-[Planner Agent] → Создание плана
+[Planner Agent] → план выполнения
     ↓
-[Researcher Agent] → Сбор контекста
+[Researcher Agent] → RAG → Web Search
     ↓
-[Test Generator] → Генерация тестов
+[Test Generator] → pytest тесты (TDD)
     ↓
-[Coder Agent] → Генерация кода
+[Coder Agent] → генерация кода
     ↓
-[Validator] → Проверка (pytest, mypy, bandit)
+[Validator] → pytest, mypy, bandit
+    ↓ (ошибки?)
+[Debugger] ← [Fixer] ← [Validator] (до 5 итераций)
     ↓
-[Debugger Agent] → Анализ ошибок (до 3 итераций)
+[Reflection Agent] → оценка + сохранение в память
     ↓
-[Reflection Agent] → Оценка качества
+[Critic Agent] → критический анализ
     ↓
-[Critic Agent] → Критический анализ
-    ↓
-Результат пользователю
+Результат
 ```
 
-## Безопасность
+## Chat режим
 
-### Защита от атак
-
-1. **Rate Limiting**: Ограничение количества запросов
-2. **CORS**: Ограничение origins
-3. **Input Validation**: Валидация входных данных
-4. **Trusted Hosts**: Проверка хостов
-5. **Error Handling**: Безопасная обработка ошибок
-
-### Конфигурация
-
-- Используйте `.env` для production
-- Переменные окружения переопределяют `config.toml`
-- Чувствительные данные не хранятся в коде
-
-## Производительность
-
-### Оптимизации
-
-1. **Кэширование**: Результаты кэшируются с TTL
-2. **Connection Pooling**: Пулинг соединений с Ollama
-3. **Async/Await**: Асинхронная обработка
-4. **Lazy Loading**: Ленивая загрузка компонентов
-
-### Масштабируемость
-
-1. **Stateless Backend**: Backend не хранит состояние
-2. **Horizontal Scaling**: Возможность масштабирования
-3. **Load Balancing**: Поддержка load balancer
-
-## Тестирование
-
-### Покрытие
-
-- Unit тесты для агентов
-- Integration тесты для workflow
-- E2E тесты для API
-
-### Запуск
-
-```bash
-# Все тесты
-pytest tests/
-
-# С покрытием
-pytest tests/ --cov=agents --cov=backend --cov=infrastructure
-
-# Конкретный тест
-pytest tests/test_intent.py::TestIntentAgent::test_init
+```
+Пользовательский запрос
+    ↓
+[ConversationMemory] → получить историю диалога
+    ↓
+[ChatAgent] → генерация ответа (лёгкая модель)
+    ↓
+[ConversationMemory] → сохранить ответ
+    ↓
+Результат (SSE: chat stage)
 ```
 
-## Развёртывание
+**Суммаризация:** При превышении `max_context_messages` старые сообщения автоматически суммаризируются LLM.
 
-### Development
+## ModelInfo и оценка качества
 
-```bash
-python run.py
+```python
+@dataclass
+class ModelInfo:
+    name: str
+    parameter_size: str      # "7B", "13B", "70B"
+    estimated_quality: float # 0.0-1.0
+    is_coder: bool
+    
+    @property
+    def tier(self) -> str:   # light, medium, heavy, ultra
+    
+    @property
+    def estimated_vram_gb(self) -> float
 ```
 
-### Production
-
-```bash
-# Установить зависимости
-pip install -r requirements.txt
-
-# Установить frontend
-cd frontend && npm install && npm run build
-
-# Запустить backend
-uvicorn backend.api:app --host 0.0.0.0 --port 8000 --workers 4
-
-# Запустить frontend (nginx или другой веб-сервер)
+**Динамическая оценка качества:**
+```python
+# Для неизвестных размеров вычисляется автоматически:
+# 25B → ~0.87, 45B → ~0.92, 180B → ~0.98
 ```
 
-## Расширение
+## SSE Events
+
+```typescript
+// Frontend получает события:
+event: stage_start  → { stage: "intent", message: "..." }
+event: stage_end    → { stage: "intent", result: {...} }
+event: complete     → { results: {...}, metrics: {...} }
+event: error        → { error_message: "..." }
+```
+
+## Конфигурация
+
+### config.toml секции
+
+| Секция | Описание |
+|--------|----------|
+| `[default]` | Основные настройки (модель, температура) |
+| `[llm]` | Настройки LLM (токены) |
+| `[interaction]` | Режимы (default_mode, chat_model) |
+| `[hardware]` | Лимиты (VRAM, heavy/ultra модели) |
+| `[quality]` | Метрики качества |
+| `[web_search]` | Веб-поиск |
+| `[rag]` | ChromaDB настройки |
+
+## API Endpoints
+
+| Endpoint | Метод | Описание |
+|----------|-------|----------|
+| `/api/stream` | GET | SSE streaming (task, mode, model) |
+| `/api/settings` | GET | Текущие настройки |
+| `/api/models` | GET | Список моделей + рекомендации |
+| `/api/conversations` | GET | Список диалогов |
+| `/api/conversations/new` | POST | Новый диалог |
+
+## Масштабирование
+
+### Добавление новых моделей
+
+Модели подхватываются автоматически через `ollama.list()`. Оценка качества вычисляется динамически по размеру.
 
 ### Добавление нового агента
 
-1. Создайте класс в `agents/new_agent.py`
-2. Наследуйте от базового класса
-3. Реализуйте метод `execute()`
-4. Добавьте в workflow
+1. Создать `agents/new_agent.py`
+2. Добавить узел в `infrastructure/workflow_nodes.py`
+3. Добавить в граф `infrastructure/workflow_graph.py`
 
-### Добавление нового endpoint
+### Добавление нового режима
 
-1. Создайте функцию в `backend/routers/agent.py`
-2. Используйте декоратор `@router.get()` или `@router.post()`
-3. Добавьте валидацию через Pydantic модели
+1. Добавить в `InteractionMode` enum
+2. Создать `run_<mode>_stream()` функцию
+3. Добавить роутинг в `stream_task_results()`
+
+## Безопасность
+
+- Rate Limiting (middleware)
+- CORS (ограниченные origins)
+- Input Validation (Pydantic)
+- Error Handling (не раскрывает внутренности)
+
+## Тестирование
+
+```bash
+pytest tests/                    # Все тесты
+pytest tests/ --cov=agents       # С покрытием
+pytest tests/test_intent.py -v   # Конкретный файл
+```
 
 ## Документация
 
-- [README.md](README.md) - Быстрый старт
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Эта архитектура
-- [API Documentation](http://localhost:8000/docs) - Swagger UI
-
-## Лицензия
-
-MIT
+- [README.md](README.md) — быстрый старт
+- [DEPLOYMENT.md](DEPLOYMENT.md) — развёртывание
+- [future/](future/) — планы развития
+- `/docs` — Swagger UI (при запущенном backend)

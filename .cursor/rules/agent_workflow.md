@@ -7,12 +7,12 @@ Workflow определён в `infrastructure/workflow_graph.py` и испол�
    • Иначе → Planner
 
 2. Planner         → план + 2–3 альтернативных подхода
-   • Использует Memory Agent для получения рекомендаций из прошлых задач
+   • Использует Memory Agent (через DependencyContainer) для получения рекомендаций из прошлых задач
    • → Researcher
 
 3. Researcher      → 
    • сначала локальный RAG (ChromaDB)
-   • если confidence < 0.7 → веб-поиск (через requests+bs4)
+   • если confidence < 0.7 → веб-поиск (Tavily → DuckDuckGo → Google)
    • для modify/debug: загружает файл как контекст
    • результат → в контекст
    • → TestGenerator
@@ -21,6 +21,7 @@ Workflow определён в `infrastructure/workflow_graph.py` и испол�
    • → Coder
 
 5. Coder           → пишем код по тестам + плану (type hints, docstrings)
+   • Использует PromptEnhancer для улучшения промптов
    • → Validator
 
 6. Validator       → pytest, mypy, bandit
@@ -37,10 +38,15 @@ Workflow определён в `infrastructure/workflow_graph.py` и испол�
    • Увеличивает iteration
    • → Validator (цикл)
 
-9. Reflection       → анализ результата
+9. Reflection      → анализ результата
    • оценка способностей системы (planning/coding/testing/etc)
-   • сохраняет опыт в Memory Agent
-   • → END
+   • сохраняет опыт в Memory Agent (через DependencyContainer)
+   • → Critic
+
+10. Critic         → критический анализ сгенерированного кода
+    • оценивает качество, выявляет проблемы
+    • формирует итоговый отчёт
+    • → END
 
 ### Структура графа LangGraph
 
@@ -56,7 +62,8 @@ validator_node → should_continue_self_healing
 should_continue_self_healing → [continue: debugger_node, finish: reflection_node]
 debugger_node → fixer_node
 fixer_node → validator_node (цикл)
-reflection_node → END
+reflection_node → critic_node
+critic_node → END
 ```
 
 ### Узлы и переходы
@@ -70,4 +77,15 @@ reflection_node → END
 
 Максимум max_iterations итераций (по умолчанию из config.toml, ограничено до 5):
 - Validator (Fail) → Debugger → Fixer → Validator (повторная проверка)
-- Если all_passed или iteration >= max_iterations → Reflection → END
+- Если all_passed или iteration >= max_iterations → Reflection → Critic → END
+
+### Dependency Injection
+
+MemoryAgent и RAGSystem создаются через `backend/dependencies.py` (Singleton паттерн).
+Все модули используют централизованные экземпляры:
+```python
+from backend.dependencies import get_memory_agent, get_rag_system
+
+memory = get_memory_agent()  # Singleton
+rag = get_rag_system()       # Singleton
+```

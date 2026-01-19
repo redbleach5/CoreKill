@@ -10,10 +10,9 @@ import { IDEPanel } from './components/IDEPanel'
 import { EnhancedSettingsPanel } from './components/EnhancedSettingsPanel'
 import { AgentProgress } from './components/AgentProgress'
 import { TaskHistory } from './components/TaskHistory'
-import { EnhancedResultDisplay } from './components/EnhancedResultDisplay'
 import {
-  Zap, Send, Square, Settings, Code2, MessageCircle, Plus, Maximize2, Minimize2,
-  Copy, Download, FileCode, Bot, User, AlertCircle, CheckCircle2, Loader2
+  Zap, Send, Settings, Code2, MessageCircle, Maximize2,
+  Bot, User, Loader2
 } from 'lucide-react'
 
 type LayoutMode = 'chat' | 'ide' | 'split'
@@ -43,7 +42,7 @@ interface Task {
  * Полностью интегрируется с существующей архитектурой
  */
 function AppWithIDECompat() {
-  const { stages, results, metrics, isRunning, error, startTask, stopTask, reset } = useAgentStream()
+  const { stages, results, metrics, isRunning, error, startTask, reset } = useAgentStream()
   const { isExecuting, executeCode } = useCodeExecution()
 
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('split')
@@ -98,8 +97,8 @@ function AppWithIDECompat() {
         description: messages[messages.length - 2]?.content || '',
         status: error ? 'failed' : 'completed',
         timestamp: new Date(),
-        duration: metrics?.totalTime || 0,
-        quality: metrics?.quality || 0.8,
+        duration: 0,
+        quality: metrics?.overall || 0.8,
         code: results.code
       }
       setTaskHistory(prev => [newTask, ...prev])

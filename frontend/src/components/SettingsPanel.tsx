@@ -1,4 +1,4 @@
-"""Панель настроек приложения."""
+// Панель настроек приложения
 import React, { useState, useEffect } from 'react'
 import { X, Save, RotateCcw } from 'lucide-react'
 

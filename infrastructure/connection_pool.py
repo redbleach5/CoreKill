@@ -1,6 +1,23 @@
-"""Управление пулингом соединений с Ollama."""
+"""Управление пулингом соединений с Ollama.
+
+СТАТУС: Реализовано, но НЕ ИНТЕГРИРОВАНО в workflow.
+
+Текущая система использует синхронный LocalLLM (ollama.generate).
+Этот модуль подготовлен для будущей миграции на async архитектуру.
+
+Для интеграции необходимо:
+1. Переписать LocalLLM на async с использованием этого пула
+2. Сделать агенты async (async def execute)
+3. Использовать await в workflow_nodes.py
+4. Обновить LangGraph на async execution
+
+Преимущества async пула:
+- Не блокирует event loop при LLM запросах (30-120 сек)
+- Несколько пользователей могут работать параллельно
+- Лучшее масштабирование для production
+"""
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from functools import lru_cache
 import httpx
 from utils.logger import get_logger
@@ -10,15 +27,19 @@ logger = get_logger()
 
 
 class OllamaConnectionPool:
-    """Пул соединений для Ollama."""
+    """Асинхронный пул соединений для Ollama.
+    
+    Использует httpx.AsyncClient с connection pooling и HTTP/2.
+    Semaphore ограничивает количество одновременных запросов.
+    """
     
     def __init__(self, base_url: str, pool_size: int = 10, timeout: int = 300):
         """Инициализация пула соединений.
         
         Args:
-            base_url: URL базы Ollama
-            pool_size: Размер пула
-            timeout: Timeout для соединений (секунды)
+            base_url: URL базы Ollama (например, http://localhost:11434)
+            pool_size: Размер пула (максимум одновременных соединений)
+            timeout: Timeout для соединений в секундах
         """
         self.base_url = base_url
         self.pool_size = pool_size
@@ -60,7 +81,7 @@ class OllamaConnectionPool:
         
         Args:
             method: HTTP метод (GET, POST, etc.)
-            endpoint: Endpoint API
+            endpoint: Endpoint API (например, /api/generate)
             **kwargs: Дополнительные параметры для запроса
             
         Returns:
@@ -106,6 +127,38 @@ class OllamaConnectionPool:
         """
         return await self.request("POST", endpoint, **kwargs)
     
+    async def generate(
+        self,
+        model: str,
+        prompt: str,
+        options: Optional[dict] = None,
+        **kwargs: Any
+    ) -> str:
+        """Генерирует текст через Ollama API.
+        
+        Это async-аналог ollama.generate() для использования с пулом.
+        
+        Args:
+            model: Название модели Ollama
+            prompt: Текст промпта
+            options: Опции генерации (temperature, top_p, num_predict)
+            **kwargs: Дополнительные параметры
+            
+        Returns:
+            Сгенерированный текст
+        """
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            **(options or {}),
+            **kwargs
+        }
+        
+        response = await self.post("/api/generate", json=payload)
+        data = response.json()
+        return data.get("response", "")
+    
     async def stream(
         self,
         method: str,
@@ -120,7 +173,7 @@ class OllamaConnectionPool:
             **kwargs: Дополнительные параметры
             
         Yields:
-            Части ответа
+            Части ответа (bytes)
         """
         if self.client is None:
             raise RuntimeError("Пул соединений не инициализирован. Вызовите initialize() сначала.")
@@ -138,6 +191,8 @@ _pool: Optional[OllamaConnectionPool] = None
 
 async def get_ollama_pool() -> OllamaConnectionPool:
     """Возвращает глобальный пул соединений Ollama.
+    
+    Создаёт и инициализирует пул при первом вызове.
     
     Returns:
         Экземпляр OllamaConnectionPool

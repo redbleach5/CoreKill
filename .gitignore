@@ -7,7 +7,7 @@ __pycache__/
 env/
 venv/
 ENV/
-.venv
+.venv/
 pip-log.txt
 pip-delete-this-directory.txt
 .pytest_cache/
@@ -16,12 +16,15 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+.ruff_cache/
 
-# ChromaDB
+# ChromaDB / Vector DB
 .chromadb/
 
-# Output
+# Output & Artifacts
 output/
+logs/*.jsonl
+temp/
 
 # Frontend
 node_modules/
@@ -36,6 +39,7 @@ build/
 *.swp
 *.swo
 *~
+.cursor/mcp.json
 
 # OS
 .DS_Store
@@ -44,7 +48,12 @@ Thumbs.db
 # Environment
 .env
 .env.local
+*.local
 
 # Generated
 generated_code.py
 generated_tests.py
+
+# Temp files
+*.tmp
+*.bak

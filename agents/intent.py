@@ -341,12 +341,22 @@ JSON:"""
             'магазин', 'shop', 'store', 'crm', 'cms', 'api сервер'
         ]
         
-        # Ключевые слова для medium задач
+        # Ключевые слова для medium задач (включая технические объяснения)
         medium_keywords = [
+            # Код и структуры
             'класс', 'class', 'модуль', 'module', 'api', 'endpoint',
             'crud', 'база данных', 'database', 'db', 'orm', 'auth',
             'парсер', 'parser', 'конвертер', 'converter', 'валидатор',
-            'сервер', 'server', 'клиент', 'client', 'обработчик', 'handler'
+            'сервер', 'server', 'клиент', 'client', 'обработчик', 'handler',
+            # Технические концепции для объяснений
+            'async', 'await', 'asyncio', 'coroutine', 'thread', 'поток',
+            'decorator', 'декоратор', 'generator', 'генератор', 'iterator',
+            'metaclass', 'метакласс', 'descriptor', 'дескриптор',
+            'context manager', 'менеджер контекста', 'with',
+            'inheritance', 'наследован', 'polymorphism', 'полиморфизм',
+            'solid', 'паттерн', 'pattern', 'design', 'дизайн',
+            'memory', 'память', 'gc', 'garbage', 'сборщик мусора',
+            'multiprocessing', 'многопоточн', 'concurrent', 'parallel'
         ]
         
         # Проверяем complex

@@ -226,6 +226,16 @@ class Config:
         return self._config_data.get("interaction", {}).get("default_mode", "auto")
     
     @property
+    def chat_model(self) -> str:
+        """Лёгкая модель для режима chat (диалоги, приветствия)."""
+        return self._config_data.get("interaction", {}).get("chat_model", "phi3:mini")
+    
+    @property
+    def chat_model_fallback(self) -> str:
+        """Fallback модель для chat если основная недоступна."""
+        return self._config_data.get("interaction", {}).get("chat_model_fallback", "tinyllama:1.1b")
+    
+    @property
     def interaction_auto_confirm(self) -> bool:
         """Автоматически запускать workflow без подтверждения."""
         return self._config_data.get("interaction", {}).get("auto_confirm", True)
@@ -249,6 +259,23 @@ class Config:
     def llm_tokens_chat(self) -> int:
         """Максимум токенов для ответа в режиме chat."""
         return self._config_data.get("interaction", {}).get("tokens_chat", 2048)
+    
+    # === Hardware Limits ===
+    
+    @property
+    def max_model_vram_gb(self) -> float:
+        """Максимальный размер модели в GB (0 = без лимита)."""
+        return self._config_data.get("hardware", {}).get("max_model_vram_gb", 0)
+    
+    @property
+    def allow_heavy_models(self) -> bool:
+        """Разрешить использование моделей 30B+ для COMPLEX задач."""
+        return self._config_data.get("hardware", {}).get("allow_heavy_models", True)
+    
+    @property
+    def allow_ultra_models(self) -> bool:
+        """Разрешить использование моделей 100B+."""
+        return self._config_data.get("hardware", {}).get("allow_ultra_models", False)
 
 
 def get_config() -> Config:

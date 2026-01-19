@@ -26,7 +26,8 @@ const DEFAULT_OPTIONS: AgentTaskOptions = {
   model: 'codellama:7b',
   temperature: 0.25,
   disableWebSearch: false,
-  maxIterations: 3
+  maxIterations: 3,
+  mode: 'auto'
 }
 
 export const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
@@ -41,8 +42,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const { 
     stages, 
     results, 
-    isRunning, 
-    error,
+    isRunning,
     startTask, 
     reset 
   } = useAgentStream()
@@ -183,14 +183,14 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     <span className="text-xs text-gray-400">Сгенерированный код</span>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => copyToClipboard(msg.metadata.code)}
+                        onClick={() => copyToClipboard(msg.metadata?.code || '')}
                         className="p-1 hover:bg-white/10 rounded transition-colors"
                         title="Копировать"
                       >
                         <Copy className="w-4 h-4 text-gray-400" />
                       </button>
                       <button
-                        onClick={() => downloadCode(msg.metadata.code)}
+                        onClick={() => downloadCode(msg.metadata?.code || '')}
                         className="p-1 hover:bg-white/10 rounded transition-colors"
                         title="Скачать"
                       >
@@ -220,7 +220,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
           </div>
         ))}
 
-        {isLoading && (
+        {isRunning && (
           <div className="flex gap-3">
             <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500/20 to-violet-500/20 flex items-center justify-center">
               <div className="w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
@@ -242,12 +242,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({
             value={input}
             onChange={e => setInput(e.target.value)}
             placeholder="Опишите задачу..."
-            disabled={isLoading}
+            disabled={isRunning}
             className="flex-1 bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:bg-white/15 transition-colors disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={isLoading || !input.trim()}
+            disabled={isRunning || !input.trim()}
             className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded-lg px-4 py-3 transition-colors flex items-center gap-2"
           >
             <Send className="w-4 h-4" />

@@ -2,7 +2,7 @@
  * Улучшенный компонент для отображения результатов генерации кода
  */
 import { useState } from 'react'
-import { Copy, Download, Eye, EyeOff, FileCode, TestTube, Zap, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { Copy, Download, FileCode, TestTube, Zap, AlertCircle, CheckCircle2 } from 'lucide-react'
 
 interface ResultMetrics {
   quality: number

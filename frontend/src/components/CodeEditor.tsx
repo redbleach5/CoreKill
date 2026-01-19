@@ -10,7 +10,7 @@ interface CodeEditorProps {
   language?: string
   readOnly?: boolean
   onCodeChange?: (code: string) => void
-  onExecute?: (code: string) => Promise<void>
+  onExecute?: (code: string) => Promise<{ output: string; error?: string } | void>
   isExecuting?: boolean
 }
 

@@ -164,7 +164,7 @@ export function AgentProgress({ stages, isCompact = false }: AgentProgressProps)
 
   // Компактный вид — только текущий этап
   if (isCompact && activeStage) {
-    const [stageName, stageData] = activeStage
+    const [stageName] = activeStage
     const config = stageConfig[stageName]
     if (!config) return null
 
@@ -242,7 +242,7 @@ export function AgentProgress({ stages, isCompact = false }: AgentProgressProps)
             if (!config) return null
             
             const status = getStageStatus(stageName)
-            const stageData = stages[stageName]
+            const currentStageData = stages[stageName]
             const isLast = index === stageOrder.length - 1
             
             return (
@@ -272,14 +272,14 @@ export function AgentProgress({ stages, isCompact = false }: AgentProgressProps)
                     </div>
                     
                     {/* Сообщение для активного или с ошибкой */}
-                    {status === 'active' && stageData?.message && (
+                    {status === 'active' && currentStageData?.message && (
                       <div className="text-xs text-gray-500 truncate mt-0.5">
-                        {stageData.message}
+                        {currentStageData.message}
                       </div>
                     )}
-                    {status === 'error' && stageData?.error && (
+                    {status === 'error' && currentStageData?.error && (
                       <div className="text-xs text-red-400/70 truncate mt-0.5">
-                        {stageData.error}
+                        {currentStageData.error}
                       </div>
                     )}
                   </div>

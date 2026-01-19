@@ -1,4 +1,9 @@
-"""Узлы (nodes) для LangGraph workflow."""
+"""Узлы (nodes) для LangGraph workflow.
+
+Каждый узел соответствует одному агенту в workflow.
+Агенты инициализируются лениво при первом вызове.
+MemoryAgent используется через DependencyContainer (Singleton).
+"""
 from typing import TYPE_CHECKING
 from infrastructure.workflow_state import AgentState
 from agents.intent import IntentAgent, IntentResult
@@ -9,18 +14,19 @@ from agents.coder import CoderAgent
 from agents.debugger import DebuggerAgent, DebugResult
 from agents.reflection import ReflectionAgent, ReflectionResult
 from agents.critic import CriticAgent, get_critic_agent, CriticReport
-from agents.memory import MemoryAgent
+from backend.dependencies import get_memory_agent
 from utils.validation import validate_code
 from utils.logger import get_logger
 from utils.file_context import extract_file_path_from_task, read_file_context, prepare_modify_context
 
 if TYPE_CHECKING:
     from backend.sse_manager import SSEManager
+    from agents.memory import MemoryAgent
 
 logger = get_logger()
 
 # Глобальные агенты (инициализируются один раз)
-_memory_agent: MemoryAgent | None = None
+# MemoryAgent теперь через DependencyContainer
 _intent_agent: IntentAgent | None = None
 _planner_agent: PlannerAgent | None = None
 _researcher_agent: ResearcherAgent | None = None
@@ -31,17 +37,26 @@ _reflection_agent: ReflectionAgent | None = None
 _critic_agent: CriticAgent | None = None
 
 
+def _get_memory_agent() -> 'MemoryAgent':
+    """Возвращает глобальный MemoryAgent через DependencyContainer.
+    
+    Returns:
+        Singleton экземпляр MemoryAgent
+    """
+    return get_memory_agent()
+
+
 def _initialize_agents(state: AgentState) -> None:
     """Инициализирует агентов если они ещё не инициализированы.
     
     Args:
         state: State с параметрами для инициализации
     """
-    global _memory_agent, _intent_agent, _planner_agent, _researcher_agent
+    global _intent_agent, _planner_agent, _researcher_agent
     global _test_generator, _coder_agent, _debugger_agent, _reflection_agent, _critic_agent
     
-    if _memory_agent is None:
-        _memory_agent = MemoryAgent()
+    # MemoryAgent получаем через DependencyContainer (Singleton)
+    memory_agent = _get_memory_agent()
     
     if _intent_agent is None:
         _intent_agent = IntentAgent(model=None, temperature=0.2)
@@ -50,11 +65,11 @@ def _initialize_agents(state: AgentState) -> None:
         _planner_agent = PlannerAgent(
             model=state.get("model"),
             temperature=state.get("temperature", 0.25),
-            memory_agent=_memory_agent
+            memory_agent=memory_agent
         )
     
     if _researcher_agent is None:
-        _researcher_agent = ResearcherAgent(memory_agent=_memory_agent)
+        _researcher_agent = ResearcherAgent(memory_agent=memory_agent)
     
     if _test_generator is None:
         _test_generator = TestGeneratorAgent(
@@ -490,15 +505,15 @@ def reflection_node(state: AgentState) -> AgentState:
             )
             state["reflection_result"] = reflection_result
             
-            # Сохраняем опыт в память
-            if _memory_agent:
-                _memory_agent.save_task_experience(
-                    task=task,
-                    intent_type=intent_result.type,
-                    reflection_result=reflection_result,
-                    key_decisions=plan[:500] if plan else "",
-                    what_worked=reflection_result.analysis
-                )
+            # Сохраняем опыт в память через DependencyContainer
+            memory_agent = _get_memory_agent()
+            memory_agent.save_task_experience(
+                task=task,
+                intent_type=intent_result.type,
+                reflection_result=reflection_result,
+                key_decisions=plan[:500] if plan else "",
+                what_worked=reflection_result.analysis
+            )
             
             logger.info(f"✅ Рефлексия завершена. Общая оценка: {reflection_result.overall_score:.2f}")
         else:

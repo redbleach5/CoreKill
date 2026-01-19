@@ -95,15 +95,24 @@ async def run_chat_stream(
     task: str,
     model: str,
     temperature: float,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    task_complexity: Optional[TaskComplexity] = None,
+    intent_type: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """Обрабатывает запрос в режиме chat (простой диалог без workflow).
     
+    Использует умную систему выбора модели:
+    - SIMPLE (greeting, help) → лёгкая модель (phi3:mini)
+    - MEDIUM (explain) → средняя модель
+    - COMPLEX (архитектурные вопросы) → мощная модель
+    
     Args:
         task: Сообщение пользователя
-        model: Модель Ollama
+        model: Модель Ollama (используется как fallback)
         temperature: Температура генерации
         conversation_id: ID диалога для сохранения контекста
+        task_complexity: Предопределённая сложность (если уже вычислена)
+        intent_type: Тип намерения (greeting, help, explain и т.д.)
         
     Yields:
         SSE события с ответом
@@ -111,7 +120,49 @@ async def run_chat_stream(
     task_id = str(uuid.uuid4())
     conv_id = conversation_id or task_id
     
-    logger.info(f"💬 Режим chat: обработка сообщения (conversation: {conv_id})")
+    # Получаем конфиг
+    config = get_config()
+    
+    # УМНЫЙ ВЫБОР МОДЕЛИ для chat режима на основе сложности
+    complexity = task_complexity or TaskComplexity.SIMPLE
+    
+    # Для приветствий ВСЕГДА используем лёгкую модель
+    # Для help — зависит от сложности (простой help vs сложное объяснение)
+    if intent_type == "greeting":
+        complexity = TaskComplexity.SIMPLE
+        logger.info(f"📊 Intent greeting → принудительно SIMPLE")
+    elif intent_type == "help" and complexity == TaskComplexity.SIMPLE:
+        # Простой help (что умеешь, помощь) — оставляем SIMPLE
+        logger.info(f"📊 Intent help + SIMPLE → оставляем SIMPLE")
+    # Для explain и сложных help используем переданную сложность
+    elif intent_type in ("help", "explain"):
+        logger.info(f"📊 Intent {intent_type} → используем сложность {complexity.value}")
+    
+    # Выбираем модель через SmartModelRouter
+    router = get_model_router()
+    
+    try:
+        # Используем task_type="chat" для выбора подходящей модели
+        model_selection = router.select_model_for_complexity(
+            complexity=complexity,
+            task_type="chat"  # Указываем что это chat, а не coding
+        )
+        chat_model = model_selection.model
+        logger.info(f"🤖 {model_selection.reason}: {chat_model}")
+        
+    except RuntimeError as e:
+        # Fallback на конфигурационную модель
+        logger.warning(f"⚠️ SmartModelRouter не смог выбрать модель: {e}")
+        chat_model = config.chat_model
+        
+        if not check_model_available(chat_model):
+            logger.warning(f"⚠️ Chat модель {chat_model} недоступна, пробую fallback")
+            chat_model = config.chat_model_fallback
+            if not check_model_available(chat_model):
+                logger.warning(f"⚠️ Fallback модель {chat_model} тоже недоступна, использую основную")
+                chat_model = model if model else config.default_model
+    
+    logger.info(f"💬 Режим chat: обработка сообщения (conversation: {conv_id}, модель: {chat_model}, сложность: {complexity.value})")
     
     # Получаем менеджер диалогов
     conv_memory = get_conversation_memory()
@@ -120,7 +171,6 @@ async def run_chat_stream(
     conv_memory.add_message(conv_id, "user", task)
     
     # Получаем контекст диалога
-    config = get_config()
     conversation_history = conv_memory.get_context(
         conv_id, 
         max_messages=config.interaction_max_context_messages
@@ -134,8 +184,8 @@ async def run_chat_stream(
     await asyncio.sleep(0.02)
     
     try:
-        # Получаем ChatAgent и генерируем ответ
-        chat_agent = get_chat_agent(model=model if model else None, temperature=temperature)
+        # Получаем ChatAgent с ЛЁГКОЙ моделью для быстрых ответов
+        chat_agent = get_chat_agent(model=chat_model, temperature=temperature)
         response = chat_agent.chat(
             message=task,
             conversation_history=conversation_history
@@ -850,16 +900,20 @@ async def stream_task_results(
         try:
             event_count = 0
             selected_mode = mode
+            detected_intent_type: Optional[str] = None
+            detected_complexity: Optional[TaskComplexity] = None
             
             # В режиме auto определяем нужен ли полный workflow
             if mode == "auto":
+                intent_agent = IntentAgent(lazy_llm=True)
+                
                 # Быстрая проверка на greeting
                 if IntentAgent.is_greeting_fast(task):
                     selected_mode = "chat"
+                    detected_intent_type = "greeting"
+                    detected_complexity = TaskComplexity.SIMPLE
+                    logger.info("🚀 Быстрое определение: greeting → chat + SIMPLE")
                 else:
-                    # Определяем intent для выбора режима
-                    intent_agent = IntentAgent(lazy_llm=True)
-                    
                     # Эвристика: короткие запросы без ключевых слов кода → chat
                     task_lower = task.lower()
                     code_keywords = [
@@ -874,10 +928,31 @@ async def stream_task_results(
                     
                     if has_code_keyword:
                         selected_mode = "code"
+                        # Определяем сложность эвристически для code режима
+                        detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                        logger.info(f"🔧 Обнаружены code-ключевые слова → code + {detected_complexity.value}")
                     else:
-                        # Используем LLM для точного определения
+                        # Используем LLM для точного определения intent
                         intent_result = intent_agent.determine_intent(task)
                         selected_mode = intent_result.recommended_mode
+                        detected_intent_type = intent_result.type
+                        
+                        # Для chat режима пересчитываем сложность эвристикой
+                        # (LLM определяет intent, но сложность лучше определять эвристикой)
+                        detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                        
+                        # Для explain intent минимум MEDIUM сложность
+                        if intent_result.type == "explain" and detected_complexity == TaskComplexity.SIMPLE:
+                            detected_complexity = TaskComplexity.MEDIUM
+                            logger.info(f"📊 Explain intent повышен до MEDIUM")
+                        
+                        logger.info(f"🧠 LLM определение: {intent_result.type} → {selected_mode} + {detected_complexity.value}")
+            
+            # Для явно указанного chat режима тоже определяем сложность
+            elif mode == "chat" and detected_complexity is None:
+                intent_agent = IntentAgent(lazy_llm=True)
+                detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                logger.info(f"💬 Явный chat режим, сложность: {detected_complexity.value}")
             
             logger.info(f"🎯 Выбран режим: {selected_mode} (запрошен: {mode})")
             
@@ -887,7 +962,9 @@ async def stream_task_results(
                     task=task,
                     model=model,
                     temperature=temperature,
-                    conversation_id=conversation_id
+                    conversation_id=conversation_id,
+                    task_complexity=detected_complexity,
+                    intent_type=detected_intent_type
                 )
             else:  # code или другой режим с workflow
                 stream_func = run_workflow_stream(
@@ -994,7 +1071,9 @@ async def get_settings() -> Dict[str, Any]:
             "auto_confirm": config.interaction_auto_confirm,
             "show_thinking": config.interaction_show_thinking,
             "max_context_messages": config.interaction_max_context_messages,
-            "persist_conversations": config.interaction_persist_conversations
+            "persist_conversations": config.interaction_persist_conversations,
+            "chat_model": config.chat_model,
+            "chat_model_fallback": config.chat_model_fallback
         },
         "llm": {
             "default_model": config.default_model,

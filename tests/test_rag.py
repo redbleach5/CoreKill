@@ -1,17 +1,17 @@
 """Тесты для RAG системы."""
 import pytest
-from infrastructure.rag import RAG
+from infrastructure.rag import RAGSystem
 
 
 class TestRAG:
-    """Тесты для класса RAG."""
+    """Тесты для класса RAGSystem."""
     
     @pytest.fixture
     def rag(self):
-        """Создаёт экземпляр RAG для тестов."""
-        return RAG()
+        """Создаёт экземпляр RAGSystem для тестов."""
+        return RAGSystem(collection_name="test_collection", persist_directory=".chromadb_test")
     
     def test_init(self, rag):
-        """Тест инициализации RAG."""
+        """Тест инициализации RAGSystem."""
         assert rag is not None
-        assert hasattr(rag, 'db')
+        assert hasattr(rag, 'collection')

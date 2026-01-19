@@ -1,9 +1,101 @@
-"""Утилита для проверки доступности моделей Ollama."""
+"""Утилита для проверки доступности моделей Ollama.
+
+Поддерживает:
+- Динамическое сканирование моделей при каждом запросе
+- Анализ размера моделей (параметры, VRAM)
+- Выбор оптимальной модели по сложности задачи
+"""
+import re
 import ollama
-from typing import List, Optional
+from dataclasses import dataclass
+from enum import Enum
+from typing import List, Optional, Dict
 from utils.logger import get_logger
 
 logger = get_logger()
+
+
+class TaskComplexity(Enum):
+    """Уровень сложности задачи."""
+    SIMPLE = "simple"      # Простая функция, утилита
+    MEDIUM = "medium"      # Класс, модуль с несколькими функциями
+    COMPLEX = "complex"    # Игра, система, многофайловый проект
+
+
+@dataclass
+class ModelInfo:
+    """Информация о модели Ollama."""
+    name: str
+    size_bytes: int
+    parameter_size: str  # "1.5B", "7B", "13B" etc.
+    quantization: str    # "Q4_K_M", "Q8_0", "fp16" etc.
+    family: str          # "qwen", "llama", "codellama" etc.
+    is_coder: bool       # Специализирована для кода
+    estimated_quality: float  # 0.0-1.0 оценка качества для генерации кода
+    
+    @property
+    def size_gb(self) -> float:
+        """Размер в гигабайтах."""
+        return self.size_bytes / (1024 ** 3)
+    
+    @property
+    def param_billions(self) -> float:
+        """Количество параметров в миллиардах."""
+        match = re.search(r'(\d+\.?\d*)', self.parameter_size)
+        if match:
+            return float(match.group(1))
+        return 0.0
+    
+    @property
+    def estimated_vram_gb(self) -> float:
+        """Примерная оценка требуемой VRAM в GB.
+        
+        Эвристика: ~0.5-1GB на 1B параметров для Q4 квантизации,
+        больше для fp16/Q8.
+        """
+        params = self.param_billions
+        quant_multiplier = {
+            'FP16': 2.0,
+            'F16': 2.0,
+            'Q8_0': 1.0,
+            'Q6_K': 0.8,
+            'Q5_K_M': 0.7,
+            'Q5_K_S': 0.65,
+            'Q4_K_M': 0.6,
+            'Q4_K_S': 0.55,
+            'DEFAULT': 0.6
+        }
+        multiplier = quant_multiplier.get(self.quantization.upper(), 0.6)
+        # Базовая формула: params * multiplier + overhead (1-2GB)
+        return round(params * multiplier + 1.5, 1)
+    
+    @property 
+    def tier(self) -> str:
+        """Категория модели по размеру.
+        
+        Returns:
+            'light' (1-4B), 'medium' (7-14B), 'heavy' (30-70B), 'ultra' (100B+)
+        """
+        params = self.param_billions
+        if params <= 4:
+            return 'light'
+        elif params <= 14:
+            return 'medium'
+        elif params <= 72:
+            return 'heavy'
+        else:
+            return 'ultra'
+
+
+# Кэш информации о моделях (обновляется при каждом сканировании)
+_models_cache: Dict[str, ModelInfo] = {}
+_cache_valid: bool = False
+
+
+def invalidate_models_cache() -> None:
+    """Инвалидирует кэш моделей для принудительного пересканирования."""
+    global _cache_valid
+    _cache_valid = False
 
 
 def check_ollama_api_available() -> bool:
@@ -19,6 +111,238 @@ def check_ollama_api_available() -> bool:
     except Exception as e:
         logger.debug(f"Ollama API недоступен: {e}")
         return False
+
+
+def _parse_model_info(model_data: object) -> Optional[ModelInfo]:
+    """Парсит информацию о модели из данных Ollama API.
+    
+    Args:
+        model_data: Объект модели от ollama.list()
+        
+    Returns:
+        ModelInfo или None если не удалось распарсить
+    """
+    try:
+        name = model_data.model if hasattr(model_data, 'model') else getattr(model_data, 'name', '')
+        if not name:
+            return None
+        
+        # Размер в байтах
+        size_bytes = getattr(model_data, 'size', 0)
+        
+        # Парсим размер параметров из названия модели
+        parameter_size = _extract_parameter_size(name)
+        
+        # Определяем квантизацию
+        quantization = _extract_quantization(name)
+        
+        # Определяем семейство модели
+        family = _extract_family(name)
+        
+        # Проверяем, специализирована ли для кода
+        is_coder = _is_coder_model(name)
+        
+        # Оцениваем качество для генерации кода
+        estimated_quality = _estimate_code_quality(name, parameter_size, is_coder)
+        
+        return ModelInfo(
+            name=name,
+            size_bytes=size_bytes,
+            parameter_size=parameter_size,
+            quantization=quantization,
+            family=family,
+            is_coder=is_coder,
+            estimated_quality=estimated_quality
+        )
+    except Exception as e:
+        logger.debug(f"Ошибка парсинга модели: {e}")
+        return None
+
+
+def _extract_parameter_size(model_name: str) -> str:
+    """Извлекает размер параметров из названия модели.
+    
+    Args:
+        model_name: Название модели (например, "qwen2.5-coder:7b")
+        
+    Returns:
+        Размер параметров (например, "7B") или "unknown"
+    """
+    name_lower = model_name.lower()
+    
+    # Паттерны размеров: 1.5b, 7b, 13b, 70b, 1b, 3b, 4b, 8b, 32b
+    patterns = [
+        r'(\d+\.?\d*b)\b',  # 7b, 1.5b, 13b
+        r':(\d+\.?\d*)b',    # :7b, :1.5b
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, name_lower)
+        if match:
+            return match.group(1).upper()
+    
+    # Специальные случаи
+    if 'mini' in name_lower:
+        return '3B'  # phi3:mini обычно 3B
+    if 'tiny' in name_lower:
+        return '1B'
+    
+    return 'unknown'
+
+
+def _extract_quantization(model_name: str) -> str:
+    """Извлекает тип квантизации из названия модели.
+    
+    Args:
+        model_name: Название модели
+        
+    Returns:
+        Тип квантизации или "default"
+    """
+    name_lower = model_name.lower()
+    
+    # Известные квантизации
+    quant_patterns = ['q4_k_m', 'q4_k_s', 'q5_k_m', 'q5_k_s', 'q8_0', 'q6_k', 'fp16', 'f16']
+    
+    for quant in quant_patterns:
+        if quant in name_lower:
+            return quant.upper()
+    
+    return 'default'
+
+
+def _extract_family(model_name: str) -> str:
+    """Определяет семейство модели.
+    
+    Args:
+        model_name: Название модели
+        
+    Returns:
+        Семейство модели
+    """
+    name_lower = model_name.lower()
+    
+    families = {
+        'qwen': ['qwen'],
+        'llama': ['llama', 'codellama'],
+        'deepseek': ['deepseek'],
+        'phi': ['phi'],
+        'gemma': ['gemma'],
+        'mistral': ['mistral', 'mixtral'],
+        'stable': ['stable-code', 'stablecode'],
+        'codegemma': ['codegemma'],
+        'starcoder': ['starcoder'],
+    }
+    
+    for family, keywords in families.items():
+        for keyword in keywords:
+            if keyword in name_lower:
+                return family
+    
+    return 'unknown'
+
+
+def _is_coder_model(model_name: str) -> bool:
+    """Проверяет, специализирована ли модель для кода.
+    
+    Args:
+        model_name: Название модели
+        
+    Returns:
+        True если модель для кода
+    """
+    name_lower = model_name.lower()
+    coder_keywords = ['coder', 'code', 'codellama', 'starcoder', 'codegemma']
+    
+    # Исключаем embed модели
+    if 'embed' in name_lower:
+        return False
+    
+    return any(keyword in name_lower for keyword in coder_keywords)
+
+
+def _estimate_code_quality(model_name: str, parameter_size: str, is_coder: bool) -> float:
+    """Оценивает качество модели для генерации кода.
+    
+    Учитывает:
+    - Размер параметров (больше = лучше качество)
+    - Специализация для кода
+    - Известные бенчмарки
+    
+    Args:
+        model_name: Название модели
+        parameter_size: Размер параметров
+        is_coder: Специализирована для кода
+        
+    Returns:
+        Оценка качества 0.0-1.0
+    """
+    # Базовая оценка по размеру (масштабируемая до будущих больших моделей)
+    size_scores = {
+        # Лёгкие модели (1-4B) — быстрые, для простых задач
+        '0.5B': 0.2,
+        '1B': 0.3,
+        '1.5B': 0.4,
+        '2B': 0.45,
+        '3B': 0.5,
+        '4B': 0.55,
+        # Средние модели (7-14B) — баланс качества и скорости
+        '7B': 0.7,
+        '8B': 0.72,
+        '13B': 0.8,
+        '14B': 0.82,
+        # Большие модели (30-70B) — максимальное качество
+        '22B': 0.85,
+        '30B': 0.88,
+        '32B': 0.9,
+        '34B': 0.91,
+        '40B': 0.92,
+        '70B': 0.95,
+        '72B': 0.96,
+        # Сверхбольшие модели (100B+) — enterprise уровень
+        '110B': 0.97,
+        '180B': 0.98,
+        '405B': 0.99,
+        'unknown': 0.5
+    }
+    
+    # Для неизвестных размеров пытаемся вычислить оценку динамически
+    base_score = size_scores.get(parameter_size)
+    if base_score is None:
+        # Динамическая оценка для новых размеров
+        match = re.search(r'(\d+\.?\d*)', parameter_size)
+        if match:
+            params = float(match.group(1))
+            if params < 2:
+                base_score = 0.3 + (params - 0.5) * 0.1  # 0.3-0.45
+            elif params < 10:
+                base_score = 0.45 + (params - 2) * 0.035  # 0.45-0.73
+            elif params < 35:
+                base_score = 0.73 + (params - 10) * 0.007  # 0.73-0.91
+            elif params < 100:
+                base_score = 0.91 + (params - 35) * 0.001  # 0.91-0.97
+            else:
+                base_score = min(0.97 + (params - 100) * 0.0003, 0.99)
+            base_score = round(min(max(base_score, 0.2), 0.99), 2)
+        else:
+            base_score = 0.5
+    
+    # Бонус за специализацию для кода (+0.15)
+    if is_coder:
+        base_score = min(base_score + 0.15, 1.0)
+    
+    # Бонусы/штрафы за конкретные модели (на основе известных бенчмарков)
+    name_lower = model_name.lower()
+    
+    # Известно хорошие для кода
+    if 'qwen2.5-coder' in name_lower:
+        base_score = min(base_score + 0.1, 1.0)
+    elif 'deepseek-coder' in name_lower:
+        base_score = min(base_score + 0.08, 1.0)
+    elif 'codellama' in name_lower:
+        base_score = min(base_score + 0.05, 1.0)
+    
+    return round(base_score, 2)
 
 
 def check_model_available(model_name: str) -> bool:
@@ -81,95 +405,121 @@ def get_any_available_model() -> Optional[str]:
 def get_light_model() -> Optional[str]:
     """Возвращает легкую модель для быстрых операций (intent, planning).
     
-    Приоритет:
-    1. qwen2.5-coder:1.5b (лучший баланс скорость/качество для кода)
-    2. Модели с 1b, 1.5b, 3b в названии
-    3. Модели с phi, tiny, mini, gemma в названии
+    Использует scan_available_models() для динамического выбора.
+    Приоритет: модели до 4B параметров.
     
     Returns:
         Название легкой модели или None если ничего не найдено
     """
-    all_models = get_all_available_models()
-    if not all_models:
+    models = scan_available_models()
+    if not models:
         return None
     
-    # Приоритетные быстрые модели для кода
-    priority_models = [
-        'qwen2.5-coder:1.5b',
-        'gemma3:1b', 
-        'phi3:mini',
-        'llama3.2:3b',
-        'gemma3:4b',
-        'stable-code:latest',
+    # Фильтруем embed модели и находим легкие (до 4B)
+    light_models = [
+        m for m in models.values()
+        if 'embed' not in m.name.lower() and m.param_billions <= 4.0 and m.param_billions > 0
     ]
     
-    for priority in priority_models:
-        if priority in all_models:
-            return priority
+    if not light_models:
+        # Если легких нет, берём любую не-embed модель
+        candidates = [m for m in models.values() if 'embed' not in m.name.lower()]
+        if candidates:
+            # Предпочитаем coder модели
+            coder = [m for m in candidates if m.is_coder]
+            if coder:
+                return min(coder, key=lambda m: m.param_billions or 999).name
+            return min(candidates, key=lambda m: m.param_billions or 999).name
+        return list(models.keys())[0]
     
-    # Ищем по ключевым словам размера
-    size_keywords = ['1.5b', ':1b', ':3b', ':4b']
-    for model in all_models:
-        model_lower = model.lower()
-        if any(keyword in model_lower for keyword in size_keywords):
-            # Избегаем embed моделей
-            if 'embed' not in model_lower:
-                return model
+    # Предпочитаем coder модели среди лёгких
+    coder_light = [m for m in light_models if m.is_coder]
+    if coder_light:
+        return max(coder_light, key=lambda m: m.estimated_quality).name
     
-    # Ищем легкие модели по названию
-    light_keywords = ['phi', 'tiny', 'mini', 'gemma']
-    for model in all_models:
-        model_lower = model.lower()
-        if any(keyword in model_lower for keyword in light_keywords):
-            if 'embed' not in model_lower:
-                return model
-    
-    # Если легких нет, возвращаем первую НЕ-embed модель
-    for model in all_models:
-        if 'embed' not in model.lower():
-            return model
-    
-    return all_models[0] if all_models else None
+    return max(light_models, key=lambda m: m.estimated_quality).name
 
 
-def get_coder_model() -> Optional[str]:
-    """Возвращает модель оптимизированную для генерации кода.
+def get_coder_model(min_quality: float = 0.0) -> Optional[str]:
+    """Возвращает лучшую модель для генерации кода.
     
-    Приоритет:
-    1. qwen2.5-coder (лучшая для кода)
-    2. deepseek-coder
-    3. codellama
-    4. stable-code
-    5. Любая другая
+    Использует scan_available_models() для динамического выбора.
+    Приоритет: специализированные coder модели с высоким качеством.
     
+    Args:
+        min_quality: Минимальный порог качества (0.0-1.0)
+        
     Returns:
         Название модели для кода или None
     """
-    all_models = get_all_available_models()
-    if not all_models:
+    models = scan_available_models()
+    if not models:
         return None
     
-    # Приоритетные модели для кода (от лёгких к тяжёлым)
-    priority_models = [
-        'qwen2.5-coder:1.5b',  # Быстрая и качественная
-        'qwen2.5-coder:7b',    # Качественная но медленнее
-        'deepseek-coder:6.7b',
-        'stable-code:latest',
-        'codellama:7b',
-    ]
+    # Фильтруем embed модели
+    candidates = [m for m in models.values() if 'embed' not in m.name.lower()]
     
-    for priority in priority_models:
-        if priority in all_models:
-            return priority
+    if not candidates:
+        return list(models.keys())[0]
     
-    # Ищем любую coder модель
-    for model in all_models:
-        if 'coder' in model.lower() or 'code' in model.lower():
-            if 'embed' not in model.lower():
-                return model
+    # Предпочитаем coder модели
+    coder_models = [m for m in candidates if m.is_coder and m.estimated_quality >= min_quality]
+    if coder_models:
+        best = max(coder_models, key=lambda m: m.estimated_quality)
+        logger.debug(f"🤖 Выбрана coder модель: {best.name} (качество: {best.estimated_quality})")
+        return best.name
     
-    # Возвращаем лёгкую модель как fallback
-    return get_light_model()
+    # Fallback: любая модель с достаточным качеством
+    suitable = [m for m in candidates if m.estimated_quality >= min_quality]
+    if suitable:
+        best = max(suitable, key=lambda m: m.estimated_quality)
+        logger.debug(f"🤖 Выбрана модель: {best.name} (качество: {best.estimated_quality})")
+        return best.name
+    
+    # Крайний случай: лучшая из доступных
+    best = max(candidates, key=lambda m: m.estimated_quality)
+    return best.name
+
+
+def scan_available_models(force_refresh: bool = False) -> Dict[str, ModelInfo]:
+    """Сканирует и возвращает информацию о всех доступных моделях.
+    
+    Обновляет глобальный кэш моделей.
+    
+    Args:
+        force_refresh: Принудительно обновить кэш
+        
+    Returns:
+        Словарь {имя_модели: ModelInfo}
+    """
+    global _models_cache, _cache_valid
+    
+    if _cache_valid and not force_refresh:
+        return _models_cache
+    
+    if not check_ollama_api_available():
+        logger.warning("⚠️ Ollama API недоступен, не могу получить список моделей")
+        return {}
+    
+    try:
+        models = ollama.list()
+        new_cache: Dict[str, ModelInfo] = {}
+        
+        if hasattr(models, 'models'):
+            for model_data in models.models:
+                model_info = _parse_model_info(model_data)
+                if model_info:
+                    new_cache[model_info.name] = model_info
+        
+        _models_cache = new_cache
+        _cache_valid = True
+        
+        logger.debug(f"📊 Отсканировано {len(new_cache)} моделей Ollama")
+        return new_cache
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка сканирования моделей: {e}")
+        return _models_cache if _models_cache else {}
 
 
 def get_all_available_models() -> List[str]:
@@ -178,21 +528,110 @@ def get_all_available_models() -> List[str]:
     Returns:
         Список названий доступных моделей
     """
-    # Сначала проверяем доступность Ollama API
-    if not check_ollama_api_available():
-        logger.warning("⚠️ Ollama API недоступен, не могу получить список моделей")
-        return []
+    models = scan_available_models()
+    return sorted(models.keys())
+
+
+def get_all_models_info() -> List[ModelInfo]:
+    """Возвращает информацию о всех доступных моделях.
     
-    try:
-        models = ollama.list()
-        model_names = []
-        if hasattr(models, 'models'):
-            for model in models.models:
-                # Ollama возвращает объекты Model с атрибутом 'model'
-                model_name = model.model if hasattr(model, 'model') else getattr(model, 'name', '')
-                if model_name:
-                    model_names.append(model_name)
-        return sorted(model_names)
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка получения списка моделей: {e}")
-        return []
+    Returns:
+        Список ModelInfo отсортированный по качеству (лучшие первые)
+    """
+    models = scan_available_models()
+    return sorted(models.values(), key=lambda m: m.estimated_quality, reverse=True)
+
+
+def get_model_info(model_name: str) -> Optional[ModelInfo]:
+    """Возвращает информацию о конкретной модели.
+    
+    Args:
+        model_name: Название модели
+        
+    Returns:
+        ModelInfo или None если модель не найдена
+    """
+    models = scan_available_models()
+    return models.get(model_name)
+
+
+def get_best_model_for_complexity(
+    complexity: TaskComplexity,
+    prefer_coder: bool = True
+) -> Optional[str]:
+    """Выбирает лучшую модель для заданной сложности задачи.
+    
+    Логика выбора:
+    - SIMPLE: быстрая модель (1.5B-4B), скорость важнее качества
+    - MEDIUM: баланс (7B), хорошее качество
+    - COMPLEX: максимальное качество (7B+ coder), качество важнее скорости
+    
+    Args:
+        complexity: Сложность задачи
+        prefer_coder: Предпочитать модели для кода
+        
+    Returns:
+        Название оптимальной модели или None
+    """
+    models = scan_available_models()
+    if not models:
+        return None
+    
+    # Фильтруем embed модели
+    candidates = [m for m in models.values() if 'embed' not in m.name.lower()]
+    
+    if not candidates:
+        return list(models.keys())[0]
+    
+    # Определяем минимальное и максимальное качество для каждой сложности
+    quality_ranges = {
+        TaskComplexity.SIMPLE: (0.3, 0.7),    # Быстрые модели 1.5B-4B
+        TaskComplexity.MEDIUM: (0.55, 1.0),   # 7B или хорошая coder
+        TaskComplexity.COMPLEX: (0.7, 1.0),   # 7B+ coder или 13B+
+    }
+    
+    min_quality, max_quality = quality_ranges[complexity]
+    
+    # Для SIMPLE задач выбираем МИНИМАЛЬНО подходящую модель (быстрее)
+    # Для MEDIUM/COMPLEX выбираем ЛУЧШУЮ модель (качественнее)
+    
+    if prefer_coder:
+        coder_models = [
+            m for m in candidates 
+            if m.is_coder and m.estimated_quality >= min_quality
+        ]
+        if coder_models:
+            if complexity == TaskComplexity.SIMPLE:
+                # Для simple выбираем минимально подходящую coder модель
+                suitable = [m for m in coder_models if m.estimated_quality <= max_quality]
+                if suitable:
+                    best = min(suitable, key=lambda m: m.estimated_quality)
+                else:
+                    best = min(coder_models, key=lambda m: m.estimated_quality)
+            else:
+                # Для medium/complex выбираем лучшую
+                best = max(coder_models, key=lambda m: m.estimated_quality)
+            
+            logger.info(f"🤖 Выбрана coder модель {best.name} (качество: {best.estimated_quality})")
+            return best.name
+    
+    # Fallback: любая модель с достаточным качеством
+    suitable = [m for m in candidates if m.estimated_quality >= min_quality]
+    if suitable:
+        if complexity == TaskComplexity.SIMPLE:
+            # Для simple выбираем минимально подходящую
+            best = min(suitable, key=lambda m: m.estimated_quality)
+        else:
+            # Для medium/complex выбираем лучшую
+            best = max(suitable, key=lambda m: m.estimated_quality)
+        
+        logger.info(f"🤖 Выбрана модель {best.name} (качество: {best.estimated_quality})")
+        return best.name
+    
+    # Если ничего не подходит, берём лучшую из доступных
+    best = max(candidates, key=lambda m: m.estimated_quality)
+    logger.warning(
+        f"⚠️ Нет модели с качеством >= {min_quality}, "
+        f"выбрана лучшая: {best.name} (качество: {best.estimated_quality})"
+    )
+    return best.name

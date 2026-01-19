@@ -2,7 +2,7 @@
  * Компонент для отображения истории выполненных задач
  */
 import { useState } from 'react'
-import { Trash2, Copy, Eye, EyeOff, Clock, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Trash2, Copy, Eye, Clock, CheckCircle2, AlertCircle } from 'lucide-react'
 
 interface Task {
   id: string
@@ -38,17 +38,6 @@ export function TaskHistory({ tasks, onTaskSelect, onTaskDelete }: TaskHistoryPr
         return <AlertCircle className="w-4 h-4 text-red-400" />
       default:
         return <Clock className="w-4 h-4 text-amber-400" />
-    }
-  }
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'completed':
-        return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-      case 'failed':
-        return 'bg-red-500/10 text-red-400 border-red-500/20'
-      default:
-        return 'bg-amber-500/10 text-amber-400 border-amber-500/20'
     }
   }
 

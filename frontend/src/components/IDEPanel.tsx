@@ -3,7 +3,7 @@
  * Поддерживает несколько файлов, выполнение кода и просмотр результатов
  */
 import { useState } from 'react'
-import { Plus, X, Trash2, Save } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import { CodeEditor } from './CodeEditor'
 
 interface CodeFile {
@@ -82,12 +82,6 @@ export function IDEPanel({
     } catch (err) {
       throw err
     }
-  }
-
-  const handleRenameFile = (id: string, newName: string) => {
-    setFiles(files.map(f =>
-      f.id === id ? { ...f, name: newName } : f
-    ))
   }
 
   return (

@@ -14,5 +14,5 @@ class TestMemoryAgent:
     def test_init(self, agent):
         """Тест инициализации агента."""
         assert agent is not None
-        assert hasattr(agent, 'db')
-        assert hasattr(agent, 'embedding_model')
+        assert hasattr(agent, 'memory_rag')
+        assert hasattr(agent, 'collection_name')

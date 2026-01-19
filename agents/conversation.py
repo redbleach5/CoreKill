@@ -300,7 +300,7 @@ class ConversationMemory:
         
         try:
             llm = self._get_llm()
-            summary = llm.generate(prompt, max_tokens=256)
+            summary = llm.generate(prompt, num_predict=256)
             
             # Обновляем диалог
             conversation.summary = summary.strip()

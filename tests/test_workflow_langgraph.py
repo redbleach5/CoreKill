@@ -368,6 +368,15 @@ class TestWorkflowGraph:
             "all_passed": True
         }
         
+        # Код с type hints чтобы mypy не ругался
+        valid_code = '''def function() -> None:
+    """Тестовая функция."""
+    pass
+'''
+        valid_test = '''def test_function() -> None:
+    """Тест функции."""
+    function()
+'''
         state: AgentState = {
             "task": "создать функцию",
             "max_iterations": 1,
@@ -381,8 +390,8 @@ class TestWorkflowGraph:
             ),
             "plan": "План",
             "context": "Контекст",
-            "tests": "def test_function(): pass",
-            "code": "def function(): pass",
+            "tests": valid_test,
+            "code": valid_code,
             "validation_results": {},
             "debug_result": None,
             "reflection_result": None,
@@ -488,8 +497,8 @@ class TestWorkflowGraph:
     
     @patch('infrastructure.workflow_nodes._initialize_agents')
     @patch('infrastructure.workflow_nodes._reflection_agent')
-    @patch('infrastructure.workflow_nodes._memory_agent')
-    def test_reflection_node(self, mock_memory, mock_agent, mock_init):
+    @patch('infrastructure.workflow_nodes._get_memory_agent')
+    def test_reflection_node(self, mock_get_memory, mock_agent, mock_init):
         """Тест узла reflection."""
         mock_result = ReflectionResult(
             planning_score=0.8,
@@ -502,6 +511,10 @@ class TestWorkflowGraph:
             should_retry=False
         )
         mock_agent.reflect.return_value = mock_result
+        
+        # Мокаем возвращаемый MemoryAgent
+        mock_memory = MagicMock()
+        mock_get_memory.return_value = mock_memory
         
         state: AgentState = {
             "task": "создать функцию",
@@ -534,5 +547,5 @@ class TestWorkflowGraph:
         
         assert result["reflection_result"] is not None
         assert result["reflection_result"].overall_score == 0.81
-        # Проверяем что память была вызвана
+        # Проверяем что память была вызвана через DependencyContainer
         mock_memory.save_task_experience.assert_called_once()
