@@ -7,29 +7,30 @@
 ### Требования
 
 - Python 3.12+
-- Node.js 18+ (для frontend)
-- Ollama с установленными моделями
+- Node.js 18+
+- Ollama
 
-### Установка
-
-```bash
-# 1. Python зависимости
-pip install -r requirements.txt
-
-# 2. Ollama модели
-ollama pull qwen2.5-coder:7b    # Основная модель для кода
-ollama pull phi3:mini            # Лёгкая модель для chat
-ollama pull nomic-embed-text     # Embeddings для RAG
-
-# 3. Frontend зависимости
-cd frontend && npm install
-```
-
-### Запуск
+### Установка и запуск
 
 ```bash
-python run.py
+# 1. Клонируйте репозиторий
+git clone https://github.com/redbleach5/CoreKill.git
+cd CoreKill
+
+# 2. Установите Ollama модели
+ollama pull qwen2.5-coder:7b    # Для генерации кода
+ollama pull phi3:mini            # Для chat (или любая лёгкая модель)
+ollama pull nomic-embed-text     # Для RAG
+
+# 3. Запустите (автоустановка зависимостей)
+python3 run.py
 ```
+
+Скрипт `run.py` автоматически:
+- Создаст виртуальное окружение `.venv`
+- Установит Python зависимости
+- Установит Node.js зависимости
+- Запустит backend и frontend
 
 Откройте браузер: `http://localhost:5173`
 

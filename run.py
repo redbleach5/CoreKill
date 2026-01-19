@@ -161,47 +161,83 @@ class ProjectRunner:
             return False
     
     def check_dependencies(self) -> bool:
-        """Проверяет установленные зависимости."""
-        # Проверяем наличие виртуального окружения
+        """Проверяет и устанавливает зависимости."""
+        # Создаём виртуальное окружение если его нет
         venv_path = self.project_root / ".venv"
         if venv_path.exists():
             self.print_info(f"Виртуальное окружение найдено: {venv_path}")
         else:
-            self.print_warning("Виртуальное окружение не найдено. Создайте его: python3 -m venv .venv")
+            self.print_warning("Виртуальное окружение не найдено, создаю...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "venv", str(venv_path)],
+                    timeout=60
+                )
+                if result.returncode == 0:
+                    self.print_success("Виртуальное окружение создано: .venv")
+                    # Обновляем путь к Python
+                    self.python_executable = str(venv_path / "bin" / "python3")
+                else:
+                    self.print_warning("Не удалось создать venv, продолжаю с системным Python")
+            except Exception as e:
+                self.print_warning(f"Ошибка создания venv: {e}")
         
         # Проверяем Python зависимости используя правильный Python
+        pip_cmd = str(Path(self.python_executable).parent / "pip3")
+        if not Path(pip_cmd).exists():
+            pip_cmd = "pip3"
+        
         try:
             # Пробуем импортировать с помощью правильного Python
             result = subprocess.run(
-                [self.python_executable, "-c", "import fastapi, uvicorn"],
+                [self.python_executable, "-c", "import fastapi, uvicorn, ollama, chromadb"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=10
             )
             if result.returncode == 0:
                 self.print_success("Python зависимости установлены")
             else:
-                self.print_error(f"Python зависимости не установлены: {result.stderr}")
-                pip_cmd = str(Path(self.python_executable).parent / "pip3")
-                if not Path(pip_cmd).exists():
-                    pip_cmd = "pip3"
-                self.print_info(f"Запустите: {pip_cmd} install -r requirements.txt")
-                return False
+                self.print_warning("Python зависимости не установлены, устанавливаю...")
+                install_result = subprocess.run(
+                    [pip_cmd, "install", "-r", "requirements.txt"],
+                    cwd=self.project_root,
+                    timeout=300
+                )
+                if install_result.returncode != 0:
+                    self.print_error("Не удалось установить Python зависимости")
+                    self.print_info(f"Попробуйте вручную: {pip_cmd} install -r requirements.txt")
+                    return False
+                self.print_success("Python зависимости установлены")
+        except subprocess.TimeoutExpired:
+            self.print_error("Таймаут при установке зависимостей")
+            return False
         except Exception as e:
             self.print_error(f"Ошибка при проверке зависимостей: {e}")
-            pip_cmd = str(Path(self.python_executable).parent / "pip3")
-            if not Path(pip_cmd).exists():
-                pip_cmd = "pip3"
-            self.print_info(f"Запустите: {pip_cmd} install -r requirements.txt")
+            self.print_info(f"Запустите вручную: {pip_cmd} install -r requirements.txt")
             return False
         
         # Проверяем Node.js зависимости
         frontend_dir = self.project_root / "frontend"
         node_modules = frontend_dir / "node_modules"
         if not node_modules.exists():
-            self.print_warning("Node.js зависимости не установлены")
-            self.print_info("Запустите: cd frontend && npm install")
-            return False
+            self.print_warning("Node.js зависимости не установлены, устанавливаю...")
+            try:
+                install_result = subprocess.run(
+                    ["npm", "install"],
+                    cwd=frontend_dir,
+                    timeout=300
+                )
+                if install_result.returncode != 0:
+                    self.print_error("Не удалось установить Node.js зависимости")
+                    self.print_info("Попробуйте вручную: cd frontend && npm install")
+                    return False
+            except subprocess.TimeoutExpired:
+                self.print_error("Таймаут при установке Node.js зависимостей")
+                return False
+            except Exception as e:
+                self.print_error(f"Ошибка установки Node.js зависимостей: {e}")
+                return False
         
         self.print_success("Node.js зависимости установлены")
         return True
