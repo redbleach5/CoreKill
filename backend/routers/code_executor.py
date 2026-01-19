@@ -125,26 +125,93 @@ async def execute_code(request: CodeExecutionRequest) -> CodeExecutionResponse:
     Raises:
         HTTPException: Если код содержит опасные операции
     """
-    # Базовая проверка безопасности
-    dangerous_patterns = [
+    # Расширенная проверка безопасности
+    # Опасные импорты
+    dangerous_imports = [
         'import os',
         'import subprocess',
         'import sys',
+        'import socket',
+        'import requests',
+        'import urllib',
+        'import ctypes',
+        'import importlib',
+        'from os',
+        'from subprocess',
+        'from sys',
+        'from socket',
+    ]
+    
+    # Опасные функции и методы
+    dangerous_functions = [
         '__import__',
         'eval(',
         'exec(',
+        'compile(',
         'open(',
+        'file(',
+        'input(',
+        'raw_input(',
+        'globals(',
+        'locals(',
+        'vars(',
+        'dir(',
+        'getattr(',
+        'setattr(',
+        'delattr(',
+        'hasattr(',
+        'callable(',
+        'type(',
+        'isinstance(',
+        'issubclass(',
+        '__builtins__',
+        '__loader__',
+        '__spec__',
+        '__code__',
+        '__globals__',
+        '__dict__',
+    ]
+    
+    # Опасные системные команды
+    dangerous_system_calls = [
         'os.system',
+        'os.popen',
+        'os.execv',
+        'os.spawn',
         'subprocess.run',
+        'subprocess.call',
+        'subprocess.popen',
+        'subprocess.check_output',
+        'subprocess.check_call',
     ]
     
     code_lower = request.code.lower()
-    for pattern in dangerous_patterns:
+    
+    # Проверка опасных импортов
+    for pattern in dangerous_imports:
         if pattern in code_lower:
             logger.warning(f"Попытка выполнить опасный код: {pattern}")
             raise HTTPException(
                 status_code=400,
-                detail=f"Код содержит опасную операцию: {pattern}"
+                detail=f"Код содержит запрещённый импорт: {pattern}"
+            )
+    
+    # Проверка опасных функций
+    for pattern in dangerous_functions:
+        if pattern.lower() in code_lower:
+            logger.warning(f"Попытка выполнить опасный код: {pattern}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Код содержит запрещённую функцию: {pattern}"
+            )
+    
+    # Проверка опасных системных вызовов
+    for pattern in dangerous_system_calls:
+        if pattern.lower() in code_lower:
+            logger.warning(f"Попытка выполнить опасный код: {pattern}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Код содержит запрещённый системный вызов: {pattern}"
             )
     
     # Выполняем код
