@@ -1,8 +1,12 @@
 """Основной FastAPI приложение для веб-интерфейса."""
-from fastapi import FastAPI
+import os
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from backend.routers import agent
 from backend.middleware.log_filter import setup_log_filter
+from backend.middleware.rate_limiter import RateLimiterMiddleware
 from utils.logger import get_logger
 
 # Инициализируем систему логирования при старте приложения
@@ -25,19 +29,51 @@ async def setup_logging_filter() -> None:
     """Настраивает фильтр логов при старте приложения (повторно для надёжности)."""
     setup_log_filter()
 
-# Настраиваем CORS для работы с frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # Vite default
+
+# Определяем разрешённые origins в зависимости от окружения
+def get_allowed_origins() -> list[str]:
+    """Возвращает список разрешённых origins в зависимости от окружения."""
+    env = os.getenv("ENVIRONMENT", "development")
+    
+    if env == "production":
+        # В production используем переменную окружения
+        allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+        return [origin.strip() for origin in allowed if origin.strip()]
+    
+    # В development разрешаем локальные адреса
+    return [
+        "http://localhost:5173",
         "http://localhost:8000",
         "http://127.0.0.1:5173",
         "http://127.0.0.1:8000"
-    ],
+    ]
+
+
+# Добавляем middleware для защиты от атак
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
+app.add_middleware(RateLimiterMiddleware, requests_per_minute=100)
+
+# Настраиваем CORS для работы с frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    max_age=3600
 )
+
+
+# Глобальный обработчик исключений
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Глобальный обработчик исключений для логирования и безопасного ответа."""
+    logger.error(f"❌ Необработанное исключение: {exc}", error=exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Внутренняя ошибка сервера. Пожалуйста, попробуйте позже."}
+    )
+
 
 # Подключаем роутеры
 app.include_router(agent.router)
