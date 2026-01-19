@@ -1,7 +1,7 @@
 /**
  * Экран приветствия для нового чата
  */
-import { MessageCircle, Sparkles, MessagesSquare, Code2 } from 'lucide-react'
+import { MessageCircle, Sparkles, MessagesSquare, Code2, Hand, MessageSquare, FileCode, Wrench } from 'lucide-react'
 import { InteractionMode } from '../../types/chat'
 
 // Конфигурация режимов с иконками
@@ -17,10 +17,10 @@ interface WelcomeScreenProps {
 }
 
 const QUICK_SUGGESTIONS = [
-  '👋 Привет! Что ты умеешь?',
-  '💬 Как лучше организовать проект?',
-  '📝 Напиши функцию сортировки',
-  '🔧 Создай REST API эндпоинт'
+  { icon: Hand, text: 'Привет! Что ты умеешь?' },
+  { icon: MessageSquare, text: 'Как лучше организовать проект?' },
+  { icon: FileCode, text: 'Напиши функцию сортировки' },
+  { icon: Wrench, text: 'Создай REST API эндпоинт' }
 ]
 
 export function WelcomeScreen({ mode, onSuggestionClick }: WelcomeScreenProps) {
@@ -58,16 +58,20 @@ export function WelcomeScreen({ mode, onSuggestionClick }: WelcomeScreenProps) {
       
       {/* Quick suggestions */}
       <div className="flex flex-wrap justify-center gap-2">
-        {QUICK_SUGGESTIONS.map((example) => (
-          <button
-            key={example}
-            onClick={() => onSuggestionClick(example.replace(/^[^\s]+\s/, ''))}
-            className="px-4 py-2 text-sm text-gray-400 bg-white/5 hover:bg-white/10 
-                       border border-white/10 rounded-full transition-colors"
-          >
-            {example}
-          </button>
-        ))}
+        {QUICK_SUGGESTIONS.map((suggestion) => {
+          const SuggestionIcon = suggestion.icon
+          return (
+            <button
+              key={suggestion.text}
+              onClick={() => onSuggestionClick(suggestion.text)}
+              className="flex items-center gap-2 px-4 py-2 text-sm text-gray-400 bg-white/5 hover:bg-white/10 
+                         border border-white/10 rounded-full transition-colors"
+            >
+              <SuggestionIcon className="w-3.5 h-3.5" />
+              {suggestion.text}
+            </button>
+          )
+        })}
       </div>
     </div>
   )

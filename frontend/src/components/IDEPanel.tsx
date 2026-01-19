@@ -3,7 +3,7 @@
  * Поддерживает несколько файлов, выполнение кода и просмотр результатов
  */
 import { useState, useEffect } from 'react'
-import { Plus, X, FolderOpen, Database, RefreshCw, Loader2, CheckCircle2, XCircle, Play, Copy, Download, RotateCcw } from 'lucide-react'
+import { Plus, X, FolderOpen, Database, RefreshCw, Loader2, CheckCircle2, XCircle, Play, Copy, Download, RotateCcw, FileCode, FileText } from 'lucide-react'
 import { CodeEditor } from './CodeEditor'
 
 interface CodeFile {
@@ -286,7 +286,10 @@ export function IDEPanel({
               }`}
               onClick={() => setActiveFileId(file.id)}
             >
-              <span className="text-[10px] opacity-60">{file.language === 'python' ? '🐍' : '📜'}</span>
+              {file.language === 'python' 
+                ? <FileCode className="w-3 h-3 text-blue-400/70" />
+                : <FileText className="w-3 h-3 text-gray-400/70" />
+              }
               <span>{file.name}</span>
               {file.isNew && <span className="w-1.5 h-1.5 bg-amber-400 rounded-full" />}
               {files.length > 1 && (
