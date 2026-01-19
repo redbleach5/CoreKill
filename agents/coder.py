@@ -1,6 +1,7 @@
 """Агент для генерации кода по тестам и плану (TDD)."""
 from typing import Optional, Dict, Any
 from infrastructure.local_llm import LocalLLM
+from infrastructure.prompt_enhancer import get_prompt_enhancer
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -18,14 +19,21 @@ class CoderAgent:
     """Агент для генерации рабочего кода, который должен пройти сгенерированные тесты.
     
     Следует TDD-подходу: код генерируется ПОСЛЕ тестов.
+    Использует PromptEnhancer для динамического улучшения промптов.
     """
 
-    def __init__(self, model: Optional[str] = None, temperature: float = 0.25) -> None:
+    def __init__(
+        self, 
+        model: Optional[str] = None, 
+        temperature: float = 0.25,
+        user_query: str = ""
+    ) -> None:
         """Инициализация агента генерации кода.
         
         Args:
             model: Модель для генерации кода (если None, выбирается из config)
             temperature: Температура генерации (0.15-0.35 по правилам)
+            user_query: Оригинальный запрос пользователя для улучшения промптов
         """
         if model is None:
             # Используем ModelRouter для выбора модели (поддерживает будущее расширение роя моделей)
@@ -42,13 +50,16 @@ class CoderAgent:
             temperature=temperature,
             top_p=0.9
         )
+        self.user_query = user_query
+        self.prompt_enhancer = get_prompt_enhancer()
 
     def generate_code(
         self,
         plan: str,
         tests: str,
         context: str,
-        intent_type: str
+        intent_type: str,
+        user_query: str = ""
     ) -> str:
         """Генерирует рабочий код на основе тестов, плана и контекста.
         
@@ -57,6 +68,7 @@ class CoderAgent:
             tests: Сгенерированные pytest тесты
             context: Собранный контекст из RAG/веб-поиска
             intent_type: Тип намерения (create/modify/debug/etc)
+            user_query: Оригинальный запрос пользователя (для улучшения промпта)
             
         Returns:
             Строка с полным кодом. Пустая строка в случае ошибки.
@@ -68,14 +80,29 @@ class CoderAgent:
             logger.info("ℹ️ Пропущена генерация кода для приветствия")
             return ""
         
-        prompt = self._build_code_generation_prompt(
-            plan=plan,
-            tests=tests,
-            context=context,
-            intent_type=intent_type
-        )
+        # Используем оригинальный запрос пользователя если передан
+        query = user_query or self.user_query
         
-        response = self.llm.generate(prompt, num_predict=4096)
+        # Используем динамическое улучшение промпта через LLM
+        if query:
+            prompt = self.prompt_enhancer.enhance_for_coding(
+                user_query=query,
+                intent_type=intent_type,
+                plan=plan,
+                tests=tests,
+                context=context
+            )
+        else:
+            # Fallback на старый метод если нет запроса
+            prompt = self._build_code_generation_prompt(
+                plan=plan,
+                tests=tests,
+                context=context,
+                intent_type=intent_type
+            )
+        
+        config = get_config()
+        response = self.llm.generate(prompt, num_predict=config.llm_tokens_code)
         
         # Очищаем и валидируем сгенерированный код
         cleaned_code = self._clean_code(response)
@@ -118,7 +145,8 @@ class CoderAgent:
             validation_results=validation_results
         )
         
-        response = self.llm.generate(prompt, num_predict=4096)
+        config = get_config()
+        response = self.llm.generate(prompt, num_predict=config.llm_tokens_code)
         
         # Очищаем исправленный код
         fixed_code = self._clean_code(response)

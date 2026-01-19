@@ -8,6 +8,7 @@ from agents.test_generator import TestGeneratorAgent
 from agents.coder import CoderAgent
 from agents.debugger import DebuggerAgent, DebugResult
 from agents.reflection import ReflectionAgent, ReflectionResult
+from agents.critic import CriticAgent, get_critic_agent, CriticReport
 from agents.memory import MemoryAgent
 from utils.validation import validate_code
 from utils.logger import get_logger
@@ -27,6 +28,7 @@ _test_generator: TestGeneratorAgent | None = None
 _coder_agent: CoderAgent | None = None
 _debugger_agent: DebuggerAgent | None = None
 _reflection_agent: ReflectionAgent | None = None
+_critic_agent: CriticAgent | None = None
 
 
 def _initialize_agents(state: AgentState) -> None:
@@ -36,7 +38,7 @@ def _initialize_agents(state: AgentState) -> None:
         state: State с параметрами для инициализации
     """
     global _memory_agent, _intent_agent, _planner_agent, _researcher_agent
-    global _test_generator, _coder_agent, _debugger_agent, _reflection_agent
+    global _test_generator, _coder_agent, _debugger_agent, _reflection_agent, _critic_agent
     
     if _memory_agent is None:
         _memory_agent = MemoryAgent()
@@ -77,6 +79,9 @@ def _initialize_agents(state: AgentState) -> None:
             model=state.get("model"),
             temperature=state.get("temperature", 0.25)
         )
+    
+    if _critic_agent is None:
+        _critic_agent = get_critic_agent()
 
 
 
@@ -502,5 +507,43 @@ def reflection_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка рефлексии: {e}", error=e)
         state["reflection_result"] = None
+    
+    return state
+
+
+def critic_node(state: AgentState) -> AgentState:
+    """Узел для критического анализа сгенерированного кода.
+    
+    Args:
+        state: Текущий state
+        
+    Returns:
+        Обновленный state с critic_report
+    """
+    _initialize_agents(state)
+    
+    code = state.get("code", "")
+    tests = state.get("tests", "")
+    task = state.get("task", "")
+    validation_results = state.get("validation_results", {})
+    
+    logger.info("🔎 Критический анализ кода...")
+    
+    try:
+        if _critic_agent and code:
+            critic_report = _critic_agent.analyze(
+                code=code,
+                tests=tests,
+                task_description=task,
+                validation_results=validation_results
+            )
+            state["critic_report"] = critic_report
+            logger.info(f"✅ Критический анализ завершён. Оценка: {critic_report.overall_score:.2f}")
+        else:
+            logger.warning("⚠️ Critic Agent не инициализирован или код пустой")
+            state["critic_report"] = None
+    except Exception as e:
+        logger.error(f"❌ Ошибка критического анализа: {e}", error=e)
+        state["critic_report"] = None
     
     return state

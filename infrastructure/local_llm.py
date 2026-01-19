@@ -2,6 +2,8 @@
 import ollama
 from typing import Optional, Dict, Any
 import time
+import signal
+from contextlib import contextmanager
 
 from utils.logger import get_logger
 
@@ -9,19 +11,55 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
+class TimeoutError(Exception):
+    """Исключение для таймаута LLM запроса."""
+    pass
+
+
+@contextmanager
+def timeout_handler(seconds: int, operation: str = "LLM request"):
+    """Контекстный менеджер для timeout операций.
+    
+    Args:
+        seconds: Таймаут в секундах
+        operation: Описание операции для логирования
+        
+    Raises:
+        TimeoutError: Если операция превысила таймаут
+    """
+    def handler(signum: int, frame: Any) -> None:
+        raise TimeoutError(f"{operation} превысил таймаут {seconds} секунд")
+    
+    # Устанавливаем обработчик сигнала
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    
+    try:
+        yield
+    finally:
+        # Восстанавливаем предыдущий обработчик
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 class LocalLLM:
     """Класс для работы с локальными моделями через Ollama API.
     
-    Поддерживает retry, настройку параметров генерации и обработку ошибок.
+    Поддерживает retry с exponential backoff, настройку параметров генерации и обработку ошибок.
     """
+
+    # Базовая задержка для exponential backoff (секунды)
+    BASE_RETRY_DELAY = 1.0
+    # Максимальная задержка между retry
+    MAX_RETRY_DELAY = 30.0
 
     def __init__(
         self,
         model: str,
         temperature: float = 0.25,
         top_p: float = 0.9,
-        timeout: int = 300,
-        max_retries: int = 2
+        timeout: int = 120,
+        max_retries: int = 3
     ) -> None:
         """Инициализация LocalLLM.
         
@@ -29,7 +67,7 @@ class LocalLLM:
             model: Название модели Ollama
             temperature: Температура генерации (0.15-0.35 по правилам)
             top_p: Параметр top_p для генерации
-            timeout: Таймаут запроса в секундах
+            timeout: Таймаут запроса в секундах (по умолчанию 120с)
             max_retries: Максимальное количество повторных попыток
         """
         self.model = model
@@ -37,6 +75,18 @@ class LocalLLM:
         self.top_p = top_p
         self.timeout = timeout
         self.max_retries = max_retries
+    
+    def _calculate_backoff(self, attempt: int) -> float:
+        """Вычисляет задержку для exponential backoff.
+        
+        Args:
+            attempt: Номер попытки (начиная с 0)
+            
+        Returns:
+            Задержка в секундах
+        """
+        delay = self.BASE_RETRY_DELAY * (2 ** attempt)
+        return min(delay, self.MAX_RETRY_DELAY)
 
     def generate(
         self,
@@ -86,23 +136,45 @@ class LocalLLM:
                         logger.warning(f"⚠️ Ollama недоступен, проверьте что сервис запущен: {e}")
                         return ""
                 
-                # Прямой вызов без дополнительных потоков/таймаутов
-                # Ollama сам обрабатывает таймауты на уровне HTTP
-                response = ollama.generate(
-                    model=self.model,
-                    prompt=prompt,
-                    options=options,
-                    **{k: v for k, v in kwargs.items() if k != "options"}
-                )
+                start_time = time.time()
                 
+                # Вызов с timeout (через signal на Unix)
+                try:
+                    with timeout_handler(self.timeout, f"Ollama generate ({self.model})"):
+                        response = ollama.generate(
+                            model=self.model,
+                            prompt=prompt,
+                            options=options,
+                            **{k: v for k, v in kwargs.items() if k != "options"}
+                        )
+                except TimeoutError as te:
+                    elapsed = time.time() - start_time
+                    logger.warning(f"⏱️ Таймаут LLM запроса после {elapsed:.1f}с: {te}")
+                    raise
+                
+                elapsed = time.time() - start_time
                 result = response.get("response", "").strip()
+                
                 if result:
+                    logger.debug(f"✅ LLM ответ получен за {elapsed:.1f}с ({len(result)} символов)")
                     return result
+                else:
+                    logger.warning(f"⚠️ Пустой ответ от LLM после {elapsed:.1f}с")
+                    
+            except TimeoutError:
+                last_error = TimeoutError(f"Таймаут {self.timeout}с")
+                backoff = self._calculate_backoff(attempt)
+                if attempt < self.max_retries:
+                    logger.info(f"🔄 Retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с...")
+                    time.sleep(backoff)
+                    continue
                     
             except Exception as e:
                 last_error = e
+                backoff = self._calculate_backoff(attempt)
                 if attempt < self.max_retries:
-                    time.sleep(1)
+                    logger.info(f"🔄 Retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с после ошибки: {e}")
+                    time.sleep(backoff)
                     continue
                 else:
                     break
@@ -143,21 +215,39 @@ class LocalLLM:
         
         for attempt in range(self.max_retries + 1):
             try:
-                response = ollama.chat(
-                    model=self.model,
-                    messages=messages,
-                    options=options,
-                    **{k: v for k, v in kwargs.items() if k != "options"}
-                )
+                start_time = time.time()
+                
+                try:
+                    with timeout_handler(self.timeout, f"Ollama chat ({self.model})"):
+                        response = ollama.chat(
+                            model=self.model,
+                            messages=messages,
+                            options=options,
+                            **{k: v for k, v in kwargs.items() if k != "options"}
+                        )
+                except TimeoutError as te:
+                    elapsed = time.time() - start_time
+                    logger.warning(f"⏱️ Таймаут chat запроса после {elapsed:.1f}с: {te}")
+                    raise
                 
                 result = response.get("message", {}).get("content", "").strip()
                 if result:
                     return result
                     
+            except TimeoutError:
+                last_error = TimeoutError(f"Таймаут {self.timeout}с")
+                backoff = self._calculate_backoff(attempt)
+                if attempt < self.max_retries:
+                    logger.info(f"🔄 Chat retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с...")
+                    time.sleep(backoff)
+                    continue
+                    
             except Exception as e:
                 last_error = e
+                backoff = self._calculate_backoff(attempt)
                 if attempt < self.max_retries:
-                    time.sleep(1)
+                    logger.info(f"🔄 Chat retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с после ошибки: {e}")
+                    time.sleep(backoff)
                     continue
                 else:
                     break

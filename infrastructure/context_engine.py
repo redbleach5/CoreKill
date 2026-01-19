@@ -503,7 +503,7 @@ class ContextEngine:
         # Кэш индексов проектов
         self._index_cache: Dict[str, List[CodeChunk]] = {}
     
-    def index_project(self, project_path: str, extensions: List[str] = None) -> Dict[str, List[CodeChunk]]:
+    def index_project(self, project_path: str, extensions: Optional[List[str]] = None) -> Dict[str, List[CodeChunk]]:
         """Индексирует проект - разбивает все файлы на чанки.
         
         Args:
@@ -555,7 +555,7 @@ class ContextEngine:
         self,
         query: str,
         project_path: str,
-        extensions: List[str] = None
+        extensions: Optional[List[str]] = None
     ) -> str:
         """Получает релевантный контекст для запроса из проекта.
         

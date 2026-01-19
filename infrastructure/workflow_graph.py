@@ -10,7 +10,8 @@ from infrastructure.workflow_nodes import (
     validator_node,
     debugger_node,
     fixer_node,
-    reflection_node
+    reflection_node,
+    critic_node
 )
 from infrastructure.workflow_edges import (
     should_skip_greeting,
@@ -37,7 +38,8 @@ def create_workflow_graph() -> StateGraph:
     should_continue_self_healing → [continue: debugger_node, finish: reflection_node]
     debugger_node → fixer_node
     fixer_node → validator_node (цикл)
-    reflection_node → END
+    reflection_node → critic_node
+    critic_node → END
     
     Returns:
         Скомпилированный граф LangGraph
@@ -55,6 +57,7 @@ def create_workflow_graph() -> StateGraph:
     workflow.add_node("debugger", debugger_node)
     workflow.add_node("fixer", fixer_node)
     workflow.add_node("reflection", reflection_node)
+    workflow.add_node("critic", critic_node)
     
     # Добавляем рёбра (переходы)
     # START → intent
@@ -90,8 +93,9 @@ def create_workflow_graph() -> StateGraph:
     workflow.add_edge("debugger", "fixer")
     workflow.add_edge("fixer", "validator")  # Возвращаемся к валидации
     
-    # reflection → END
-    workflow.add_edge("reflection", END)
+    # reflection → critic → END
+    workflow.add_edge("reflection", "critic")
+    workflow.add_edge("critic", END)
     
     # Компилируем граф
     graph = workflow.compile()

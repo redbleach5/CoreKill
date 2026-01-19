@@ -101,8 +101,8 @@ class PlannerAgent:
             alternatives_count=alternatives_count
         )
         
-        # Для планирования используем меньше токенов (256) для быстрого ответа
-        response = self.llm.generate(prompt, num_predict=256)
+        config = get_config()
+        response = self.llm.generate(prompt, num_predict=config.llm_tokens_planning)
         
         plan = self._clean_plan(response)
         

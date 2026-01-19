@@ -1,7 +1,7 @@
 """Агент для сбора контекста (RAG + веб-поиск + память)."""
 from typing import Optional
 from infrastructure.rag import RAGSystem
-from infrastructure.web_search import simple_google_search
+from infrastructure.web_search import web_search
 from agents.memory import MemoryAgent
 from utils.logger import get_logger
 
@@ -101,7 +101,7 @@ class ResearcherAgent:
         
         if needs_web_search:
             logger.info("🌐 RAG недостаточно, выполняю веб-поиск...")
-            web_results = simple_google_search(query, max_results=max_web_results, timeout=10)
+            web_results = web_search(query, max_results=max_web_results, timeout=10)
             
             if web_results:
                 logger.info(f"✅ Найдено {len(web_results)} результатов веб-поиска")

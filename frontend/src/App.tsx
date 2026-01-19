@@ -5,10 +5,27 @@ import {
   Zap, Send, Square, Settings, ChevronRight, 
   Brain, ListTodo, Search, TestTube, Code2, Shield, RefreshCw,
   CheckCircle2, Loader2, AlertCircle, Copy, Download, ThumbsUp, ThumbsDown,
-  Sparkles, Terminal, FileCode
+  Sparkles, FileCode, MessageCircle, Bot, User
 } from 'lucide-react'
 
-// Конфигурация этапов (включая debug/fixing которые приходят от backend)
+// Типы сообщений в чате
+interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  type: 'text' | 'code' | 'progress' | 'error'
+  timestamp: Date
+  metadata?: {
+    intentType?: string
+    code?: string
+    tests?: string
+    stages?: Record<string, any>
+    metrics?: any
+    quality?: number
+  }
+}
+
+// Конфигурация этапов
 const stageConfig: Record<string, { label: string; icon: typeof Brain; description: string }> = {
   intent: { label: 'Анализ', icon: Brain, description: 'Понимание задачи' },
   planning: { label: 'План', icon: ListTodo, description: 'Разработка плана' },
@@ -19,14 +36,14 @@ const stageConfig: Record<string, { label: string; icon: typeof Brain; descripti
   debug: { label: 'Отладка', icon: AlertCircle, description: 'Анализ ошибок' },
   fixing: { label: 'Фикс', icon: Code2, description: 'Исправление кода' },
   reflection: { label: 'Оценка', icon: RefreshCw, description: 'Оценка качества' },
+  critic: { label: 'Критик', icon: AlertCircle, description: 'Критический анализ' },
   greeting: { label: 'Приветствие', icon: Sparkles, description: 'Приветствие' }
 }
 
-// Базовые этапы для прогресс-бара (без debug/fixing которые опциональны)
-const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection']
+const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
 
 function App() {
-  const { stages, results, metrics, isRunning, error, startTask, stopTask } = useAgentStream()
+  const { stages, results, metrics, isRunning, error, startTask, stopTask, reset } = useAgentStream()
   const [options, setOptions] = useState<TaskOptions>({
     model: '',
     temperature: 0.25,
@@ -34,12 +51,13 @@ function App() {
     maxIterations: 1
   })
 
-  const [currentTask, setCurrentTask] = useState<string>('')
+  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [taskInput, setTaskInput] = useState<string>('')
   const [showSettings, setShowSettings] = useState(false)
-  const [copied, setCopied] = useState(false)
   const [availableModels, setAvailableModels] = useState<string[]>([])
+  const [currentAssistantId, setCurrentAssistantId] = useState<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
 
   // Загрузка моделей
   useEffect(() => {
@@ -64,83 +82,327 @@ function App() {
   // Автоскролл
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [stages, results, isRunning])
+  }, [messages, stages, isRunning])
 
-  const handleStartTask = () => {
-    if (taskInput.trim() && !isRunning) {
-      const task = taskInput.trim()
-      setCurrentTask(task)
-      setTaskInput('')
-      setCopied(false) // Сбрасываем состояние копирования
-      startTask(task, options)
+  // Обновляем сообщение ассистента при изменении stages/results
+  useEffect(() => {
+    if (!currentAssistantId) return
+
+    const intentType = results.intent?.type || ''
+    const isSimpleResponse = intentType === 'greeting' || intentType === 'help'
+    const greetingMessage = stages['greeting']?.result?.message || results.greeting_message
+
+    setMessages(prev => prev.map(msg => {
+      if (msg.id !== currentAssistantId) return msg
+
+      // Для простых ответов (greeting/help) — просто текст
+      if (isSimpleResponse && greetingMessage) {
+        return {
+          ...msg,
+          content: greetingMessage,
+          type: 'text' as const,
+          metadata: { intentType }
+        }
+      }
+
+      // Для генерации кода — прогресс и код
+      const hasCode = !!results.code
+
+      return {
+        ...msg,
+        type: hasCode ? 'code' as const : 'progress' as const,
+        content: hasCode ? '' : 'Генерация...',
+        metadata: {
+          intentType,
+          code: results.code,
+          tests: results.tests,
+          stages: stages,
+          metrics: metrics,
+          quality: metrics?.overall
+        }
+      }
+    }))
+  }, [stages, results, metrics, currentAssistantId])
+
+  // Завершение генерации
+  useEffect(() => {
+    if (!isRunning && currentAssistantId) {
+      // Задержка чтобы финальное состояние успело обновиться
+      setTimeout(() => setCurrentAssistantId(null), 100)
+    }
+  }, [isRunning])
+
+  const handleSubmit = () => {
+    if (!taskInput.trim() || isRunning) return
+
+    const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: taskInput.trim(),
+      type: 'text',
+      timestamp: new Date()
+    }
+
+    const assistantId = `assistant-${Date.now()}`
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      type: 'progress',
+      timestamp: new Date()
+    }
+
+    setMessages(prev => [...prev, userMessage, assistantMessage])
+    setCurrentAssistantId(assistantId)
+    setTaskInput('')
+
+    // Reset stream state and start
+    reset()
+    startTask(taskInput.trim(), options)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSubmit()
     }
   }
 
-  // Сброс при запуске новой задачи (для возможности отправить новую после завершения)
-  const handleNewTask = () => {
-    setCurrentTask('')
+  const handleCopy = async (code: string) => {
+    await navigator.clipboard.writeText(code)
+    // Visual feedback handled by button state
   }
 
-  const handleCopy = async () => {
-    if (results.code) {
-      await navigator.clipboard.writeText(results.code)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    }
+  const handleDownload = (code: string) => {
+    const blob = new Blob([code], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'generated_code.py'
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
-  const handleDownload = () => {
-    if (results.code) {
-      const blob = new Blob([results.code], { type: 'text/plain' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = 'generated_code.py'
-      a.click()
-      URL.revokeObjectURL(url)
-    }
-  }
-
-  const handleFeedback = async (feedback: 'positive' | 'negative') => {
-    try {
-      await fetch('/api/feedback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: currentTask, feedback })
-      })
-    } catch (err) {
-      console.error('Ошибка отправки feedback:', err)
-    }
-  }
-
-  const getStageStatus = (stage: string) => {
-    const data = stages[stage]
+  const getStageStatus = (stage: string, stageData: Record<string, any>) => {
+    const data = stageData[stage]
     if (!data || data.status === 'idle') return 'pending'
     if (data.status === 'error') return 'error'
     if (data.status === 'end') return 'completed'
     return 'active'
   }
 
-  const hasStarted = currentTask || Object.keys(stages).length > 0
-  const hasCode = !!results.code
-  const completedCount = Object.values(stages).filter(s => s.status === 'end').length
-  
-  // Проверяем есть ли debug/fixing этапы (они опциональны)
-  const hasDebugStages = stages['debug'] || stages['fixing']
-  
-  // Проверяем приветствие
-  const isGreeting = results.intent?.type === 'greeting' || stages['greeting']
-  
-  // Debug логирование (отключено в production)
-  // useEffect(() => {
-  //   if (process.env.NODE_ENV === 'development') {
-  //     console.log('🔍 DEBUG:', { isGreeting, stages: Object.keys(stages) })
-  //   }
-  // }, [isGreeting, stages])
+  // Рендер сообщения пользователя
+  const renderUserMessage = (msg: ChatMessage) => (
+    <div key={msg.id} className="flex gap-3 justify-end">
+      <div className="max-w-[80%] bg-gradient-to-br from-blue-600 to-violet-600 rounded-2xl rounded-tr-sm px-4 py-3">
+        <p className="text-white whitespace-pre-wrap">{msg.content}</p>
+      </div>
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center">
+        <User className="w-4 h-4 text-blue-400" />
+      </div>
+    </div>
+  )
+
+  // Рендер текстового ответа (greeting/help)
+  const renderTextMessage = (msg: ChatMessage) => (
+    <div key={msg.id} className="flex gap-3">
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center">
+        <Bot className="w-4 h-4 text-emerald-400" />
+      </div>
+      <div className="max-w-[80%] bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm px-4 py-3">
+        <p className="text-gray-200 whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+      </div>
+    </div>
+  )
+
+  // Рендер прогресса генерации
+  const renderProgressMessage = (msg: ChatMessage) => {
+    const stageData = msg.metadata?.stages || stages
+    const completedCount = Object.values(stageData).filter((s: any) => s.status === 'end').length
+    const totalStages = stageOrder.length
+
+    return (
+      <div key={msg.id} className="flex gap-3">
+        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500/20 to-violet-500/20 flex items-center justify-center">
+          <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+        </div>
+        <div className="flex-1 max-w-[85%]">
+          <div className="bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
+              <span className="text-sm text-gray-300">Выполнение...</span>
+              <span className="text-xs text-gray-500 ml-auto">{completedCount}/{totalStages} этапов</span>
+            </div>
+            
+            {/* Mini progress bar */}
+            <div className="flex gap-1">
+              {stageOrder.map((stage) => {
+                const status = getStageStatus(stage, stageData)
+                const config = stageConfig[stage]
+                return (
+                  <div
+                    key={stage}
+                    className={`flex-1 h-1.5 rounded-full transition-all duration-300 ${
+                      status === 'completed' ? 'bg-emerald-500' :
+                      status === 'active' ? 'bg-blue-500 animate-pulse' :
+                      status === 'error' ? 'bg-red-500' :
+                      'bg-white/10'
+                    }`}
+                    title={config?.label}
+                  />
+                )
+              })}
+            </div>
+            
+            {/* Current stage */}
+            {Object.entries(stageData).map(([name, data]: [string, any]) => {
+              if (data.status !== 'start') return null
+              const config = stageConfig[name]
+              if (!config) return null
+              return (
+                <div key={name} className="mt-3 flex items-center gap-2 text-sm text-gray-400">
+                  <config.icon className="w-4 h-4 text-blue-400" />
+                  <span>{config.description}...</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Рендер сообщения с кодом
+  const renderCodeMessage = (msg: ChatMessage) => {
+    const code = msg.metadata?.code || ''
+    const tests = msg.metadata?.tests || ''
+    const quality = msg.metadata?.quality
+    const stageData = msg.metadata?.stages || {}
+    const hasValidationIssues = stageData['validation']?.result?.success === false
+
+    return (
+      <div key={msg.id} className="flex gap-3">
+        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center">
+          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+        </div>
+        <div className="flex-1 max-w-[90%] space-y-3">
+          {/* Status badge */}
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+              <CheckCircle2 className="w-3 h-3" />
+              Готово
+            </span>
+            {hasValidationIssues && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                <AlertCircle className="w-3 h-3" />
+                Код был исправлен после валидации
+              </span>
+            )}
+          </div>
+
+          {/* Code block */}
+          <div className="bg-[#0d1117] border border-white/10 rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2 bg-white/5 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <FileCode className="w-4 h-4 text-gray-400" />
+                <span className="text-sm text-gray-400">generated_code.py</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => handleCopy(code)}
+                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                  title="Копировать"
+                >
+                  <Copy className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => handleDownload(code)}
+                  className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded transition-colors"
+                  title="Скачать"
+                >
+                  <Download className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <pre className="p-4 overflow-x-auto max-h-96">
+              <code className="text-sm text-gray-300 font-mono">{code}</code>
+            </pre>
+          </div>
+
+          {/* Tests (collapsible) */}
+          {tests && (
+            <details className="group">
+              <summary className="flex items-center gap-2 cursor-pointer text-sm text-gray-400 hover:text-white transition-colors">
+                <TestTube className="w-4 h-4" />
+                <span>Тесты</span>
+                <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
+              </summary>
+              <div className="mt-2 bg-[#0d1117] border border-white/10 rounded-xl overflow-hidden">
+                <pre className="p-4 overflow-x-auto max-h-64">
+                  <code className="text-sm text-gray-300 font-mono">{tests}</code>
+                </pre>
+              </div>
+            </details>
+          )}
+
+          {/* Quality & Feedback */}
+          {quality !== undefined && (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-400">Качество:</span>
+                <span className={`text-sm font-medium ${
+                  quality >= 0.8 ? 'text-emerald-400' :
+                  quality >= 0.6 ? 'text-amber-400' :
+                  'text-red-400'
+                }`}>
+                  {Math.round(quality * 100)}%
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button className="p-1.5 text-gray-500 hover:text-emerald-400 hover:bg-emerald-500/10 rounded transition-colors">
+                  <ThumbsUp className="w-4 h-4" />
+                </button>
+                <button className="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors">
+                  <ThumbsDown className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // Рендер сообщения
+  const renderMessage = (msg: ChatMessage) => {
+    if (msg.role === 'user') return renderUserMessage(msg)
+    
+    switch (msg.type) {
+      case 'text':
+        return renderTextMessage(msg)
+      case 'progress':
+        return renderProgressMessage(msg)
+      case 'code':
+        return renderCodeMessage(msg)
+      case 'error':
+        return (
+          <div key={msg.id} className="flex gap-3">
+            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center">
+              <AlertCircle className="w-4 h-4 text-red-400" />
+            </div>
+            <div className="bg-red-500/10 border border-red-500/20 rounded-2xl rounded-tl-sm px-4 py-3">
+              <p className="text-red-400">{msg.content}</p>
+            </div>
+          </div>
+        )
+      default:
+        return renderTextMessage(msg)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-gray-100 flex flex-col">
-      {/* Минимальный Header */}
+      {/* Header */}
       <header className="flex-shrink-0 border-b border-white/5 px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center">
@@ -151,7 +413,6 @@ function App() {
         </div>
         
         <div className="flex items-center gap-3">
-          {/* Модель */}
           {availableModels.length > 0 && (
             <select
               value={options.model}
@@ -177,7 +438,7 @@ function App() {
         </div>
       </header>
 
-      {/* Settings Dropdown */}
+      {/* Settings */}
       {showSettings && (
         <div className="border-b border-white/5 bg-white/[0.02] px-6 py-4">
           <div className="max-w-2xl mx-auto flex flex-wrap gap-6 text-sm">
@@ -219,32 +480,33 @@ function App() {
         </div>
       )}
 
-      {/* Main Chat Area */}
+      {/* Chat Area */}
       <main className="flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-4 py-8">
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
             
             {/* Welcome State */}
-            {!hasStarted && (
-              <div className="text-center py-20">
+            {messages.length === 0 && (
+              <div className="text-center py-16">
                 <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500/20 to-violet-500/20 border border-white/10 mb-6">
-                  <Sparkles className="w-8 h-8 text-blue-400" />
+                  <MessageCircle className="w-8 h-8 text-blue-400" />
                 </div>
-                <h1 className="text-2xl font-semibold text-white mb-2">Что вы хотите создать?</h1>
-                <p className="text-gray-400 max-w-md mx-auto">
-                  Опишите задачу, и AI-агент сгенерирует код с тестами и валидацией
+                <h1 className="text-2xl font-semibold text-white mb-2">Чем могу помочь?</h1>
+                <p className="text-gray-400 max-w-md mx-auto mb-8">
+                  Опишите задачу — я сгенерирую код, помогу с отладкой или отвечу на вопросы
                 </p>
                 
-                {/* Quick Actions */}
-                <div className="flex flex-wrap justify-center gap-2 mt-8">
+                {/* Quick suggestions */}
+                <div className="flex flex-wrap justify-center gap-2">
                   {[
-                    'FastAPI эндпоинт для пользователей',
-                    'CLI утилита для работы с файлами',
-                    'Парсер JSON с валидацией'
+                    '👋 Привет! Что ты умеешь?',
+                    '📝 Напиши функцию сортировки',
+                    '🔧 Создай REST API эндпоинт',
+                    '🧪 Напиши тесты для калькулятора'
                   ].map((example) => (
                     <button
                       key={example}
-                      onClick={() => setTaskInput(example)}
+                      onClick={() => setTaskInput(example.replace(/^[^\s]+\s/, ''))}
                       className="px-4 py-2 text-sm text-gray-400 bg-white/5 hover:bg-white/10 
                                  border border-white/10 rounded-full transition-colors"
                     >
@@ -255,246 +517,17 @@ function App() {
               </div>
             )}
 
-            {/* Task & Progress */}
-            {hasStarted && (
-              <div className="space-y-6">
-                {/* User Message */}
-                <div className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center flex-shrink-0">
-                    <span className="text-xs font-medium text-white">Вы</span>
-                  </div>
-                  <div className="flex-1 pt-1">
-                    <p className="text-gray-100">{currentTask}</p>
-                  </div>
+            {/* Messages */}
+            {messages.map(renderMessage)}
+            
+            {/* Error */}
+            {error && (
+              <div className="flex gap-3">
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center">
+                  <AlertCircle className="w-4 h-4 text-red-400" />
                 </div>
-
-                {/* Agent Response */}
-                <div className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center flex-shrink-0">
-                    <Zap className="w-4 h-4 text-white" />
-                  </div>
-                  <div className="flex-1 space-y-4">
-                    {/* Progress Timeline */}
-                    <div className="bg-white/[0.03] rounded-xl border border-white/5 overflow-hidden">
-                      {/* Compact Progress Bar */}
-                      <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          {isRunning ? (
-                            <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
-                          ) : hasCode ? (
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                          ) : (
-                            <Terminal className="w-4 h-4 text-gray-400" />
-                          )}
-                          <span className="text-sm text-gray-300">
-                            {isRunning ? 'Выполнение...' : hasCode ? 'Готово' : 'Ожидание'}
-                          </span>
-                        </div>
-                        <span className="text-xs text-gray-500">
-                          {completedCount}/7 этапов
-                        </span>
-                      </div>
-                      
-                      {/* Stages Grid */}
-                      <div className="p-4">
-                        <div className="flex gap-1">
-                          {stageOrder.map((stage) => {
-                            const status = getStageStatus(stage)
-                            const config = stageConfig[stage]
-                            const Icon = config.icon
-                            
-                            return (
-                              <div
-                                key={stage}
-                                className="flex-1 group relative"
-                              >
-                                {/* Progress Segment */}
-                                <div className={`h-1.5 rounded-full transition-all duration-500 ${
-                                  status === 'completed' ? 'bg-emerald-500' :
-                                  status === 'active' ? 'bg-blue-500 animate-pulse' :
-                                  status === 'error' ? 'bg-red-500' :
-                                  'bg-white/10'
-                                }`} />
-                                
-                                {/* Tooltip */}
-                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 
-                                                opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
-                                  <div className="bg-gray-900 border border-white/10 rounded-lg px-3 py-2 
-                                                  text-xs whitespace-nowrap shadow-xl">
-                                    <div className="flex items-center gap-2">
-                                      <Icon className={`w-3 h-3 ${
-                                        status === 'completed' ? 'text-emerald-400' :
-                                        status === 'active' ? 'text-blue-400' :
-                                        status === 'error' ? 'text-red-400' :
-                                        'text-gray-500'
-                                      }`} />
-                                      <span className="text-gray-200">{config.label}</span>
-                                    </div>
-                                    <div className="text-gray-500 mt-0.5">{config.description}</div>
-                                  </div>
-                                </div>
-                              </div>
-                            )
-                          })}
-                        </div>
-                        
-                        {/* Active Stage Info */}
-                        {isRunning && (
-                          <div className="mt-4 flex items-center gap-2 text-sm">
-                            {(() => {
-                              const activeStage = stageOrder.find(s => getStageStatus(s) === 'active')
-                              if (!activeStage) return null
-                              const config = stageConfig[activeStage]
-                              const Icon = config.icon
-                              return (
-                                <>
-                                  <Icon className="w-4 h-4 text-blue-400" />
-                                  <span className="text-gray-400">{config.description}</span>
-                                  <Loader2 className="w-3 h-3 text-blue-400 animate-spin ml-auto" />
-                                </>
-                              )
-                            })()}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Greeting Response */}
-                    {isGreeting && (stages['greeting']?.result?.message || results.greeting_message) && (
-                      <div className="p-4 bg-gradient-to-br from-blue-500/10 to-violet-500/10 border border-white/10 rounded-xl">
-                        <pre className="text-sm text-gray-300 whitespace-pre-wrap font-sans">
-                          {stages['greeting']?.result?.message || results.greeting_message}
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* Debug/Fixing Stages (если были ошибки и исправления) */}
-                    {hasDebugStages && !isRunning && (
-                      <div className="flex items-center gap-2 px-4 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg">
-                        <AlertCircle className="w-4 h-4 text-amber-400" />
-                        <span className="text-sm text-amber-300">
-                          Код был исправлен после валидации
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Error */}
-                    {error && (
-                      <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
-                        <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
-                        <div>
-                          <div className="text-sm font-medium text-red-300">Ошибка</div>
-                          <div className="text-sm text-red-400/80 mt-1">{error}</div>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Code Result */}
-                    {hasCode && (
-                      <div className="bg-white/[0.03] rounded-xl border border-white/5 overflow-hidden">
-                        {/* Code Header */}
-                        <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <FileCode className="w-4 h-4 text-emerald-400" />
-                            <span className="text-sm text-gray-300">generated_code.py</span>
-                          </div>
-                          <div className="flex items-center gap-1">
-                            <button
-                              onClick={handleCopy}
-                              className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                              title="Копировать"
-                            >
-                              {copied ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                            </button>
-                            <button
-                              onClick={handleDownload}
-                              className="p-1.5 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                              title="Скачать"
-                            >
-                              <Download className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                        
-                        {/* Code Content */}
-                        <pre className="p-4 text-sm overflow-x-auto max-h-96 overflow-y-auto">
-                          <code className="text-gray-300">{results.code}</code>
-                        </pre>
-                      </div>
-                    )}
-
-                    {/* Tests */}
-                    {results.tests && (
-                      <details className="bg-white/[0.03] rounded-xl border border-white/5 overflow-hidden group">
-                        <summary className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-white/[0.02]">
-                          <div className="flex items-center gap-2">
-                            <TestTube className="w-4 h-4 text-violet-400" />
-                            <span className="text-sm text-gray-300">Тесты</span>
-                          </div>
-                          <ChevronRight className="w-4 h-4 text-gray-500 group-open:rotate-90 transition-transform" />
-                        </summary>
-                        <pre className="p-4 text-sm overflow-x-auto border-t border-white/5 max-h-64 overflow-y-auto">
-                          <code className="text-gray-400">{results.tests}</code>
-                        </pre>
-                      </details>
-                    )}
-
-                    {/* Metrics & Actions */}
-                    {hasCode && metrics.overall > 0 && (
-                      <div className="flex items-center justify-between gap-4 px-4 py-3 bg-white/[0.03] rounded-xl border border-white/5">
-                        <div className="flex items-center gap-4">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-gray-500">Качество:</span>
-                            <span className={`text-sm font-medium ${
-                              metrics.overall >= 0.8 ? 'text-emerald-400' :
-                              metrics.overall >= 0.5 ? 'text-amber-400' :
-                              'text-red-400'
-                            }`}>
-                              {(metrics.overall * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          
-                          <div className="h-4 w-px bg-white/10" />
-                          
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleFeedback('positive')}
-                              className="p-1.5 text-gray-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-lg transition-colors"
-                              title="Хорошо"
-                            >
-                              <ThumbsUp className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => handleFeedback('negative')}
-                              className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"
-                              title="Плохо"
-                            >
-                              <ThumbsDown className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                        
-                        <button
-                          onClick={handleNewTask}
-                          className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
-                        >
-                          Новая задача
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Stop Button */}
-                    {isRunning && (
-                      <button
-                        onClick={stopTask}
-                        className="flex items-center gap-2 px-4 py-2 text-sm text-gray-400 
-                                   hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors"
-                      >
-                        <Square className="w-3 h-3" />
-                        Остановить
-                      </button>
-                    )}
-                  </div>
+                <div className="bg-red-500/10 border border-red-500/20 rounded-2xl rounded-tl-sm px-4 py-3">
+                  <p className="text-red-400">{error}</p>
                 </div>
               </div>
             )}
@@ -504,39 +537,52 @@ function App() {
         </div>
 
         {/* Input Area */}
-        <div className="flex-shrink-0 border-t border-white/5 bg-[#0a0a0f]/95 backdrop-blur-sm">
-          <div className="max-w-3xl mx-auto px-4 py-4">
-            <div className={`flex items-center gap-3 bg-white/[0.05] rounded-2xl px-4 py-3 
-                            border transition-all duration-200 ${
-                              isRunning 
-                                ? 'border-blue-500/30' 
-                                : 'border-white/10 focus-within:border-white/20'
-                            }`}>
-              <input
-                type="text"
+        <div className="flex-shrink-0 border-t border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl p-4">
+          <div className="max-w-3xl mx-auto">
+            <div className="relative">
+              <textarea
+                ref={inputRef}
                 value={taskInput}
                 onChange={(e) => setTaskInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleStartTask()}
-                placeholder={isRunning ? 'Выполняется задача...' : 'Опишите задачу...'}
+                onKeyDown={handleKeyDown}
+                placeholder="Опишите задачу..."
+                rows={1}
                 disabled={isRunning}
-                className="flex-1 bg-transparent text-gray-100 placeholder-gray-500 
-                           outline-none text-sm disabled:cursor-not-allowed"
+                className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 pr-24
+                           text-white placeholder-gray-500 resize-none
+                           focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/25
+                           disabled:opacity-50 disabled:cursor-not-allowed
+                           min-h-[48px] max-h-32"
+                style={{ height: 'auto' }}
+                onInput={(e) => {
+                  const target = e.target as HTMLTextAreaElement
+                  target.style.height = 'auto'
+                  target.style.height = Math.min(target.scrollHeight, 128) + 'px'
+                }}
               />
-              <button
-                onClick={handleStartTask}
-                disabled={!taskInput.trim() || isRunning}
-                className="p-2 bg-blue-500 hover:bg-blue-600 disabled:bg-white/10 
-                           disabled:cursor-not-allowed rounded-xl transition-all duration-200
-                           hover:shadow-lg hover:shadow-blue-500/25"
-              >
+              
+              <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 {isRunning ? (
-                  <Loader2 className="w-4 h-4 text-white/50 animate-spin" />
+                  <button
+                    onClick={stopTask}
+                    className="p-2 rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
+                  >
+                    <Square className="w-4 h-4" />
+                  </button>
                 ) : (
-                  <Send className="w-4 h-4 text-white" />
+                  <button
+                    onClick={handleSubmit}
+                    disabled={!taskInput.trim()}
+                    className="p-2 rounded-lg bg-blue-500 text-white hover:bg-blue-600 
+                               disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
                 )}
-              </button>
+              </div>
             </div>
-            <p className="text-xs text-gray-500 text-center mt-2">
+            
+            <p className="text-center text-xs text-gray-500 mt-2">
               AI может ошибаться. Проверяйте результаты.
             </p>
           </div>

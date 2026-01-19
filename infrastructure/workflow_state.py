@@ -3,6 +3,7 @@ from typing import TypedDict, Optional, Dict, Any
 from agents.intent import IntentResult
 from agents.debugger import DebugResult
 from agents.reflection import ReflectionResult
+from agents.critic import CriticReport
 
 
 class AgentState(TypedDict):
@@ -14,7 +15,7 @@ class AgentState(TypedDict):
     task: str  # Исходная задача пользователя
     max_iterations: int  # Максимальное количество итераций self-healing
     disable_web_search: bool  # Отключить веб-поиск
-    model: Optional[str]  # Модель Ollama (если None, выбирается автоматически)
+    model: Optional[str]  # Модель Ollама (если None, выбирается автоматически)
     temperature: float  # Температура генерации
     
     # Результаты агентов
@@ -26,6 +27,7 @@ class AgentState(TypedDict):
     validation_results: Dict[str, Any]  # Результаты валидации
     debug_result: Optional[DebugResult]  # Результат Debugger
     reflection_result: Optional[ReflectionResult]  # Результат Reflection
+    critic_report: Optional[CriticReport]  # Результат Critic агента
     
     # Метаданные workflow
     iteration: int  # Счетчик итераций self-healing

@@ -1,10 +1,11 @@
 """Загрузка конфигурации из config.toml."""
 from pathlib import Path
 from typing import Optional
-try:
-    import tomllib  # Python 3.11+
-except ImportError:
-    import tomli as tomllib  # Fallback для Python < 3.11
+import sys
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib  # type: ignore[import-not-found]  # Fallback для Python < 3.11
 
 from utils.logger import get_logger
 
@@ -113,6 +114,77 @@ class Config:
     def output_dir(self) -> str:
         """Директория для сохранения артефактов."""
         return self._config_data.get("default", {}).get("output_dir", "output")
+    
+    # === LLM Generation Limits ===
+    
+    @property
+    def llm_tokens_planning(self) -> int:
+        """Максимум токенов для генерации плана."""
+        return self._config_data.get("llm", {}).get("tokens_planning", 256)
+    
+    @property
+    def llm_tokens_tests(self) -> int:
+        """Максимум токенов для генерации тестов."""
+        return self._config_data.get("llm", {}).get("tokens_tests", 2048)
+    
+    @property
+    def llm_tokens_code(self) -> int:
+        """Максимум токенов для генерации кода."""
+        return self._config_data.get("llm", {}).get("tokens_code", 4096)
+    
+    @property
+    def llm_tokens_analysis(self) -> int:
+        """Максимум токенов для анализа/рефлексии."""
+        return self._config_data.get("llm", {}).get("tokens_analysis", 1024)
+    
+    @property
+    def llm_tokens_intent(self) -> int:
+        """Максимум токенов для классификации намерения."""
+        return self._config_data.get("llm", {}).get("tokens_intent", 128)
+    
+    @property
+    def llm_tokens_debug(self) -> int:
+        """Максимум токенов для анализа ошибок."""
+        return self._config_data.get("llm", {}).get("tokens_debug", 2048)
+    
+    @property
+    def llm_tokens_critic(self) -> int:
+        """Максимум токенов для критического анализа."""
+        return self._config_data.get("llm", {}).get("tokens_critic", 512)
+    
+    # === Quality Thresholds ===
+    
+    @property
+    def quality_threshold(self) -> float:
+        """Минимальный порог качества для успешного результата."""
+        return self._config_data.get("quality", {}).get("threshold", 0.7)
+    
+    @property
+    def confidence_threshold(self) -> float:
+        """Минимальный порог уверенности агентов."""
+        return self._config_data.get("quality", {}).get("confidence_threshold", 0.75)
+    
+    # === Web Search ===
+    
+    @property
+    def tavily_api_key(self) -> Optional[str]:
+        """API ключ для Tavily Search."""
+        import os
+        # Приоритет: переменная окружения > config.toml
+        env_key = os.environ.get("TAVILY_API_KEY")
+        if env_key:
+            return env_key
+        return self._config_data.get("web_search", {}).get("tavily_api_key")
+    
+    @property
+    def web_search_timeout(self) -> int:
+        """Таймаут веб-поиска в секундах."""
+        return self._config_data.get("web_search", {}).get("timeout", 10)
+    
+    @property
+    def web_search_max_results(self) -> int:
+        """Максимальное количество результатов веб-поиска."""
+        return self._config_data.get("web_search", {}).get("max_results", 3)
 
 
 def get_config() -> Config:

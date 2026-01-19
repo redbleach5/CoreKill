@@ -30,15 +30,27 @@ def run_pytest(code_str: str, test_str: str) -> Tuple[bool, str]:
             test_file = Path(tmpdir) / "test_code.py"
             
             code_file.write_text(code_str, encoding="utf-8")
-            test_file.write_text(test_str, encoding="utf-8")
             
-            # Запускаем pytest
+            # Добавляем import code в начало тестов если его нет
+            # Это позволяет тестам использовать функции из code.py
+            test_str_with_import = _ensure_code_import(test_str)
+            test_file.write_text(test_str_with_import, encoding="utf-8")
+            
+            # Создаём __init__.py для правильного импорта
+            init_file = Path(tmpdir) / "__init__.py"
+            init_file.write_text("", encoding="utf-8")
+            
+            # Запускаем pytest с добавлением tmpdir в PYTHONPATH
+            env = os.environ.copy()
+            env["PYTHONPATH"] = tmpdir + os.pathsep + env.get("PYTHONPATH", "")
+            
             result = subprocess.run(
-                ["pytest", str(test_file), "-v", "--tb=short"],
+                ["pytest", str(test_file), "-v", "--tb=short", "-x"],
                 cwd=tmpdir,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                env=env
             )
             
             success = result.returncode == 0
@@ -57,6 +69,69 @@ def run_pytest(code_str: str, test_str: str) -> Tuple[bool, str]:
             return False, "pytest не найден. Установите: pip install pytest"
         except Exception as e:
             return False, f"Ошибка запуска pytest: {e}"
+
+
+def _ensure_code_import(test_str: str) -> str:
+    """Добавляет импорт из code.py в тесты если его нет.
+    
+    Анализирует тесты и добавляет необходимые импорты из code.py.
+    
+    Args:
+        test_str: Исходный код тестов
+        
+    Returns:
+        Код тестов с добавленным импортом
+    """
+    import re
+    
+    # Проверяем есть ли уже импорт из code
+    if re.search(r'from\s+code\s+import|import\s+code', test_str):
+        return test_str
+    
+    # Ищем имена функций/классов которые используются в тестах но не определены
+    # Паттерн: вызовы функций вида function_name( или ClassName(
+    used_names = set(re.findall(r'\b([a-z_][a-z0-9_]*)\s*\(', test_str, re.IGNORECASE))
+    
+    # Исключаем стандартные функции pytest и Python
+    stdlib_names = {
+        'test', 'assert', 'print', 'len', 'range', 'str', 'int', 'float', 'bool',
+        'list', 'dict', 'set', 'tuple', 'type', 'isinstance', 'hasattr', 'getattr',
+        'setattr', 'open', 'sum', 'max', 'min', 'abs', 'round', 'sorted', 'reversed',
+        'enumerate', 'zip', 'map', 'filter', 'any', 'all', 'next', 'iter',
+        'pytest', 'fixture', 'mark', 'raises', 'approx', 'capsys', 'tmp_path',
+        'monkeypatch', 'capfd', 'caplog', 'request', 'parametrize'
+    }
+    
+    # Также исключаем функции определённые в самих тестах
+    defined_in_tests = set(re.findall(r'def\s+([a-z_][a-z0-9_]*)\s*\(', test_str, re.IGNORECASE))
+    
+    # Имена которые нужно импортировать
+    names_to_import = used_names - stdlib_names - defined_in_tests
+    
+    # Фильтруем только те что похожи на имена функций (не test_*)
+    names_to_import = {n for n in names_to_import if not n.startswith('test_')}
+    
+    if not names_to_import:
+        # Если не нашли конкретных имён, делаем wildcard import
+        import_line = "from code import *\n"
+    else:
+        # Импортируем конкретные имена
+        import_line = f"from code import {', '.join(sorted(names_to_import))}\n"
+    
+    # Находим место для вставки импорта (после существующих импортов или в начало)
+    lines = test_str.split('\n')
+    insert_pos = 0
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('import ') or stripped.startswith('from '):
+            insert_pos = i + 1
+        elif stripped and not stripped.startswith('#') and not stripped.startswith('"""') and not stripped.startswith("'''"):
+            # Нашли первую непустую строку не-импорт
+            break
+    
+    lines.insert(insert_pos, import_line)
+    return '\n'.join(lines)
 
 
 def check_mypy(code_str: str) -> Tuple[bool, str]:

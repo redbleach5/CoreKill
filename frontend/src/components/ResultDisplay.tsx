@@ -32,7 +32,7 @@ function showToast(message: string, type: 'success' | 'error' = 'success') {
   }, 3000)
 }
 
-export function ResultDisplay({ results, metrics, task, onFeedback }: ResultDisplayProps) {
+export function ResultDisplay({ results, metrics, task: _task, onFeedback }: ResultDisplayProps) {
   const [activeTab, setActiveTab] = useState<'task' | 'tests' | 'code' | 'reflection' | 'errors'>('task')
   const [copiedCode, setCopiedCode] = useState(false)
 

@@ -55,5 +55,28 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Health check endpoint с проверкой зависимостей."""
+    import ollama
+    from datetime import datetime
+    
+    health_status = {
+        "status": "ok",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "api": "ok",
+            "ollama": "unknown"
+        }
+    }
+    
+    # Проверяем Ollama
+    try:
+        models = ollama.list()
+        model_count = len(models.get("models", []))
+        health_status["services"]["ollama"] = "ok"
+        health_status["ollama_models"] = model_count
+    except Exception as e:
+        health_status["services"]["ollama"] = "error"
+        health_status["ollama_error"] = str(e)
+        health_status["status"] = "degraded"
+    
+    return health_status

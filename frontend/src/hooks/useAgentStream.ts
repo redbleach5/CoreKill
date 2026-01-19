@@ -50,6 +50,7 @@ interface UseAgentStreamReturn {
   error: string | null
   startTask: (task: string, options: TaskOptions) => void
   stopTask: () => void
+  reset: () => void
 }
 
 interface TaskOptions {
@@ -152,13 +153,12 @@ export function useAgentStream(): UseAgentStreamReturn {
 
     // В dev режиме подключаемся напрямую к backend (Vite proxy не поддерживает SSE)
     // В production можно использовать прокси
-    // Используем явную проверку - Vite всегда определяет import.meta.env.DEV
-    const isDev = import.meta.env.MODE === 'development' || !import.meta.env.PROD
+    const isDev = typeof window !== 'undefined' && window.location.port === '5173'
     const apiUrl = isDev
       ? `http://localhost:8000/api/stream?${params.toString()}`
       : `/api/stream?${params.toString()}`
     
-    console.log('🔌 Создаю EventSource:', apiUrl, { isDev, mode: import.meta.env.MODE })
+    console.log('🔌 Создаю EventSource:', apiUrl, { isDev })
     const eventSource = new EventSource(apiUrl)
     eventSourceRef.current = eventSource
 
@@ -356,7 +356,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       }
     })
 
-    eventSource.onerror = (err: Event) => {
+    eventSource.onerror = (_err: Event) => {
       // onerror вызывается с Event, а не MessageEvent, поэтому нет event.data
       // Это ошибка подключения, а не ошибка от backend
       
@@ -430,6 +430,27 @@ export function useAgentStream(): UseAgentStreamReturn {
     setIsRunning(false)
   }, [])
 
+  const reset = useCallback(() => {
+    // Сбрасываем все состояния для новой задачи
+    setStages({})
+    setResults({})
+    setMetrics({
+      planning: 0,
+      research: 0,
+      testing: 0,
+      coding: 0,
+      overall: 0
+    })
+    setError(null)
+    isCompletedRef.current = false
+    
+    // Закрываем существующее подключение если есть
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+      eventSourceRef.current = null
+    }
+  }, [])
+
   // Очистка при размонтировании
   useEffect(() => {
     return () => {
@@ -446,6 +467,7 @@ export function useAgentStream(): UseAgentStreamReturn {
     isRunning,
     error,
     startTask,
-    stopTask
+    stopTask,
+    reset
   }
 }

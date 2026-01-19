@@ -216,6 +216,11 @@ class ProjectRunner:
             True если порт освобождён, False если не удалось
         """
         try:
+            # Получаем PID текущего процесса и его родителя (чтобы не убить себя)
+            current_pid = os.getpid()
+            parent_pid = os.getppid()
+            safe_pids = {str(current_pid), str(parent_pid)}
+            
             # Получаем PID процесса на порту
             result = subprocess.run(
                 ["lsof", "-ti", f":{port}"],
@@ -229,9 +234,11 @@ class ProjectRunner:
                 return True
             
             pids = result.stdout.strip().split('\n')
+            killed_any = False
+            
             for pid in pids:
                 pid = pid.strip()
-                if pid:
+                if pid and pid not in safe_pids:
                     try:
                         subprocess.run(
                             ["kill", "-9", pid],
@@ -239,11 +246,13 @@ class ProjectRunner:
                             timeout=5
                         )
                         self.print_info(f"Процесс {pid} на порту {port} остановлен")
+                        killed_any = True
                     except Exception:
                         pass
             
-            # Даём время на освобождение порта
-            time.sleep(1)
+            # Даём время на освобождение порта только если что-то убили
+            if killed_any:
+                time.sleep(1)
             return True
             
         except Exception as e:
@@ -301,6 +310,10 @@ class ProjectRunner:
                     self.python_executable, "-m", "uvicorn",
                     "backend.api:app",
                     "--reload",
+                    "--reload-exclude", "output/*",
+                    "--reload-exclude", "logs/*",
+                    "--reload-exclude", "temp/*",
+                    "--reload-exclude", "*.jsonl",
                     "--port", str(self.backend_port),
                     "--host", "0.0.0.0"
                 ],

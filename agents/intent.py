@@ -27,55 +27,59 @@ class IntentResult:
 class IntentAgent:
     """Агент для классификации намерения пользователя."""
     
-    # Доступные типы намерений
-    INTENT_TYPES = [
-        "create",  # Создать новый код/функцию/файл
-        "modify",  # Изменить существующий код
-        "debug",   # Найти и исправить ошибки
-        "optimize", # Оптимизировать код (производительность/качество)
-        "explain", # Объяснить как работает код
-        "test",    # Написать/запустить тесты
-        "refactor" # Рефакторинг (улучшение структуры без изменения функциональности)
-    ]
+    # Доступные типы намерений с описаниями для LLM
+    INTENT_TYPES = {
+        "greeting": "Приветствие, знакомство (привет, здравствуйте, hello)",
+        "help": "Вопрос о возможностях системы, что умеет, как использовать",
+        "create": "Создать новый код, функцию, класс, модуль, скрипт",
+        "modify": "Изменить, обновить, добавить в существующий код",
+        "debug": "Найти и исправить ошибку, баг, проблему в КОНКРЕТНОМ коде",
+        "optimize": "Оптимизировать производительность, ускорить код",
+        "explain": "Объяснить как работает код, документация",
+        "test": "Написать тесты, проверить код",
+        "refactor": "Рефакторинг, улучшение структуры без изменения функциональности"
+    }
+    
+    # Единый список приветствий (используется в is_greeting_fast и _is_greeting)
+    GREETINGS = frozenset([
+        # Русские
+        "привет", "здравствуй", "здравствуйте", "добрый день", "добрый вечер",
+        "доброе утро", "доброй ночи", "хай", "хей", "салют",
+        # Английские
+        "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
+        "good evening", "good night", "howdy", "sup"
+    ])
+    
+    # Короткие приветствия для быстрой проверки без LLM
+    SIMPLE_GREETINGS = frozenset([
+        "привет", "здравствуй", "здравствуйте", "хай", "хей", "салют",
+        "hello", "hi", "hey", "howdy", "sup"
+    ])
     
     @staticmethod
     def is_greeting_fast(query: str) -> bool:
-        """Статический метод для быстрой проверки на приветствие БЕЗ инициализации агента.
+        """Быстрая проверка на простое приветствие (без LLM).
         
-        Используется для раннего выхода из workflow без инициализации тяжелых компонентов.
-        Вся логика проверки находится в IntentAgent, а не в роутере.
+        Используется ТОЛЬКО для очень коротких однозначных приветствий,
+        чтобы не тратить время на LLM для "привет" или "hello".
         
         Args:
             query: Запрос пользователя
             
         Returns:
-            True если это приветствие, False иначе
+            True если это однозначное короткое приветствие
         """
         if not query:
             return False
         
         query_lower = query.strip().lower()
-        
-        greetings = [
-            "привет", "здравствуй", "здравствуйте", "добрый день",
-            "добрый вечер", "доброе утро", "доброй ночи", "хай", "хей", "салют",
-            "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
-            "good evening", "good night", "howdy", "sup"
-        ]
-        
-        # Проверяем точное совпадение или начало фразы
-        for greeting in greetings:
-            if query_lower == greeting or query_lower.startswith(greeting + " "):
-                return True
-        
-        # Проверяем короткие запросы (1-2 слова), которые могут быть приветствиями
         words = query_lower.split()
-        if len(words) <= 2:
-            for greeting in greetings:
-                if greeting in words:
-                    return True
         
-        return False
+        # Только для очень коротких запросов (1-2 слова)
+        if len(words) > 3:
+            return False
+        
+        return query_lower in IntentAgent.SIMPLE_GREETINGS or words[0] in IntentAgent.SIMPLE_GREETINGS
     
     def __init__(self, model: Optional[str] = None, temperature: float = 0.2, lazy_llm: bool = False) -> None:
         """Инициализация агента определения намерения.
@@ -117,7 +121,9 @@ class IntentAgent:
         return self._llm
     
     def determine_intent(self, user_query: str) -> IntentResult:
-        """Определяет намерение пользователя из запроса.
+        """Определяет намерение пользователя через LLM.
+        
+        Использует лёгкую модель для умной классификации вместо хардкода паттернов.
         
         Args:
             user_query: Текст запроса пользователя
@@ -127,29 +133,23 @@ class IntentAgent:
         """
         if not user_query.strip():
             return IntentResult(
-                type="explain",
+                type="help",
                 confidence=0.5,
-                description="Пустой запрос, по умолчанию: объяснение"
+                description="Пустой запрос"
             )
         
-        # Проверяем на приветствие перед классификацией
-        if self._is_greeting(user_query):
+        # Только для очень простых приветствий (1-2 слова) пропускаем LLM
+        if self._is_greeting(user_query) and len(user_query.split()) <= 2:
             return IntentResult(
                 type="greeting",
                 confidence=0.95,
                 description="Приветствие пользователя"
             )
         
-        # Формируем промпт для классификации
-        prompt = self._build_classification_prompt(user_query)
-        
         logger.info(f"🔍 Определяю намерение для запроса: {user_query[:60]}...")
         
-        # Получаем ответ от модели (короткий ответ для быстрой классификации)
-        response = self.llm.generate(prompt, num_predict=64)
-        
-        # Парсим ответ
-        intent_result = self._parse_response(response, user_query)
+        # Полноценная LLM классификация
+        intent_result = self._classify_with_llm(user_query)
         
         logger.info(
             f"✅ Намерение определено: {intent_result.type} "
@@ -158,94 +158,121 @@ class IntentAgent:
         
         return intent_result
     
-    def _build_classification_prompt(self, query: str) -> str:
-        """Строит промпт для классификации намерения."""
-        intents_str = " | ".join(self.INTENT_TYPES)
-        
-        prompt = f"""Определи тип намерения пользователя из следующего списка: {intents_str}
-
-Запрос пользователя: "{query}"
-
-Ответь ТОЛЬКО одним словом из списка (без дополнительных объяснений):
-"""
-        return prompt
-    
-    def _parse_response(self, response: str, original_query: str) -> IntentResult:
-        """Парсит ответ модели и извлекает тип намерения.
-        
-        Args:
-            response: Ответ модели
-            original_query: Оригинальный запрос пользователя
-            
-        Returns:
-            IntentResult
-        """
-        response_clean = response.strip().lower()
-        
-        # Ищем одно из ключевых слов в ответе
-        found_intent: Optional[str] = None
-        for intent_type in self.INTENT_TYPES:
-            if intent_type in response_clean:
-                found_intent = intent_type
-                break
-        
-        # Если не нашли точное совпадение, пытаемся определить по ключевым словам запроса
-        if not found_intent:
-            found_intent = self._guess_intent_from_query(original_query)
-        
-        # Описания намерений на русском
-        descriptions = {
-            "create": "Создание нового кода, функции или файла",
-            "modify": "Изменение существующего кода",
-            "debug": "Поиск и исправление ошибок в коде",
-            "optimize": "Оптимизация производительности или качества кода",
-            "explain": "Объяснение как работает код",
-            "test": "Написание или запуск тестов",
-            "refactor": "Рефакторинг кода без изменения функциональности",
-            "greeting": "Приветствие пользователя"
-        }
-        
-        # Если всё ещё не определили, используем explain по умолчанию
-        if not found_intent:
-            found_intent = "explain"
-            confidence = 0.5
-        else:
-            # Высокая уверенность если модель явно указала тип
-            confidence = 0.85 if response_clean in self.INTENT_TYPES else 0.75
-        
-        return IntentResult(
-            type=found_intent,
-            confidence=confidence,
-            description=descriptions.get(found_intent, "Объяснение кода")
-        )
-    
-    def _guess_intent_from_query(self, query: str) -> Optional[str]:
-        """Пытается определить намерение по ключевым словам в запросе.
+    def _classify_with_llm(self, query: str) -> IntentResult:
+        """Классифицирует намерение через LLM.
         
         Args:
             query: Запрос пользователя
             
         Returns:
-            Тип намерения или None
+            IntentResult
         """
-        query_lower = query.lower()
+        # Формируем описание типов для промпта
+        types_description = "\n".join(
+            f"  - {intent}: {desc}" 
+            for intent, desc in self.INTENT_TYPES.items()
+        )
         
-        # Ключевые слова для каждого типа
-        keywords = {
-            "create": ["создать", "сделай", "напиши", "добавь новый", "create", "make", "write", "add new"],
-            "modify": ["изменить", "измени", "обнови", "modify", "change", "update", "edit"],
-            "debug": ["ошибка", "не работает", "исправь", "debug", "fix", "error", "broken", "баг"],
-            "optimize": ["оптимизируй", "ускорь", "улучши производительность", "optimize", "speed up", "performance"],
-            "explain": ["объясни", "как работает", "что делает", "explain", "how does", "what does"],
-            "test": ["тест", "проверь", "test", "check", "verify"],
-            "refactor": ["рефакторинг", "улучши структуру", "refactor", "restructure"]
+        prompt = f"""Classify this user request for a CODE GENERATION system.
+
+REQUEST: "{query}"
+
+TYPES:
+{types_description}
+
+RULES:
+- "help" = meta-questions: "что умеешь", "can you help", "как использовать", questions WITHOUT specific task
+- "greeting" = only simple greetings like "привет", "hello"  
+- "create" = specific task to generate code: "напиши X", "создай Y", "make Z"
+- "debug" = fix SPECIFIC code with errors
+- Other types = as described
+
+EXAMPLES:
+- "что ты умеешь?" -> help (meta-question about capabilities)
+- "можешь помочь?" -> help (no specific task mentioned)
+- "можешь написать функцию?" -> create (specific task: write function)
+- "напиши сортировку" -> create (specific task)
+- "ghbdtn" -> greeting (Russian "привет" in wrong layout)
+
+JSON response: {{"intent": "type", "confidence": 0.0-1.0}}
+JSON:"""
+
+        from utils.config import get_config
+        config = get_config()
+        response = self.llm.generate(prompt, num_predict=config.llm_tokens_intent)
+        
+        return self._parse_llm_classification(response, query)
+    
+    def _parse_llm_classification(self, response: str, original_query: str) -> IntentResult:
+        """Парсит JSON ответ от LLM классификации.
+        
+        Args:
+            response: Ответ модели
+            original_query: Оригинальный запрос
+            
+        Returns:
+            IntentResult
+        """
+        import json
+        
+        # Описания для результата
+        descriptions = {
+            "greeting": "Приветствие пользователя",
+            "help": "Вопрос о возможностях системы",
+            "create": "Создание нового кода",
+            "modify": "Изменение существующего кода",
+            "debug": "Поиск и исправление ошибок",
+            "optimize": "Оптимизация производительности",
+            "explain": "Объяснение работы кода",
+            "test": "Написание тестов",
+            "refactor": "Рефакторинг кода"
         }
         
-        for intent_type, words in keywords.items():
-            if any(word in query_lower for word in words):
-                return intent_type
+        try:
+            # Ищем JSON в ответе
+            start = response.find("{")
+            end = response.rfind("}") + 1
+            if start >= 0 and end > start:
+                data = json.loads(response[start:end])
+                intent = data.get("intent", "create").lower()
+                confidence = float(data.get("confidence", 0.75))
+                reason = data.get("reason", "")
+                
+                # Валидируем тип
+                if intent not in self.INTENT_TYPES:
+                    # Пытаемся найти похожий
+                    for valid_type in self.INTENT_TYPES:
+                        if valid_type in intent:
+                            intent = valid_type
+                            break
+                    else:
+                        intent = "create"  # default
+                
+                return IntentResult(
+                    type=intent,
+                    confidence=min(max(confidence, 0.0), 1.0),
+                    description=descriptions.get(intent, reason or "Выполнение задачи")
+                )
+        except (json.JSONDecodeError, ValueError, KeyError):
+            pass
         
-        return None
+        # Fallback: ищем ключевые слова в ответе
+        response_lower = response.lower()
+        for intent_type in self.INTENT_TYPES:
+            if intent_type in response_lower:
+                return IntentResult(
+                    type=intent_type,
+                    confidence=0.7,
+                    description=descriptions.get(intent_type, "Выполнение задачи")
+                )
+        
+        # Default
+        return IntentResult(
+            type="create",
+            confidence=0.5,
+            description="Создание кода (по умолчанию)"
+        )
+    
     
     def _is_greeting(self, query: str) -> bool:
         """Проверяет, является ли запрос приветствием.
@@ -258,23 +285,15 @@ class IntentAgent:
         """
         query_lower = query.strip().lower()
         
-        # Список приветствий на русском и английском
-        greetings = [
-            "привет", "здравствуй", "здравствуйте", "добрый день", "добрый вечер",
-            "доброе утро", "доброй ночи", "хай", "хей", "салют",
-            "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
-            "good evening", "good night", "howdy", "sup"
-        ]
-        
         # Проверяем точное совпадение или начало фразы
-        for greeting in greetings:
+        for greeting in self.GREETINGS:
             if query_lower == greeting or query_lower.startswith(greeting + " "):
                 return True
         
         # Проверяем короткие запросы (1-2 слова), которые могут быть приветствиями
         words = query_lower.split()
         if len(words) <= 2:
-            for greeting in greetings:
+            for greeting in self.GREETINGS:
                 if greeting in words:
                     return True
         

@@ -84,7 +84,9 @@ class DebuggerAgent:
         )
         
         # Получаем анализ от LLM
-        analysis_response = self.llm.generate(analysis_prompt, num_predict=2048)
+        from utils.config import get_config
+        config = get_config()
+        analysis_response = self.llm.generate(analysis_prompt, num_predict=config.llm_tokens_debug)
         
         # Парсим ответ
         debug_result = self._parse_analysis_response(
