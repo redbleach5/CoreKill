@@ -384,19 +384,26 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
                       )}
                     </div>
                     
-                    {/* Название этапа */}
-                    <span className={`text-xs ${
-                      isCompleted ? 'text-emerald-400' :
-                      isActive ? 'text-blue-400' :
-                      isError ? 'text-red-400' :
-                      'text-gray-600'
-                    }`}>
-                      {stageConfig.label}
-                    </span>
+                    {/* Название этапа и сообщение об ошибке */}
+                    <div className="flex-1 min-w-0">
+                      <span className={`text-xs ${
+                        isCompleted ? 'text-emerald-400' :
+                        isActive ? 'text-blue-400' :
+                        isError ? 'text-red-400' :
+                        'text-gray-600'
+                      }`}>
+                        {stageConfig.label}
+                      </span>
+                      {isError && stageStatus?.message && (
+                        <div className="text-[10px] text-red-400/80 truncate mt-0.5">
+                          {stageStatus.message}
+                        </div>
+                      )}
+                    </div>
                     
-                    {/* Время этапа (адаптивное) */}
-                    <span className="text-[10px] text-gray-600 ml-auto">
-                      ~{Math.round(getStageDuration(stage))}с
+                    {/* Время этапа (адаптивное) или статус ошибки */}
+                    <span className={`text-[10px] ml-auto ${isError ? 'text-red-400' : 'text-gray-600'}`}>
+                      {isError ? 'таймаут' : `~${Math.round(getStageDuration(stage))}с`}
                     </span>
                   </div>
                 )

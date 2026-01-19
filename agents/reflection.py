@@ -1,7 +1,7 @@
 """Агент для рефлексии и анализа результатов выполнения задачи."""
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -51,7 +51,8 @@ class ReflectionAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="reflection",
             model=model,
             temperature=temperature,
             top_p=0.9

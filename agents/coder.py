@@ -1,6 +1,6 @@
 """Агент для генерации кода по тестам и плану (TDD)."""
 from typing import Optional, Dict, Any
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from utils.logger import get_logger
 from utils.model_checker import (
@@ -45,7 +45,8 @@ class CoderAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="coding",
             model=model,
             temperature=temperature,
             top_p=0.9

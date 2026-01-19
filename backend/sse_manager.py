@@ -211,3 +211,54 @@ class SSEManager:
         }
         
         return await SSEManager.send_event("complete", data)
+
+    async def send_stage_event(
+        self,
+        task_id: str,
+        stage: str,
+        status: str,
+        data: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Отправляет событие этапа в активный стрим.
+        
+        Используется для отправки ошибок и других событий из workflow nodes.
+        
+        Args:
+            task_id: ID задачи
+            stage: Название этапа
+            status: Статус (start, progress, end, error)
+            data: Дополнительные данные
+        """
+        event_data: Dict[str, Any] = {
+            "stage": stage,
+            "status": status,
+            "task_id": task_id
+        }
+        
+        if data:
+            event_data.update(data)
+        
+        # Логируем событие (реальная отправка через yield в stream generator)
+        from utils.logger import get_logger
+        logger = get_logger()
+        
+        if status == "error":
+            error_type = data.get("error_type", "unknown") if data else "unknown"
+            message = data.get("message", "") if data else ""
+            logger.warning(f"⚠️ Stage error [{stage}]: {error_type} - {message}")
+
+
+# Singleton instance
+_sse_manager: Optional[SSEManager] = None
+
+
+def get_sse_manager() -> SSEManager:
+    """Возвращает singleton экземпляр SSEManager.
+    
+    Returns:
+        SSEManager instance
+    """
+    global _sse_manager
+    if _sse_manager is None:
+        _sse_manager = SSEManager()
+    return _sse_manager

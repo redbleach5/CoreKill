@@ -153,7 +153,9 @@ class IntentAgent:
                 )
                 model = model_selection.model
             
-            self._llm = LocalLLM(
+            from infrastructure.local_llm import create_llm_for_stage
+            self._llm = create_llm_for_stage(
+                stage="intent",
                 model=model,
                 temperature=self.temperature,
                 top_p=0.9

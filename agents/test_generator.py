@@ -1,6 +1,6 @@
 """Агент для генерации pytest тестов до написания кода (TDD)."""
 from typing import Optional
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from utils.logger import get_logger
 from utils.model_checker import (
@@ -39,7 +39,8 @@ class TestGeneratorAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="testing",
             model=model,
             temperature=temperature,
             top_p=0.9

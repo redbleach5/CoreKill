@@ -304,6 +304,80 @@ class Config:
         """Расширения файлов по умолчанию для индексации."""
         return self._config_data.get("context_engine", {}).get("default_extensions", [".py"])
     
+    # === LLM Timeouts ===
+    
+    def get_stage_timeout(self, stage: str) -> int:
+        """Возвращает таймаут для конкретного этапа workflow.
+        
+        Args:
+            stage: Название этапа (intent, planning, coding, etc.)
+            
+        Returns:
+            Таймаут в секундах
+        """
+        timeouts = self._config_data.get("timeouts", {})
+        return timeouts.get(stage, timeouts.get("default", 120))
+    
+    @property
+    def timeout_intent(self) -> int:
+        """Таймаут для определения намерения."""
+        return self._config_data.get("timeouts", {}).get("intent", 60)
+    
+    @property
+    def timeout_planning(self) -> int:
+        """Таймаут для планирования."""
+        return self._config_data.get("timeouts", {}).get("planning", 90)
+    
+    @property
+    def timeout_research(self) -> int:
+        """Таймаут для исследования/контекста."""
+        return self._config_data.get("timeouts", {}).get("research", 90)
+    
+    @property
+    def timeout_testing(self) -> int:
+        """Таймаут для генерации тестов."""
+        return self._config_data.get("timeouts", {}).get("testing", 120)
+    
+    @property
+    def timeout_coding(self) -> int:
+        """Таймаут для генерации кода."""
+        return self._config_data.get("timeouts", {}).get("coding", 180)
+    
+    @property
+    def timeout_validation(self) -> int:
+        """Таймаут для валидации."""
+        return self._config_data.get("timeouts", {}).get("validation", 120)
+    
+    @property
+    def timeout_debug(self) -> int:
+        """Таймаут для анализа ошибок."""
+        return self._config_data.get("timeouts", {}).get("debug", 120)
+    
+    @property
+    def timeout_fixing(self) -> int:
+        """Таймаут для исправления кода."""
+        return self._config_data.get("timeouts", {}).get("fixing", 150)
+    
+    @property
+    def timeout_reflection(self) -> int:
+        """Таймаут для рефлексии."""
+        return self._config_data.get("timeouts", {}).get("reflection", 90)
+    
+    @property
+    def timeout_critic(self) -> int:
+        """Таймаут для критического анализа."""
+        return self._config_data.get("timeouts", {}).get("critic", 90)
+    
+    @property
+    def timeout_chat(self) -> int:
+        """Таймаут для chat режима."""
+        return self._config_data.get("timeouts", {}).get("chat", 90)
+    
+    @property
+    def timeout_default(self) -> int:
+        """Дефолтный таймаут."""
+        return self._config_data.get("timeouts", {}).get("default", 120)
+    
     # === Task Persistence Settings ===
     
     @property

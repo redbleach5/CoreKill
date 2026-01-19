@@ -1,6 +1,6 @@
 """Агент для планирования выполнения задачи."""
 from typing import Optional, List
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from agents.memory import MemoryAgent
 from utils.logger import get_logger
 from utils.model_checker import (
@@ -45,7 +45,8 @@ class PlannerAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="planning",
             model=model,
             temperature=temperature,
             top_p=0.9

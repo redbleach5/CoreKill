@@ -1,7 +1,7 @@
 """Агент для анализа ошибок и генерации инструкций по исправлению кода."""
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from utils.logger import get_logger
 from infrastructure.model_router import get_model_router
 
@@ -42,7 +42,8 @@ class DebuggerAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="debug",
             model=model,
             temperature=temperature,
             top_p=0.9

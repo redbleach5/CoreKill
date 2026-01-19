@@ -420,3 +420,32 @@ class AsyncLocalLLM:
         except Exception as e:
             logger.error(f"❌ AsyncLocalLLM chat ошибка: {e}", error=e)
             return ""
+
+
+def create_llm_for_stage(
+    stage: str,
+    model: str,
+    temperature: float = 0.25,
+    top_p: float = 0.9
+) -> LocalLLM:
+    """Создаёт LocalLLM с таймаутом, соответствующим этапу workflow.
+    
+    Args:
+        stage: Название этапа (intent, planning, coding, etc.)
+        model: Название модели Ollama
+        temperature: Температура генерации
+        top_p: Параметр top_p
+        
+    Returns:
+        LocalLLM с правильным таймаутом для этапа
+    """
+    from utils.config import get_config
+    config = get_config()
+    timeout = config.get_stage_timeout(stage)
+    
+    return LocalLLM(
+        model=model,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout
+    )

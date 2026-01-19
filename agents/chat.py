@@ -11,7 +11,7 @@
 import hashlib
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.cache import get_cache
 from utils.logger import get_logger
 
@@ -95,7 +95,12 @@ class ChatAgent:
             temperature: Температура генерации (выше для креативности)
             max_tokens: Максимум токенов в ответе
         """
-        self.llm = LocalLLM(model=model, temperature=temperature)
+        self.llm = create_llm_for_stage(
+            stage="chat",
+            model=model or "auto",
+            temperature=temperature,
+            top_p=0.9
+        )
         self.max_tokens = max_tokens
         self.temperature = temperature
         logger.info(f"✅ ChatAgent инициализирован (модель: {model or 'auto'})")

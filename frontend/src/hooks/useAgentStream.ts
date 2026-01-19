@@ -279,11 +279,15 @@ export function useAgentStream(): UseAgentStreamReturn {
           }
         }
         
+        // Определяем статус: error если явно указан, иначе end
+        const stageStatus = data.status === 'error' ? 'error' : 'end'
+        
         updateStage(data.stage, {
           stage: data.stage,
-          status: 'end',
-          message: data.message || '',
-          result: data.result
+          status: stageStatus,
+          message: data.message || data.error_type || '',
+          result: data.result,
+          error: data.status === 'error' ? (data.message || data.error_type) : undefined
         })
 
         // Обновляем код в результатах если пришёл из coding/fixing этапа

@@ -5,7 +5,7 @@
 """
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
-from infrastructure.local_llm import LocalLLM
+from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.model_router import get_model_router
 from utils.logger import get_logger
 import ast
@@ -72,7 +72,8 @@ class CriticAgent:
             )
             model = model_selection.model
         
-        self.llm = LocalLLM(
+        self.llm = create_llm_for_stage(
+            stage="critic",
             model=model,
             temperature=temperature,
             top_p=0.9

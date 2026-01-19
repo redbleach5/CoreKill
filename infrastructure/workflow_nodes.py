@@ -9,10 +9,12 @@ Checkpoint сохраняется после каждого узла для во
 Тяжёлые LLM операции выполняются через asyncio.to_thread() чтобы не блокировать event loop.
 
 Метрики производительности записываются автоматически для каждого этапа.
+Таймауты настраиваются через config.toml [timeouts] секцию.
 """
 import asyncio
 import time
 from typing import TYPE_CHECKING
+from infrastructure.local_llm import LLMTimeoutError
 from infrastructure.workflow_state import AgentState
 from infrastructure.task_checkpointer import get_task_checkpointer
 from agents.intent import IntentAgent, IntentResult
@@ -93,6 +95,41 @@ def _record_stage_duration(stage: str, duration: float) -> None:
     except Exception as e:
         # Не критично — просто логируем
         logger.debug(f"⚠️ Не удалось записать метрику: {e}")
+
+
+async def _send_stage_error(
+    state: AgentState, 
+    stage: str, 
+    error_type: str, 
+    message: str
+) -> None:
+    """Отправляет событие ошибки этапа через SSE.
+    
+    Args:
+        state: Текущий AgentState
+        stage: Название этапа где произошла ошибка
+        error_type: Тип ошибки (timeout, llm_error, validation_error, etc.)
+        message: Сообщение для пользователя
+    """
+    if not state.get("enable_sse"):
+        return
+    
+    try:
+        from backend.sse_manager import get_sse_manager
+        sse = get_sse_manager()
+        task_id = state.get("task_id", "unknown")
+        
+        await sse.send_stage_event(
+            task_id=task_id,
+            stage=stage,
+            status="error",
+            data={
+                "error_type": error_type,
+                "message": message
+            }
+        )
+    except Exception as e:
+        logger.debug(f"⚠️ Не удалось отправить stage_error: {e}")
 
 
 def _initialize_agents(state: AgentState) -> None:
@@ -190,9 +227,23 @@ async def intent_node(state: AgentState) -> AgentState:
         state["intent_result"] = intent_result
         logger.info(f"✅ Намерение определено: {intent_result.type} (уверенность: {intent_result.confidence:.2f})")
         
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут определения намерения: {e}")
+        await _send_stage_error(
+            state, "intent", "timeout", 
+            "Превышено время ожидания ответа от модели. Используется fallback."
+        )
+        state["intent_result"] = IntentResult(
+            type="explain",
+            confidence=0.5,
+            description="Таймаут LLM"
+        )
     except Exception as e:
         logger.error(f"❌ Ошибка определения намерения: {e}", error=e)
-        # Fallback на explain
+        await _send_stage_error(
+            state, "intent", "error", 
+            f"Ошибка: {str(e)[:100]}"
+        )
         state["intent_result"] = IntentResult(
             type="explain",
             confidence=0.5,
@@ -247,8 +298,16 @@ async def planner_node(state: AgentState) -> AgentState:
         else:
             state["plan"] = ""
             logger.warning("⚠️ Planner Agent не инициализирован")
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут планирования: {e}")
+        await _send_stage_error(
+            state, "planning", "timeout",
+            "Превышено время создания плана. Продолжаем без детального плана."
+        )
+        state["plan"] = ""
     except Exception as e:
         logger.error(f"❌ Ошибка создания плана: {e}", error=e)
+        await _send_stage_error(state, "planning", "error", f"Ошибка: {str(e)[:100]}")
         state["plan"] = ""
     
     # Записываем метрику времени
@@ -323,8 +382,16 @@ async def researcher_node(state: AgentState) -> AgentState:
         else:
             state["context"] = file_context or ""
             logger.warning("⚠️ Researcher Agent не инициализирован")
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут сбора контекста: {e}")
+        await _send_stage_error(
+            state, "research", "timeout",
+            "Превышено время сбора контекста. Используется файловый контекст."
+        )
+        state["context"] = state.get("file_context", "")
     except Exception as e:
         logger.error(f"❌ Ошибка сбора контекста: {e}", error=e)
+        await _send_stage_error(state, "research", "error", f"Ошибка: {str(e)[:100]}")
         state["context"] = state.get("file_context", "")
     
     # Записываем метрику времени
@@ -380,8 +447,16 @@ async def generator_node(state: AgentState) -> AgentState:
         else:
             state["tests"] = ""
             logger.warning("⚠️ TestGenerator Agent не инициализирован")
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут генерации тестов: {e}")
+        await _send_stage_error(
+            state, "testing", "timeout",
+            "Превышено время генерации тестов. Продолжаем без тестов."
+        )
+        state["tests"] = ""
     except Exception as e:
         logger.error(f"❌ Ошибка генерации тестов: {e}", error=e)
+        await _send_stage_error(state, "testing", "error", f"Ошибка: {str(e)[:100]}")
         state["tests"] = ""
     
     # Записываем метрику времени
@@ -439,8 +514,16 @@ async def coder_node(state: AgentState) -> AgentState:
         else:
             state["code"] = ""
             logger.warning("⚠️ Coder Agent не инициализирован")
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут генерации кода: {e}")
+        await _send_stage_error(
+            state, "coding", "timeout",
+            "Превышено время генерации кода. Задача слишком сложная или модель перегружена."
+        )
+        state["code"] = ""
     except Exception as e:
         logger.error(f"❌ Ошибка генерации кода: {e}", error=e)
+        await _send_stage_error(state, "coding", "error", f"Ошибка: {str(e)[:100]}")
         state["code"] = ""
     
     # Записываем метрику времени
@@ -532,8 +615,16 @@ async def debugger_node(state: AgentState) -> AgentState:
         else:
             logger.warning("⚠️ Debugger Agent не инициализирован")
             state["debug_result"] = None
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут анализа ошибок: {e}")
+        await _send_stage_error(
+            state, "debug", "timeout",
+            "Превышено время анализа ошибок. Пропускаем этап исправления."
+        )
+        state["debug_result"] = None
     except Exception as e:
         logger.error(f"❌ Ошибка анализа ошибок: {e}", error=e)
+        await _send_stage_error(state, "debug", "error", f"Ошибка: {str(e)[:100]}")
         state["debug_result"] = None
     
     # Записываем метрику времени
@@ -589,8 +680,15 @@ async def fixer_node(state: AgentState) -> AgentState:
                 logger.warning("⚠️ Не удалось исправить код")
         else:
             logger.warning("⚠️ Coder Agent не инициализирован")
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут исправления кода: {e}")
+        await _send_stage_error(
+            state, "fixing", "timeout",
+            "Превышено время исправления кода."
+        )
     except Exception as e:
         logger.error(f"❌ Ошибка исправления кода: {e}", error=e)
+        await _send_stage_error(state, "fixing", "error", f"Ошибка: {str(e)[:100]}")
     
     # Записываем метрику времени
     _record_stage_duration("fixing", time.time() - start_time)
@@ -652,8 +750,16 @@ async def reflection_node(state: AgentState) -> AgentState:
         else:
             logger.warning("⚠️ Reflection Agent не инициализирован или отсутствует intent_result")
             state["reflection_result"] = None
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут рефлексии: {e}")
+        await _send_stage_error(
+            state, "reflection", "timeout",
+            "Превышено время анализа результатов."
+        )
+        state["reflection_result"] = None
     except Exception as e:
         logger.error(f"❌ Ошибка рефлексии: {e}", error=e)
+        await _send_stage_error(state, "reflection", "error", f"Ошибка: {str(e)[:100]}")
         state["reflection_result"] = None
     
     # Записываем метрику времени
@@ -699,8 +805,16 @@ async def critic_node(state: AgentState) -> AgentState:
         else:
             logger.warning("⚠️ Critic Agent не инициализирован или код пустой")
             state["critic_report"] = None
+    except LLMTimeoutError as e:
+        logger.warning(f"⏱️ Таймаут критического анализа: {e}")
+        await _send_stage_error(
+            state, "critic", "timeout",
+            "Превышено время критического анализа."
+        )
+        state["critic_report"] = None
     except Exception as e:
         logger.error(f"❌ Ошибка критического анализа: {e}", error=e)
+        await _send_stage_error(state, "critic", "error", f"Ошибка: {str(e)[:100]}")
         state["critic_report"] = None
     
     # Записываем метрику времени
