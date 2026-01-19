@@ -137,6 +137,39 @@ class TaskCheckpointer:
         except RecursionError:
             return "<recursion limit>"
     
+    def _serialize_state_minimal(self, state: AgentState) -> dict[str, Any]:
+        """Минимальная сериализация — только простые поля для восстановления.
+        
+        Используется как fallback если полная сериализация не работает.
+        Сохраняет достаточно данных чтобы пользователь мог продолжить задачу.
+        """
+        # Только строки/числа/bool — гарантированно сериализуемые
+        safe_fields = [
+            "task", "task_id", "max_iterations", "disable_web_search",
+            "model", "temperature", "interaction_mode", "conversation_id",
+            "project_path", "file_extensions", "plan", "context", 
+            "tests", "code", "iteration", "file_path", "file_context"
+        ]
+        
+        result: dict[str, Any] = {"_minimal_checkpoint": True}
+        
+        for field in safe_fields:
+            value = state.get(field)
+            if value is None:
+                result[field] = None
+            elif isinstance(value, (str, int, float, bool)):
+                result[field] = value
+            elif isinstance(value, list) and all(isinstance(x, str) for x in value):
+                result[field] = value
+            else:
+                # Пробуем преобразовать в строку
+                try:
+                    result[field] = str(value)[:10000]  # Лимит длины
+                except Exception:
+                    result[field] = None
+        
+        return result
+    
     def _deserialize_state(self, data: dict[str, Any]) -> AgentState:
         """Десериализует JSON в AgentState.
         
@@ -218,9 +251,15 @@ class TaskCheckpointer:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata.to_dict(), f, ensure_ascii=False, indent=2)
         
-        # Сохраняем состояние
+        # Сохраняем состояние с fallback на минимальные данные
         state_path = task_dir / "state.json"
-        serialized = self._serialize_state(state)
+        
+        try:
+            serialized = self._serialize_state(state)
+        except Exception as serialize_error:
+            # Fallback: сохраняем минимум для восстановления
+            logger.warning(f"⚠️ Fallback сериализация: {serialize_error}")
+            serialized = self._serialize_state_minimal(state)
         
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump(serialized, f, ensure_ascii=False, indent=2)
