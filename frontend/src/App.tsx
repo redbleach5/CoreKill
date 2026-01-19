@@ -297,27 +297,31 @@ function App() {
     setCurrentCode(code)
   }
 
-  // Рендер Chat View
-  const renderChatView = () => (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-          {messages.length === 0 && (
-            <WelcomeScreen 
-              mode={options.mode as InteractionMode} 
-              onSuggestionClick={setTaskInput} 
-            />
-          )}
-          <MessageList
-            ref={messagesEndRef}
-            messages={messages}
-            stages={stages}
-            error={error}
-            onCopy={handleCopy}
-            onDownload={handleDownload}
+  // Рендер Chat View (только сообщения, без поля ввода)
+  const renderChatMessages = () => (
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
+        {messages.length === 0 && (
+          <WelcomeScreen 
+            mode={options.mode as InteractionMode} 
+            onSuggestionClick={setTaskInput} 
           />
-        </div>
+        )}
+        <MessageList
+          ref={messagesEndRef}
+          messages={messages}
+          stages={stages}
+          error={error}
+          onCopy={handleCopy}
+          onDownload={handleDownload}
+        />
       </div>
+    </div>
+  )
+
+  // Рендер поля ввода
+  const renderChatInput = () => (
+    <div className="flex-shrink-0">
       <ChatInput
         ref={inputRef}
         value={taskInput}
@@ -343,7 +347,8 @@ function App() {
   const renderSplitView = () => (
     <div className="flex gap-4 h-full">
       <div className="flex-1 flex flex-col min-w-0">
-        {renderChatView()}
+        {renderChatMessages()}
+        {renderChatInput()}
       </div>
       <div className="w-1/2 flex flex-col min-w-0">
         {renderIDEView()}
@@ -352,7 +357,7 @@ function App() {
   )
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-gray-100 flex flex-col">
+    <div className="h-screen bg-[#0a0a0f] text-gray-100 flex flex-col overflow-hidden">
       {/* Header */}
       <AppHeader
         options={options}
@@ -385,7 +390,7 @@ function App() {
       />
 
       {/* Main Content */}
-      <main className="flex-1 overflow-hidden flex">
+      <main className="flex-1 overflow-hidden flex min-h-0">
         {/* Chat History Sidebar */}
         {showChatHistory && layoutMode !== 'split' && (
           <ChatHistory
@@ -399,10 +404,23 @@ function App() {
         )}
 
         {/* Main area */}
-        <div className="flex-1 min-w-0 p-4">
-          {layoutMode === 'chat' && renderChatView()}
-          {layoutMode === 'ide' && renderIDEView()}
-          {layoutMode === 'split' && renderSplitView()}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {layoutMode === 'chat' && (
+            <>
+              {renderChatMessages()}
+              {renderChatInput()}
+            </>
+          )}
+          {layoutMode === 'ide' && (
+            <div className="flex-1 p-4">
+              {renderIDEView()}
+            </div>
+          )}
+          {layoutMode === 'split' && (
+            <div className="flex-1 p-4">
+              {renderSplitView()}
+            </div>
+          )}
         </div>
       </main>
     </div>

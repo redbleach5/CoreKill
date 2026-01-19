@@ -39,7 +39,7 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(
     }
 
     return (
-      <div className="flex-shrink-0 border-t border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl p-4">
+      <div className="border-t border-white/5 bg-[#0a0a0f] p-4">
         <div className="max-w-3xl mx-auto">
           <div className="relative">
             <textarea
