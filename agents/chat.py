@@ -2,14 +2,24 @@
 
 Обеспечивает режим чата без запуска полного workflow.
 Поддерживает контекст диалога и различные стили общения.
+
+Особенности:
+- Кэширование ответов на типовые вопросы (FAQ)
+- Поддержка истории диалога
+- Различные стили общения
 """
+import hashlib
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from infrastructure.local_llm import LocalLLM
+from infrastructure.cache import get_cache
 from utils.logger import get_logger
 
 
 logger = get_logger()
+
+# Время жизни кэша для chat ответов (1 час)
+CHAT_CACHE_TTL = 3600
 
 
 @dataclass
@@ -90,11 +100,38 @@ class ChatAgent:
         self.temperature = temperature
         logger.info(f"✅ ChatAgent инициализирован (модель: {model or 'auto'})")
     
+    def _get_cache_key(self, message: str, history_len: int) -> str:
+        """Генерирует ключ кэша для сообщения.
+        
+        Кэш учитывает только сообщение без истории для типовых вопросов.
+        Если есть история — кэш не используется.
+        
+        Args:
+            message: Сообщение пользователя
+            history_len: Длина истории диалога
+            
+        Returns:
+            Ключ кэша или пустая строка если кэширование не применимо
+        """
+        # Кэшируем только первые сообщения (без истории)
+        if history_len > 0:
+            return ""
+        
+        # Нормализуем сообщение
+        normalized = message.lower().strip()
+        
+        # Кэшируем только короткие типовые вопросы
+        if len(normalized) > 200:
+            return ""
+        
+        return f"chat:{hashlib.md5(normalized.encode()).hexdigest()}"
+    
     def chat(
         self,
         message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        use_cache: bool = True
     ) -> ChatResponse:
         """Отправляет сообщение и получает ответ.
         
@@ -102,10 +139,28 @@ class ChatAgent:
             message: Сообщение пользователя
             conversation_history: История диалога [{role, content}]
             system_prompt: Кастомный системный промпт (опционально)
+            use_cache: Использовать кэш для типовых вопросов
             
         Returns:
             ChatResponse с ответом
         """
+        history_len = len(conversation_history) if conversation_history else 0
+        
+        # Проверяем кэш для типовых вопросов
+        cache_key = ""
+        if use_cache:
+            cache_key = self._get_cache_key(message, history_len)
+            if cache_key:
+                cache = get_cache()
+                cached_response = cache.get(cache_key)
+                if cached_response:
+                    logger.info(f"💾 ChatAgent: ответ из кэша ({len(cached_response)} символов)")
+                    return ChatResponse(
+                        content=cached_response,
+                        model_used=self.llm.model or "",
+                        finish_reason="cached"
+                    )
+        
         # Формируем полный промпт с историей
         full_prompt = self._build_prompt(
             message=message,
@@ -122,6 +177,12 @@ class ChatAgent:
             )
             
             logger.info(f"✅ ChatAgent: получен ответ ({len(response)} символов)")
+            
+            # Сохраняем в кэш если это типовой вопрос
+            if cache_key and response:
+                cache = get_cache()
+                cache.set(cache_key, response, ttl=CHAT_CACHE_TTL)
+                logger.debug(f"💾 ChatAgent: ответ сохранён в кэш")
             
             return ChatResponse(
                 content=response,

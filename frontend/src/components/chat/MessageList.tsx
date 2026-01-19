@@ -3,7 +3,7 @@
  * 
  * Поддерживает рендеринг markdown с красивыми стилями.
  */
-import { forwardRef, useMemo } from 'react'
+import { forwardRef, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { 
@@ -156,14 +156,42 @@ const STAGE_CONFIG: Record<string, { label: string; icon: typeof Sparkles; color
   help: { label: 'Помогаю', icon: Sparkles, color: 'text-violet-400' }
 }
 
+// Среднее время выполнения этапов (секунды) — эмпирические данные
+const STAGE_DURATIONS: Record<string, number> = {
+  intent: 3,
+  planning: 8,
+  research: 12,
+  testing: 15,
+  coding: 25,
+  validation: 5,
+  debug: 10,
+  fixing: 15,
+  reflection: 5,
+  critic: 5,
+  chat: 5,
+  greeting: 1,
+  help: 2
+}
+
 // Рендер прогресса генерации — компактный анимированный статус
 function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<string, StageStatus> }) {
   const stageData = msg.metadata?.stages || stages
+  const [showDetails, setShowDetails] = useState(false)
+  
+  // Порядок этапов для workflow
+  const stageOrder = useMemo(() => 
+    ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'debug', 'fixing', 'reflection', 'critic', 'chat', 'greeting', 'help'],
+    []
+  )
+  
+  // Основные этапы для отображения в деталях
+  const mainStages = useMemo(() => 
+    ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic'],
+    []
+  )
   
   // Находим текущий активный этап (последний со статусом start или progress)
   const currentStage = useMemo(() => {
-    const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'debug', 'fixing', 'reflection', 'critic', 'chat', 'greeting', 'help']
-    
     // Ищем последний активный этап
     for (let i = stageOrder.length - 1; i >= 0; i--) {
       const stage = stageOrder[i]
@@ -184,7 +212,7 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
     
     // Fallback на первый этап
     return 'intent'
-  }, [stageData])
+  }, [stageData, stageOrder])
   
   const config = STAGE_CONFIG[currentStage] || STAGE_CONFIG.intent
   const Icon = config.icon
@@ -193,6 +221,27 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
   const completedStages = Object.values(stageData).filter(s => s.status === 'end').length
   const totalStages = 8 // Примерное количество основных этапов
   const progressPercent = Math.min(100, Math.round((completedStages / totalStages) * 100))
+  
+  // Расчёт оставшегося времени
+  const estimatedTimeLeft = useMemo(() => {
+    let remainingSeconds = 0
+    const mainStages = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
+    
+    for (const stage of mainStages) {
+      const status = stageData[stage]
+      if (!status || status.status === 'idle') {
+        remainingSeconds += STAGE_DURATIONS[stage] || 5
+      } else if (status.status === 'start' || status.status === 'progress') {
+        // Текущий этап — добавляем половину времени
+        remainingSeconds += (STAGE_DURATIONS[stage] || 5) / 2
+      }
+      // Завершённые этапы не учитываем
+    }
+    
+    if (remainingSeconds < 5) return null
+    if (remainingSeconds < 60) return `~${Math.round(remainingSeconds)} сек`
+    return `~${Math.round(remainingSeconds / 60)} мин`
+  }, [stageData])
 
   return (
     <div key={msg.id} className="flex gap-3">
@@ -230,11 +279,86 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
               </div>
             </div>
             
-            {/* Процент */}
-            <span className="text-xs text-gray-500 tabular-nums">
-              {progressPercent}%
-            </span>
+            {/* Процент и время */}
+            <div className="flex flex-col items-end gap-0.5">
+              <span className="text-xs text-gray-500 tabular-nums">
+                {progressPercent}%
+              </span>
+              {estimatedTimeLeft && (
+                <span className="text-[10px] text-gray-600 tabular-nums">
+                  {estimatedTimeLeft}
+                </span>
+              )}
+            </div>
           </div>
+          
+          {/* Кнопка раскрытия деталей */}
+          <button
+            onClick={() => setShowDetails(!showDetails)}
+            className="mt-2 text-xs text-gray-500 hover:text-gray-300 transition-colors flex items-center gap-1"
+          >
+            <ChevronRight className={`w-3 h-3 transition-transform ${showDetails ? 'rotate-90' : ''}`} />
+            {showDetails ? 'Скрыть этапы' : 'Показать все этапы'}
+          </button>
+          
+          {/* Детальный список этапов */}
+          {showDetails && (
+            <div className="mt-3 space-y-1.5 border-t border-white/5 pt-3">
+              {mainStages.map((stage) => {
+                const stageStatus = stageData[stage]
+                const stageConfig = STAGE_CONFIG[stage]
+                if (!stageConfig) return null
+                
+                const StageIcon = stageConfig.icon
+                const status = stageStatus?.status || 'idle'
+                const isCompleted = status === 'end'
+                const isActive = status === 'start' || status === 'progress'
+                const isError = status === 'error'
+                
+                return (
+                  <div 
+                    key={stage}
+                    className={`flex items-center gap-2 py-1 px-2 rounded-lg transition-colors ${
+                      isActive ? 'bg-white/5' : ''
+                    }`}
+                  >
+                    {/* Иконка статуса */}
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                      isCompleted ? 'bg-emerald-500/20' :
+                      isActive ? 'bg-blue-500/20' :
+                      isError ? 'bg-red-500/20' :
+                      'bg-white/5'
+                    }`}>
+                      {isCompleted ? (
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                      ) : isActive ? (
+                        <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+                      ) : isError ? (
+                        <AlertCircle className="w-3 h-3 text-red-400" />
+                      ) : (
+                        <StageIcon className="w-3 h-3 text-gray-600" />
+                      )}
+                    </div>
+                    
+                    {/* Название этапа */}
+                    <span className={`text-xs ${
+                      isCompleted ? 'text-emerald-400' :
+                      isActive ? 'text-blue-400' :
+                      isError ? 'text-red-400' :
+                      'text-gray-600'
+                    }`}>
+                      {stageConfig.label}
+                    </span>
+                    
+                    {/* Время этапа */}
+                    <span className="text-[10px] text-gray-600 ml-auto">
+                      ~{STAGE_DURATIONS[stage]}с
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>
