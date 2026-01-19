@@ -84,7 +84,7 @@ class TaskRequest(BaseModel):
     model: str = Field(default="", description="Модель Ollama (если пусто, будет выбрана автоматически)")
     temperature: float = Field(default=0.25, ge=0.1, le=0.7, description="Температура генерации")
     disable_web_search: bool = Field(default=False, description="Отключить веб-поиск")
-    max_iterations: int = Field(default=1, ge=1, le=3, description="Максимальное количество итераций")
+    max_iterations: int = Field(default=3, ge=1, le=5, description="Максимальное количество итераций")
 
 
 async def run_workflow_stream(
@@ -633,7 +633,7 @@ async def stream_task_results(
     model: str = "",
     temperature: float = 0.25,
     disable_web_search: bool = False,
-    max_iterations: int = 1
+    max_iterations: int = 3
 ):
     """SSE endpoint для стриминга результатов выполнения задачи.
     

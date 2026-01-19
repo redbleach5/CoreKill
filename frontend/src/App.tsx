@@ -48,7 +48,7 @@ function App() {
     model: '',
     temperature: 0.25,
     disableWebSearch: false,
-    maxIterations: 1
+    maxIterations: 3
   })
 
   const [messages, setMessages] = useState<ChatMessage[]>([])

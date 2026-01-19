@@ -103,3 +103,93 @@
 {"timestamp": "2026-01-19T08:09:46.039988", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #15, длина: 171"}
 {"timestamp": "2026-01-19T08:09:46.050924", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #16, длина: 252"}
 {"timestamp": "2026-01-19T08:09:46.062390", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #17, длина: 4248"}
+{"timestamp": "2026-01-19T08:12:33.120546", "level": "INFO", "source": "system", "message": "🚀 Backend API запущен"}
+{"timestamp": "2026-01-19T08:12:51.416836", "level": "INFO", "source": "system", "message": "✅ LangGraph workflow скомпилирован"}
+{"timestamp": "2026-01-19T08:12:51.537523", "level": "INFO", "source": "system", "message": "✅ RAG система инициализирована с ChromaDB (коллекция: task_memory)"}
+{"timestamp": "2026-01-19T08:12:51.538679", "level": "INFO", "source": "system", "message": "✅ RAG система инициализирована с ChromaDB (коллекция: codebase_docs)"}
+{"timestamp": "2026-01-19T08:12:51.559418", "level": "INFO", "source": "system", "message": "📋 Определяю намерение..."}
+{"timestamp": "2026-01-19T08:12:51.559478", "level": "INFO", "source": "system", "message": "🔍 Определяю намерение для запроса: Напиши тесты для калькулятора..."}
+{"timestamp": "2026-01-19T08:12:57.270652", "level": "INFO", "source": "system", "message": "✅ Намерение определено: test (уверенность: 1.00)"}
+{"timestamp": "2026-01-19T08:12:57.273372", "level": "INFO", "source": "system", "message": "✅ Намерение определено: test (уверенность: 1.00)"}
+{"timestamp": "2026-01-19T08:12:57.282963", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_start для intent"}
+{"timestamp": "2026-01-19T08:12:57.283091", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #1, длина: 167"}
+{"timestamp": "2026-01-19T08:12:57.294282", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_start, длина: 167"}
+{"timestamp": "2026-01-19T08:12:57.294391", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_end для intent"}
+{"timestamp": "2026-01-19T08:12:57.294470", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #2, длина: 214"}
+{"timestamp": "2026-01-19T08:12:57.305598", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_end, длина: 214"}
+{"timestamp": "2026-01-19T08:12:57.305884", "level": "INFO", "source": "system", "message": "📝 Создаю план..."}
+{"timestamp": "2026-01-19T08:12:57.305992", "level": "INFO", "source": "system", "message": "📋 Создаю план для задачи: Напиши тесты для калькулятора..."}
+{"timestamp": "2026-01-19T08:12:57.306058", "level": "INFO", "source": "system", "message": "🔍 Ищу похожие задачи в памяти для: Напиши тесты для калькулятора..."}
+{"timestamp": "2026-01-19T08:12:57.750966", "level": "INFO", "source": "system", "message": "ℹ️ Похожих задач в памяти не найдено"}
+{"timestamp": "2026-01-19T08:13:03.668924", "level": "INFO", "source": "system", "message": "✅ План создан (размер: 796 символов)"}
+{"timestamp": "2026-01-19T08:13:03.669610", "level": "INFO", "source": "system", "message": "✅ План создан (размер: 796 символов)"}
+{"timestamp": "2026-01-19T08:13:03.675562", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #3, длина: 172"}
+{"timestamp": "2026-01-19T08:13:03.687184", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #4, длина: 186"}
+{"timestamp": "2026-01-19T08:13:03.698693", "level": "INFO", "source": "system", "message": "🔍 Собираю контекст..."}
+{"timestamp": "2026-01-19T08:13:03.698803", "level": "INFO", "source": "system", "message": "🔍 Ищу контекст для: Напиши тесты для калькулятора..."}
+{"timestamp": "2026-01-19T08:13:03.698884", "level": "INFO", "source": "system", "message": "🔍 Ищу похожие задачи в памяти для: Напиши тесты для калькулятора..."}
+{"timestamp": "2026-01-19T08:13:03.939813", "level": "INFO", "source": "system", "message": "ℹ️ Похожих задач в памяти не найдено"}
+{"timestamp": "2026-01-19T08:13:04.083521", "level": "INFO", "source": "system", "message": "📚 RAG результаты: найдено 0 документов (уверенность: 0.00)"}
+{"timestamp": "2026-01-19T08:13:04.083660", "level": "INFO", "source": "system", "message": "🌐 RAG недостаточно, выполняю веб-поиск..."}
+{"timestamp": "2026-01-19T08:13:06.423242", "level": "INFO", "source": "system", "message": "✅ Tavily вернул 4 результатов"}
+{"timestamp": "2026-01-19T08:13:06.428414", "level": "INFO", "source": "system", "message": "✅ Найдено 4 результатов веб-поиска"}
+{"timestamp": "2026-01-19T08:13:06.428755", "level": "INFO", "source": "system", "message": "✅ Контекст собран (размер: 1016 символов)"}
+{"timestamp": "2026-01-19T08:13:06.428930", "level": "INFO", "source": "system", "message": "✅ Контекст собран (размер: 1016 символов)"}
+{"timestamp": "2026-01-19T08:13:06.436393", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #5, длина: 182"}
+{"timestamp": "2026-01-19T08:13:06.448095", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #6, длина: 194"}
+{"timestamp": "2026-01-19T08:13:06.459984", "level": "INFO", "source": "system", "message": "🧪 Генерирую тесты..."}
+{"timestamp": "2026-01-19T08:13:06.460158", "level": "INFO", "source": "system", "message": "🧪 Генерирую pytest тесты для намерения: test"}
+{"timestamp": "2026-01-19T08:13:53.184103", "level": "INFO", "source": "system", "message": "✅ Сгенерировано тестов (размер: 7095 символов)"}
+{"timestamp": "2026-01-19T08:13:53.185563", "level": "INFO", "source": "system", "message": "✅ Тесты сгенерированы (размер: 7095 символов)"}
+{"timestamp": "2026-01-19T08:13:53.188855", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #7, длина: 164"}
+{"timestamp": "2026-01-19T08:13:53.200948", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #8, длина: 195"}
+{"timestamp": "2026-01-19T08:13:53.213723", "level": "INFO", "source": "system", "message": "💻 Генерирую код..."}
+{"timestamp": "2026-01-19T08:13:53.214070", "level": "INFO", "source": "system", "message": "💻 Генерирую код для намерения: test"}
+{"timestamp": "2026-01-19T08:14:04.624411", "level": "INFO", "source": "system", "message": "✅ Сгенерирован код (размер: 1196 символов)"}
+{"timestamp": "2026-01-19T08:14:04.624889", "level": "INFO", "source": "system", "message": "✅ Код сгенерирован (размер: 1196 символов)"}
+{"timestamp": "2026-01-19T08:14:04.626431", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #9, длина: 161"}
+{"timestamp": "2026-01-19T08:14:04.639612", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #10, длина: 190"}
+{"timestamp": "2026-01-19T08:14:04.652699", "level": "INFO", "source": "system", "message": "🔍 Валидирую код..."}
+{"timestamp": "2026-01-19T08:14:06.613993", "level": "WARNING", "source": "system", "message": "❌ Тесты не прошли: ============================= test session starts ==============================\nplatform darwin -- Python 3.12.9, pytest-9.0.2, pluggy-1.6.0 -- /Users/ruslan/Downloads/testmatuscrsr/.venv/bin/python3.12\ncachedir: .pytest_cache\nrootdir: /var/folders/sw/0rdxddxn04d0cmsfr89_hnrr0000gn/T/pytest_validation_e2vh4zqh\nplugins: anyio-4.12.1, langsmith-0.6.4, cov-7.0.0\ncollecting ... collected 0 items / 1 error\n\n==================================== ERRORS ====================================\n____________"}
+{"timestamp": "2026-01-19T08:14:09.133249", "level": "INFO", "source": "system", "message": "✅ mypy проверка пройдена (0 ошибок)"}
+{"timestamp": "2026-01-19T08:14:09.736701", "level": "INFO", "source": "system", "message": "✅ bandit проверка пройдена (нет критических проблем)"}
+{"timestamp": "2026-01-19T08:14:09.737118", "level": "WARNING", "source": "system", "message": "⚠️ Валидация не пройдена"}
+{"timestamp": "2026-01-19T08:14:09.737689", "level": "INFO", "source": "system", "message": "🔄 Продолжаем цикл self-healing (итерация 1/1)"}
+{"timestamp": "2026-01-19T08:14:09.738369", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #11, длина: 188"}
+{"timestamp": "2026-01-19T08:14:09.749531", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #12, длина: 3614"}
+{"timestamp": "2026-01-19T08:14:09.760829", "level": "INFO", "source": "system", "message": "🐛 Анализирую ошибки..."}
+{"timestamp": "2026-01-19T08:14:09.760885", "level": "INFO", "source": "system", "message": "🐞 Анализирую ошибки валидации..."}
+{"timestamp": "2026-01-19T08:14:14.446031", "level": "INFO", "source": "system", "message": "✅ Анализ завершён. Тип ошибки: pytest, уверенность: 1.00"}
+{"timestamp": "2026-01-19T08:14:14.447689", "level": "INFO", "source": "system", "message": "✅ Анализ завершён. Тип ошибки: pytest"}
+{"timestamp": "2026-01-19T08:14:14.460256", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #13, длина: 177"}
+{"timestamp": "2026-01-19T08:14:14.471780", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #14, длина: 281"}
+{"timestamp": "2026-01-19T08:14:14.483544", "level": "INFO", "source": "system", "message": "🔧 Исправляю код (итерация 1)..."}
+{"timestamp": "2026-01-19T08:14:14.483796", "level": "INFO", "source": "system", "message": "🔧 Исправляю код по инструкциям от Debugger..."}
+{"timestamp": "2026-01-19T08:14:25.963154", "level": "INFO", "source": "system", "message": "✅ Код исправлен (размер: 1665 символов)"}
+{"timestamp": "2026-01-19T08:14:25.964919", "level": "INFO", "source": "system", "message": "✅ Код исправлен (размер: 1665 символов)"}
+{"timestamp": "2026-01-19T08:14:25.968281", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #15, длина: 189"}
+{"timestamp": "2026-01-19T08:14:25.981538", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #16, длина: 187"}
+{"timestamp": "2026-01-19T08:14:25.995144", "level": "INFO", "source": "system", "message": "🔍 Валидирую код..."}
+{"timestamp": "2026-01-19T08:14:26.509230", "level": "WARNING", "source": "system", "message": "❌ Тесты не прошли: INTERNALERROR> Traceback (most recent call last):\nINTERNALERROR>   File \"/Users/ruslan/Downloads/testmatuscrsr/.venv/lib/python3.12/site-packages/_pytest/main.py\", line 314, in wrap_session\nINTERNALERROR>     config._do_configure()\nINTERNALERROR>   File \"/Users/ruslan/Downloads/testmatuscrsr/.venv/lib/python3.12/site-packages/_pytest/config/__init__.py\", line 1159, in _do_configure\nINTERNALERROR>     self.hook.pytest_configure.call_historic(kwargs=dict(config=self))\nINTERNALERROR>   File \"/Users"}
+{"timestamp": "2026-01-19T08:14:26.830925", "level": "WARNING", "source": "system", "message": "❌ mypy нашёл ошибки: /var/folders/sw/0rdxddxn04d0cmsfr89_hnrr0000gn/T/mypy_validation_er02ccxs/code.py:67: error: Invalid syntax  [syntax] "}
+{"timestamp": "2026-01-19T08:14:26.956538", "level": "INFO", "source": "system", "message": "✅ bandit проверка пройдена (нет критических проблем)"}
+{"timestamp": "2026-01-19T08:14:26.957207", "level": "WARNING", "source": "system", "message": "⚠️ Валидация не пройдена"}
+{"timestamp": "2026-01-19T08:14:26.957779", "level": "INFO", "source": "system", "message": "⏱️ Достигнут лимит итераций (1), завершаем цикл"}
+{"timestamp": "2026-01-19T08:14:26.958478", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #17, длина: 188"}
+{"timestamp": "2026-01-19T08:14:26.969651", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #18, длина: 3374"}
+{"timestamp": "2026-01-19T08:14:26.981008", "level": "INFO", "source": "system", "message": "🔍 Анализирую результаты..."}
+{"timestamp": "2026-01-19T08:14:26.981107", "level": "INFO", "source": "system", "message": "🔍 Провожу рефлексию над результатами..."}
+{"timestamp": "2026-01-19T08:14:38.998915", "level": "INFO", "source": "system", "message": "✅ Рефлексия завершена. Общая оценка: 0.64"}
+{"timestamp": "2026-01-19T08:14:39.309097", "level": "INFO", "source": "system", "message": "✅ Добавлено 1 документов в RAG"}
+{"timestamp": "2026-01-19T08:14:39.309318", "level": "INFO", "source": "system", "message": "💾 Опыт задачи сохранён в память (ID: task_1, успех: 0.64)"}
+{"timestamp": "2026-01-19T08:14:39.309380", "level": "INFO", "source": "system", "message": "✅ Рефлексия завершена. Общая оценка: 0.64"}
+{"timestamp": "2026-01-19T08:14:39.311064", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #19, длина: 173"}
+{"timestamp": "2026-01-19T08:14:39.323794", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #20, длина: 364"}
+{"timestamp": "2026-01-19T08:14:39.335786", "level": "INFO", "source": "system", "message": "🔎 Критический анализ кода..."}
+{"timestamp": "2026-01-19T08:14:39.336245", "level": "INFO", "source": "system", "message": "🔍 Критик анализирует код..."}
+{"timestamp": "2026-01-19T08:14:40.679368", "level": "INFO", "source": "system", "message": "✅ Критик завершил анализ: 2 проблем, оценка 65%"}
+{"timestamp": "2026-01-19T08:14:40.680172", "level": "INFO", "source": "system", "message": "✅ Критический анализ завершён. Оценка: 0.65"}
+{"timestamp": "2026-01-19T08:14:40.683643", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #21, длина: 171"}
+{"timestamp": "2026-01-19T08:14:40.694283", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #22, длина: 812"}
+{"timestamp": "2026-01-19T08:14:40.706028", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #23, длина: 16010"}
+{"timestamp": "2026-01-19T08:14:41.861788", "level": "INFO", "source": "system", "message": "🚀 Backend API запущен"}

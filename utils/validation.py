@@ -2,7 +2,8 @@
 import subprocess
 import tempfile
 import os
-from typing import Tuple, Optional
+import ast
+from typing import Tuple, Optional, List
 from pathlib import Path
 from utils.logger import get_logger
 
@@ -10,8 +11,62 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
+def check_syntax(code_str: str) -> Tuple[bool, str]:
+    """Быстрая проверка синтаксиса Python через ast.parse.
+    
+    Эта проверка выполняется ДО запуска pytest/mypy для раннего
+    обнаружения синтаксических ошибок.
+    
+    Args:
+        code_str: Код для проверки
+        
+    Returns:
+        Кортеж (успех: bool, сообщение: str с описанием ошибки или 'OK')
+    """
+    if not code_str.strip():
+        return False, "Пустой код"
+    
+    try:
+        ast.parse(code_str)
+        return True, "OK"
+    except SyntaxError as e:
+        error_msg = f"Синтаксическая ошибка на строке {e.lineno}: {e.msg}"
+        if e.text:
+            error_msg += f"\n  >>> {e.text.strip()}"
+        logger.warning(f"❌ {error_msg}")
+        return False, error_msg
+    except Exception as e:
+        return False, f"Ошибка парсинга: {e}"
+
+
+def check_syntax_both(code_str: str, test_str: str) -> Tuple[bool, List[str]]:
+    """Проверяет синтаксис кода И тестов перед запуском pytest.
+    
+    Args:
+        code_str: Основной код
+        test_str: Код тестов
+        
+    Returns:
+        Кортеж (успех: bool, список ошибок: List[str])
+    """
+    errors = []
+    
+    code_ok, code_msg = check_syntax(code_str)
+    if not code_ok:
+        errors.append(f"[code.py] {code_msg}")
+    
+    test_ok, test_msg = check_syntax(test_str)
+    if not test_ok:
+        errors.append(f"[test_code.py] {test_msg}")
+    
+    return len(errors) == 0, errors
+
+
 def run_pytest(code_str: str, test_str: str) -> Tuple[bool, str]:
     """Запускает pytest для проверки что код проходит тесты.
+    
+    Перед запуском pytest выполняется быстрая проверка синтаксиса
+    через ast.parse для раннего обнаружения ошибок.
     
     Args:
         code_str: Код для тестирования
@@ -22,6 +77,13 @@ def run_pytest(code_str: str, test_str: str) -> Tuple[bool, str]:
     """
     if not code_str.strip() or not test_str.strip():
         return False, "Пустой код или тесты"
+    
+    # Предварительная проверка синтаксиса (быстрее чем ждать падения pytest)
+    syntax_ok, syntax_errors = check_syntax_both(code_str, test_str)
+    if not syntax_ok:
+        error_msg = "Синтаксические ошибки:\n" + "\n".join(syntax_errors)
+        logger.warning(f"❌ Синтаксис не прошёл проверку до запуска pytest: {error_msg}")
+        return False, error_msg
     
     with tempfile.TemporaryDirectory(prefix="pytest_validation_") as tmpdir:
         try:
