@@ -1,0 +1,105 @@
+{"timestamp": "2026-01-19T08:08:38.846846", "level": "INFO", "source": "system", "message": "🚀 Backend API запущен"}
+{"timestamp": "2026-01-19T08:08:54.122661", "level": "INFO", "source": "system", "message": "🚀 Обнаружено приветствие - быстрый ответ без workflow"}
+{"timestamp": "2026-01-19T08:08:54.122845", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_start для intent (greeting)"}
+{"timestamp": "2026-01-19T08:08:54.122933", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #1, длина: 167"}
+{"timestamp": "2026-01-19T08:08:54.155194", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_start, длина: 167"}
+{"timestamp": "2026-01-19T08:08:54.155358", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_end для intent (greeting)"}
+{"timestamp": "2026-01-19T08:08:54.155487", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #2, длина: 223"}
+{"timestamp": "2026-01-19T08:08:54.186778", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_end для intent, длина: 223"}
+{"timestamp": "2026-01-19T08:08:54.186891", "level": "INFO", "source": "system", "message": "📤 Отправляю greeting stage_end"}
+{"timestamp": "2026-01-19T08:08:54.186994", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #3, длина: 899"}
+{"timestamp": "2026-01-19T08:08:54.219002", "level": "INFO", "source": "system", "message": "✅ Отправлено greeting, длина: 899"}
+{"timestamp": "2026-01-19T08:08:54.219325", "level": "INFO", "source": "system", "message": "📤 Отправляю final_result (complete) для greeting"}
+{"timestamp": "2026-01-19T08:08:54.219908", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #4, длина: 761"}
+{"timestamp": "2026-01-19T08:09:07.425934", "level": "INFO", "source": "system", "message": "✅ LangGraph workflow скомпилирован"}
+{"timestamp": "2026-01-19T08:09:07.549615", "level": "INFO", "source": "system", "message": "✅ RAG система инициализирована с ChromaDB (коллекция: task_memory)"}
+{"timestamp": "2026-01-19T08:09:07.550999", "level": "INFO", "source": "system", "message": "✅ RAG система инициализирована с ChromaDB (коллекция: codebase_docs)"}
+{"timestamp": "2026-01-19T08:09:07.569771", "level": "INFO", "source": "system", "message": "📋 Определяю намерение..."}
+{"timestamp": "2026-01-19T08:09:07.569847", "level": "INFO", "source": "system", "message": "🔍 Определяю намерение для запроса: напиши игру змейка..."}
+{"timestamp": "2026-01-19T08:09:07.579839", "level": "INFO", "source": "system", "message": "🔄 Retry 1/3 через 1.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:08.584327", "level": "INFO", "source": "system", "message": "🔄 Retry 2/3 через 2.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:10.589899", "level": "INFO", "source": "system", "message": "🔄 Retry 3/3 через 4.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:14.595636", "level": "ERROR", "source": "system", "message": "❌ Ошибка Ollama после 4 попыток: signal only works in main thread of the main interpreter", "payload": {"error_type": "ValueError", "error_message": "signal only works in main thread of the main interpreter", "traceback": "NoneType: None\n"}}
+{"timestamp": "2026-01-19T08:09:14.596389", "level": "INFO", "source": "system", "message": "✅ Намерение определено: create (уверенность: 0.50)"}
+{"timestamp": "2026-01-19T08:09:14.596607", "level": "INFO", "source": "system", "message": "✅ Намерение определено: create (уверенность: 0.50)"}
+{"timestamp": "2026-01-19T08:09:14.600854", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_start для intent"}
+{"timestamp": "2026-01-19T08:09:14.601160", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #1, длина: 167"}
+{"timestamp": "2026-01-19T08:09:14.612567", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_start, длина: 167"}
+{"timestamp": "2026-01-19T08:09:14.612877", "level": "INFO", "source": "system", "message": "📤 Отправляю stage_end для intent"}
+{"timestamp": "2026-01-19T08:09:14.613078", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #2, длина: 218"}
+{"timestamp": "2026-01-19T08:09:14.624455", "level": "INFO", "source": "system", "message": "✅ Отправлено stage_end, длина: 218"}
+{"timestamp": "2026-01-19T08:09:14.625579", "level": "INFO", "source": "system", "message": "📝 Создаю план..."}
+{"timestamp": "2026-01-19T08:09:14.625747", "level": "INFO", "source": "system", "message": "📋 Создаю план для задачи: напиши игру змейка..."}
+{"timestamp": "2026-01-19T08:09:14.625854", "level": "INFO", "source": "system", "message": "✅ Использован упрощённый план для простой задачи"}
+{"timestamp": "2026-01-19T08:09:14.625922", "level": "INFO", "source": "system", "message": "✅ План создан (размер: 161 символов)"}
+{"timestamp": "2026-01-19T08:09:14.627074", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #3, длина: 172"}
+{"timestamp": "2026-01-19T08:09:14.639434", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #4, длина: 185"}
+{"timestamp": "2026-01-19T08:09:14.651206", "level": "INFO", "source": "system", "message": "🔍 Собираю контекст..."}
+{"timestamp": "2026-01-19T08:09:14.651432", "level": "INFO", "source": "system", "message": "🔍 Ищу контекст для: напиши игру змейка..."}
+{"timestamp": "2026-01-19T08:09:14.651539", "level": "INFO", "source": "system", "message": "🔍 Ищу похожие задачи в памяти для: напиши игру змейка..."}
+{"timestamp": "2026-01-19T08:09:15.468482", "level": "INFO", "source": "system", "message": "ℹ️ Похожих задач в памяти не найдено"}
+{"timestamp": "2026-01-19T08:09:15.521790", "level": "INFO", "source": "system", "message": "📚 RAG результаты: найдено 0 документов (уверенность: 0.00)"}
+{"timestamp": "2026-01-19T08:09:15.521908", "level": "INFO", "source": "system", "message": "🌐 RAG недостаточно, выполняю веб-поиск..."}
+{"timestamp": "2026-01-19T08:09:17.547312", "level": "INFO", "source": "system", "message": "✅ Tavily вернул 4 результатов"}
+{"timestamp": "2026-01-19T08:09:17.550942", "level": "INFO", "source": "system", "message": "✅ Найдено 4 результатов веб-поиска"}
+{"timestamp": "2026-01-19T08:09:17.551201", "level": "INFO", "source": "system", "message": "✅ Контекст собран (размер: 2975 символов)"}
+{"timestamp": "2026-01-19T08:09:17.551331", "level": "INFO", "source": "system", "message": "✅ Контекст собран (размер: 2975 символов)"}
+{"timestamp": "2026-01-19T08:09:17.554584", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #5, длина: 182"}
+{"timestamp": "2026-01-19T08:09:17.566292", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #6, длина: 194"}
+{"timestamp": "2026-01-19T08:09:17.577911", "level": "INFO", "source": "system", "message": "🧪 Генерирую тесты..."}
+{"timestamp": "2026-01-19T08:09:17.578041", "level": "INFO", "source": "system", "message": "🧪 Генерирую pytest тесты для намерения: create"}
+{"timestamp": "2026-01-19T08:09:17.587637", "level": "INFO", "source": "system", "message": "🔄 Retry 1/3 через 1.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:18.591039", "level": "INFO", "source": "system", "message": "🔄 Retry 2/3 через 2.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:20.593296", "level": "INFO", "source": "system", "message": "🔄 Retry 3/3 через 4.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:24.597567", "level": "ERROR", "source": "system", "message": "❌ Ошибка Ollama после 4 попыток: signal only works in main thread of the main interpreter", "payload": {"error_type": "ValueError", "error_message": "signal only works in main thread of the main interpreter", "traceback": "NoneType: None\n"}}
+{"timestamp": "2026-01-19T08:09:24.598279", "level": "WARNING", "source": "system", "message": "⚠️ Не удалось сгенерировать валидные тесты"}
+{"timestamp": "2026-01-19T08:09:24.598492", "level": "WARNING", "source": "system", "message": "⚠️ Не удалось сгенерировать тесты"}
+{"timestamp": "2026-01-19T08:09:24.600828", "level": "INFO", "source": "system", "message": "💻 Генерирую код..."}
+{"timestamp": "2026-01-19T08:09:24.601089", "level": "INFO", "source": "system", "message": "💻 Генерирую код для намерения: create"}
+{"timestamp": "2026-01-19T08:09:24.609584", "level": "INFO", "source": "system", "message": "🔄 Retry 1/3 через 1.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:25.615282", "level": "INFO", "source": "system", "message": "🔄 Retry 2/3 через 2.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:27.621268", "level": "INFO", "source": "system", "message": "🔄 Retry 3/3 через 4.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:31.622771", "level": "ERROR", "source": "system", "message": "❌ Ошибка Ollama после 4 попыток: signal only works in main thread of the main interpreter", "payload": {"error_type": "ValueError", "error_message": "signal only works in main thread of the main interpreter", "traceback": "NoneType: None\n"}}
+{"timestamp": "2026-01-19T08:09:31.623395", "level": "WARNING", "source": "system", "message": "⚠️ Не удалось сгенерировать валидный код"}
+{"timestamp": "2026-01-19T08:09:31.623551", "level": "WARNING", "source": "system", "message": "⚠️ Не удалось сгенерировать код"}
+{"timestamp": "2026-01-19T08:09:31.625626", "level": "INFO", "source": "system", "message": "🔍 Валидирую код..."}
+{"timestamp": "2026-01-19T08:09:31.625871", "level": "WARNING", "source": "system", "message": "⚠️ Валидация не пройдена"}
+{"timestamp": "2026-01-19T08:09:31.626782", "level": "INFO", "source": "system", "message": "🔄 Продолжаем цикл self-healing (итерация 1/1)"}
+{"timestamp": "2026-01-19T08:09:31.627994", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #7, длина: 188"}
+{"timestamp": "2026-01-19T08:09:31.639444", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #8, длина: 347"}
+{"timestamp": "2026-01-19T08:09:31.650687", "level": "INFO", "source": "system", "message": "🐛 Анализирую ошибки..."}
+{"timestamp": "2026-01-19T08:09:31.651015", "level": "INFO", "source": "system", "message": "🐞 Анализирую ошибки валидации..."}
+{"timestamp": "2026-01-19T08:09:31.657198", "level": "INFO", "source": "system", "message": "🔄 Retry 1/3 через 1.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:32.662662", "level": "INFO", "source": "system", "message": "🔄 Retry 2/3 через 2.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:34.669253", "level": "INFO", "source": "system", "message": "🔄 Retry 3/3 через 4.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:38.675191", "level": "ERROR", "source": "system", "message": "❌ Ошибка Ollama после 4 попыток: signal only works in main thread of the main interpreter", "payload": {"error_type": "ValueError", "error_message": "signal only works in main thread of the main interpreter", "traceback": "NoneType: None\n"}}
+{"timestamp": "2026-01-19T08:09:38.675911", "level": "INFO", "source": "system", "message": "✅ Анализ завершён. Тип ошибки: multiple, уверенность: 0.50"}
+{"timestamp": "2026-01-19T08:09:38.676135", "level": "INFO", "source": "system", "message": "✅ Анализ завершён. Тип ошибки: multiple"}
+{"timestamp": "2026-01-19T08:09:38.678233", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #9, длина: 177"}
+{"timestamp": "2026-01-19T08:09:38.689611", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #10, длина: 289"}
+{"timestamp": "2026-01-19T08:09:38.701279", "level": "INFO", "source": "system", "message": "🔧 Исправляю код (итерация 1)..."}
+{"timestamp": "2026-01-19T08:09:38.701438", "level": "INFO", "source": "system", "message": "🔧 Исправляю код по инструкциям от Debugger..."}
+{"timestamp": "2026-01-19T08:09:38.701501", "level": "WARNING", "source": "system", "message": "⚠️ Пустой код или инструкции"}
+{"timestamp": "2026-01-19T08:09:38.701545", "level": "WARNING", "source": "system", "message": "⚠️ Не удалось исправить код"}
+{"timestamp": "2026-01-19T08:09:38.702595", "level": "INFO", "source": "system", "message": "🔍 Валидирую код..."}
+{"timestamp": "2026-01-19T08:09:38.702665", "level": "WARNING", "source": "system", "message": "⚠️ Валидация не пройдена"}
+{"timestamp": "2026-01-19T08:09:38.703002", "level": "INFO", "source": "system", "message": "⏱️ Достигнут лимит итераций (1), завершаем цикл"}
+{"timestamp": "2026-01-19T08:09:38.703914", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #11, длина: 187"}
+{"timestamp": "2026-01-19T08:09:38.715202", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #12, длина: 347"}
+{"timestamp": "2026-01-19T08:09:38.725491", "level": "INFO", "source": "system", "message": "🔍 Анализирую результаты..."}
+{"timestamp": "2026-01-19T08:09:38.725604", "level": "INFO", "source": "system", "message": "🔍 Провожу рефлексию над результатами..."}
+{"timestamp": "2026-01-19T08:09:38.732866", "level": "INFO", "source": "system", "message": "🔄 Retry 1/3 через 1.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:39.738285", "level": "INFO", "source": "system", "message": "🔄 Retry 2/3 через 2.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:41.740424", "level": "INFO", "source": "system", "message": "🔄 Retry 3/3 через 4.0с после ошибки: signal only works in main thread of the main interpreter"}
+{"timestamp": "2026-01-19T08:09:45.746260", "level": "ERROR", "source": "system", "message": "❌ Ошибка Ollama после 4 попыток: signal only works in main thread of the main interpreter", "payload": {"error_type": "ValueError", "error_message": "signal only works in main thread of the main interpreter", "traceback": "NoneType: None\n"}}
+{"timestamp": "2026-01-19T08:09:45.747114", "level": "INFO", "source": "system", "message": "✅ Рефлексия завершена. Общая оценка: 0.47"}
+{"timestamp": "2026-01-19T08:09:46.003578", "level": "INFO", "source": "system", "message": "✅ Добавлено 1 документов в RAG"}
+{"timestamp": "2026-01-19T08:09:46.003810", "level": "INFO", "source": "system", "message": "💾 Опыт задачи сохранён в память (ID: task_1, успех: 0.47)"}
+{"timestamp": "2026-01-19T08:09:46.003921", "level": "INFO", "source": "system", "message": "✅ Рефлексия завершена. Общая оценка: 0.47"}
+{"timestamp": "2026-01-19T08:09:46.006170", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #13, длина: 173"}
+{"timestamp": "2026-01-19T08:09:46.018954", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #14, длина: 351"}
+{"timestamp": "2026-01-19T08:09:46.038079", "level": "INFO", "source": "system", "message": "🔎 Критический анализ кода..."}
+{"timestamp": "2026-01-19T08:09:46.038368", "level": "WARNING", "source": "system", "message": "⚠️ Critic Agent не инициализирован или код пустой"}
+{"timestamp": "2026-01-19T08:09:46.039988", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #15, длина: 171"}
+{"timestamp": "2026-01-19T08:09:46.050924", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #16, длина: 252"}
+{"timestamp": "2026-01-19T08:09:46.062390", "level": "INFO", "source": "system", "message": "📤 [generate] Отправляю событие #17, длина: 4248"}

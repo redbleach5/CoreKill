@@ -2,8 +2,7 @@
 import ollama
 from typing import Optional, Dict, Any
 import time
-import signal
-from contextlib import contextmanager
+import concurrent.futures
 
 from utils.logger import get_logger
 
@@ -11,35 +10,9 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
-class TimeoutError(Exception):
+class LLMTimeoutError(Exception):
     """Исключение для таймаута LLM запроса."""
     pass
-
-
-@contextmanager
-def timeout_handler(seconds: int, operation: str = "LLM request"):
-    """Контекстный менеджер для timeout операций.
-    
-    Args:
-        seconds: Таймаут в секундах
-        operation: Описание операции для логирования
-        
-    Raises:
-        TimeoutError: Если операция превысила таймаут
-    """
-    def handler(signum: int, frame: Any) -> None:
-        raise TimeoutError(f"{operation} превысил таймаут {seconds} секунд")
-    
-    # Устанавливаем обработчик сигнала
-    old_handler = signal.signal(signal.SIGALRM, handler)
-    signal.alarm(seconds)
-    
-    try:
-        yield
-    finally:
-        # Восстанавливаем предыдущий обработчик
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
 
 
 class LocalLLM:
@@ -138,19 +111,22 @@ class LocalLLM:
                 
                 start_time = time.time()
                 
-                # Вызов с timeout (через signal на Unix)
-                try:
-                    with timeout_handler(self.timeout, f"Ollama generate ({self.model})"):
-                        response = ollama.generate(
-                            model=self.model,
-                            prompt=prompt,
-                            options=options,
-                            **{k: v for k, v in kwargs.items() if k != "options"}
-                        )
-                except TimeoutError as te:
-                    elapsed = time.time() - start_time
-                    logger.warning(f"⏱️ Таймаут LLM запроса после {elapsed:.1f}с: {te}")
-                    raise
+                # Вызов с timeout через ThreadPoolExecutor (работает в любом потоке)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        ollama.generate,
+                        model=self.model,
+                        prompt=prompt,
+                        options=options,
+                        **{k: v for k, v in kwargs.items() if k != "options"}
+                    )
+                    
+                    try:
+                        response = future.result(timeout=self.timeout)
+                    except concurrent.futures.TimeoutError:
+                        elapsed = time.time() - start_time
+                        logger.warning(f"⏱️ Таймаут LLM запроса после {elapsed:.1f}с")
+                        raise LLMTimeoutError(f"Таймаут {self.timeout}с")
                 
                 elapsed = time.time() - start_time
                 result = response.get("response", "").strip()
@@ -161,8 +137,8 @@ class LocalLLM:
                 else:
                     logger.warning(f"⚠️ Пустой ответ от LLM после {elapsed:.1f}с")
                     
-            except TimeoutError:
-                last_error = TimeoutError(f"Таймаут {self.timeout}с")
+            except (LLMTimeoutError, concurrent.futures.TimeoutError):
+                last_error = LLMTimeoutError(f"Таймаут {self.timeout}с")
                 backoff = self._calculate_backoff(attempt)
                 if attempt < self.max_retries:
                     logger.info(f"🔄 Retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с...")
@@ -217,25 +193,29 @@ class LocalLLM:
             try:
                 start_time = time.time()
                 
-                try:
-                    with timeout_handler(self.timeout, f"Ollama chat ({self.model})"):
-                        response = ollama.chat(
-                            model=self.model,
-                            messages=messages,
-                            options=options,
-                            **{k: v for k, v in kwargs.items() if k != "options"}
-                        )
-                except TimeoutError as te:
-                    elapsed = time.time() - start_time
-                    logger.warning(f"⏱️ Таймаут chat запроса после {elapsed:.1f}с: {te}")
-                    raise
+                # Вызов с timeout через ThreadPoolExecutor
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        ollama.chat,
+                        model=self.model,
+                        messages=messages,
+                        options=options,
+                        **{k: v for k, v in kwargs.items() if k != "options"}
+                    )
+                    
+                    try:
+                        response = future.result(timeout=self.timeout)
+                    except concurrent.futures.TimeoutError:
+                        elapsed = time.time() - start_time
+                        logger.warning(f"⏱️ Таймаут chat запроса после {elapsed:.1f}с")
+                        raise LLMTimeoutError(f"Таймаут {self.timeout}с")
                 
                 result = response.get("message", {}).get("content", "").strip()
                 if result:
                     return result
                     
-            except TimeoutError:
-                last_error = TimeoutError(f"Таймаут {self.timeout}с")
+            except (LLMTimeoutError, concurrent.futures.TimeoutError):
+                last_error = LLMTimeoutError(f"Таймаут {self.timeout}с")
                 backoff = self._calculate_backoff(attempt)
                 if attempt < self.max_retries:
                     logger.info(f"🔄 Chat retry {attempt + 1}/{self.max_retries} через {backoff:.1f}с...")
