@@ -7,13 +7,13 @@ logger = get_logger()
 
 
 def should_skip_greeting(state: AgentState) -> str:
-    """Проверяет нужно ли пропустить workflow для greeting.
+    """Проверяет нужно ли пропустить workflow для greeting/help.
     
     Args:
         state: Текущий state
         
     Returns:
-        "skip" если это greeting, "continue" иначе
+        "skip" если это greeting или help, "continue" иначе
     """
     intent_result = state.get("intent_result")
     
@@ -21,8 +21,10 @@ def should_skip_greeting(state: AgentState) -> str:
         logger.warning("⚠️ Intent result отсутствует, продолжаем workflow")
         return "continue"
     
-    if intent_result.type == "greeting":
-        logger.info("ℹ️ Обнаружено приветствие, пропускаем основной workflow")
+    # Пропускаем полный workflow для простых запросов (приветствия и help)
+    simple_intents = {"greeting", "help"}
+    if intent_result.type in simple_intents:
+        logger.info(f"ℹ️ Обнаружен простой запрос ({intent_result.type}), пропускаем основной workflow")
         return "skip"
     
     return "continue"

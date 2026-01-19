@@ -1,5 +1,5 @@
 """State схема для LangGraph workflow."""
-from typing import TypedDict, Optional, Dict, Any
+from typing import TypedDict, Optional, Dict, Any, List
 from agents.intent import IntentResult
 from agents.debugger import DebugResult
 from agents.reflection import ReflectionResult
@@ -17,6 +17,12 @@ class AgentState(TypedDict):
     disable_web_search: bool  # Отключить веб-поиск
     model: Optional[str]  # Модель Ollама (если None, выбирается автоматически)
     temperature: float  # Температура генерации
+    
+    # Режим и диалог
+    interaction_mode: str  # Режим: auto, chat, plan, analyze, code
+    conversation_id: Optional[str]  # ID диалога для сохранения контекста
+    conversation_history: Optional[List[Dict[str, str]]]  # История для LLM [{role, content}]
+    chat_response: Optional[str]  # Ответ в режиме chat (без workflow)
     
     # Результаты агентов
     intent_result: Optional[IntentResult]  # Результат Intent агента

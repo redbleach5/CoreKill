@@ -164,6 +164,11 @@ class Config:
         """Минимальный порог уверенности агентов."""
         return self._config_data.get("quality", {}).get("confidence_threshold", 0.75)
     
+    @property
+    def retry_threshold(self) -> float:
+        """Порог для повторного запуска (если качество ниже, should_retry = true)."""
+        return self._config_data.get("quality", {}).get("retry_threshold", 0.5)
+    
     # === Web Search ===
     
     @property
@@ -185,6 +190,65 @@ class Config:
     def web_search_max_results(self) -> int:
         """Максимальное количество результатов веб-поиска."""
         return self._config_data.get("web_search", {}).get("max_results", 3)
+    
+    # === RAG Settings ===
+    
+    @property
+    def rag_persist_directory(self) -> str:
+        """Директория для хранения ChromaDB."""
+        return self._config_data.get("rag", {}).get("persist_directory", ".chromadb")
+    
+    @property
+    def rag_memory_collection(self) -> str:
+        """Название коллекции для памяти задач."""
+        return self._config_data.get("rag", {}).get("memory_collection", "task_memory")
+    
+    @property
+    def rag_code_collection(self) -> str:
+        """Название коллекции для кодовой базы."""
+        return self._config_data.get("rag", {}).get("code_collection", "code_knowledge")
+    
+    @property
+    def rag_similarity_threshold(self) -> float:
+        """Минимальный порог схожести для результатов RAG."""
+        return self._config_data.get("rag", {}).get("similarity_threshold", 0.5)
+    
+    @property
+    def rag_max_results(self) -> int:
+        """Максимальное количество результатов из RAG."""
+        return self._config_data.get("rag", {}).get("max_results", 5)
+    
+    # === Interaction Settings ===
+    
+    @property
+    def interaction_default_mode(self) -> str:
+        """Режим взаимодействия по умолчанию: auto, chat, plan, analyze, code."""
+        return self._config_data.get("interaction", {}).get("default_mode", "auto")
+    
+    @property
+    def interaction_auto_confirm(self) -> bool:
+        """Автоматически запускать workflow без подтверждения."""
+        return self._config_data.get("interaction", {}).get("auto_confirm", True)
+    
+    @property
+    def interaction_show_thinking(self) -> bool:
+        """Показывать процесс размышления агента."""
+        return self._config_data.get("interaction", {}).get("show_thinking", True)
+    
+    @property
+    def interaction_max_context_messages(self) -> int:
+        """Максимум сообщений в контексте до суммаризации."""
+        return self._config_data.get("interaction", {}).get("max_context_messages", 20)
+    
+    @property
+    def interaction_persist_conversations(self) -> bool:
+        """Сохранять историю диалогов на диск."""
+        return self._config_data.get("interaction", {}).get("persist_conversations", True)
+    
+    @property
+    def llm_tokens_chat(self) -> int:
+        """Максимум токенов для ответа в режиме chat."""
+        return self._config_data.get("interaction", {}).get("tokens_chat", 2048)
 
 
 def get_config() -> Config:

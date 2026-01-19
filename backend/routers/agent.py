@@ -1,21 +1,39 @@
-"""Роутер для работы с агентами через API."""
+"""Роутер для работы с агентами через API.
+
+Поддерживает режимы взаимодействия:
+- auto: Автоматический выбор режима на основе анализа
+- chat: Простой диалог с LLM без workflow
+- plan: Только планирование без генерации кода
+- analyze: Анализ кода/задачи
+- code: Полный workflow генерации кода (TDD)
+"""
 import asyncio
 import uuid
-from typing import Dict, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, AsyncGenerator, List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from agents.intent import IntentAgent, IntentResult
+from agents.chat import ChatAgent, get_chat_agent
+from agents.conversation import get_conversation_memory, ConversationMemory
 from agents.reflection import ReflectionResult
-from agents.memory import MemoryAgent
+from backend.types import InteractionMode, TaskRequest, SessionSettings
 from utils.artifact_saver import ArtifactSaver
 from utils.config import get_config
-from utils.model_checker import get_all_available_models
+from utils.model_checker import (
+    get_all_available_models,
+    get_all_models_info,
+    check_model_available,
+    scan_available_models,
+    TaskComplexity,
+    ModelInfo
+)
 from utils.token_counter import estimate_workflow_tokens, check_token_limit
 from utils.logger import get_logger
 from backend.sse_manager import SSEManager
 from infrastructure.workflow_graph import create_workflow_graph
 from infrastructure.workflow_state import AgentState
+from infrastructure.model_router import get_model_router, reset_model_router
 
 
 logger = get_logger()
@@ -64,27 +82,112 @@ HELP_MESSAGE = (
     "Я понимаю русский и английский. Даже если вы напечатали в неправильной раскладке — я пойму! 😊"
 )
 
-# ========== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ==========
+# ========== ИМПОРТ ЗАВИСИМОСТЕЙ ==========
 
-# Глобальный MemoryAgent для feedback endpoint
-_memory_agent: Optional[MemoryAgent] = None
-
-
-def _get_memory_agent() -> MemoryAgent:
-    """Возвращает глобальный MemoryAgent, создавая его при необходимости."""
-    global _memory_agent
-    if _memory_agent is None:
-        _memory_agent = MemoryAgent()
-    return _memory_agent
+# MemoryAgent через DependencyContainer (Singleton)
+from backend.dependencies import get_memory_agent as _get_memory_agent
 
 
-class TaskRequest(BaseModel):
-    """Запрос на выполнение задачи."""
-    task: str = Field(..., description="Текст задачи на русском или английском")
-    model: str = Field(default="", description="Модель Ollama (если пусто, будет выбрана автоматически)")
-    temperature: float = Field(default=0.25, ge=0.1, le=0.7, description="Температура генерации")
-    disable_web_search: bool = Field(default=False, description="Отключить веб-поиск")
-    max_iterations: int = Field(default=3, ge=1, le=5, description="Максимальное количество итераций")
+# TaskRequest импортирован из backend.types
+
+
+async def run_chat_stream(
+    task: str,
+    model: str,
+    temperature: float,
+    conversation_id: Optional[str] = None
+) -> AsyncGenerator[str, None]:
+    """Обрабатывает запрос в режиме chat (простой диалог без workflow).
+    
+    Args:
+        task: Сообщение пользователя
+        model: Модель Ollama
+        temperature: Температура генерации
+        conversation_id: ID диалога для сохранения контекста
+        
+    Yields:
+        SSE события с ответом
+    """
+    task_id = str(uuid.uuid4())
+    conv_id = conversation_id or task_id
+    
+    logger.info(f"💬 Режим chat: обработка сообщения (conversation: {conv_id})")
+    
+    # Получаем менеджер диалогов
+    conv_memory = get_conversation_memory()
+    
+    # Добавляем сообщение пользователя в историю
+    conv_memory.add_message(conv_id, "user", task)
+    
+    # Получаем контекст диалога
+    config = get_config()
+    conversation_history = conv_memory.get_context(
+        conv_id, 
+        max_messages=config.interaction_max_context_messages
+    )
+    
+    # Отправляем stage_start
+    yield await SSEManager.stream_stage_start(
+        stage="chat",
+        message="Обрабатываю сообщение..."
+    )
+    await asyncio.sleep(0.02)
+    
+    try:
+        # Получаем ChatAgent и генерируем ответ
+        chat_agent = get_chat_agent(model=model if model else None, temperature=temperature)
+        response = chat_agent.chat(
+            message=task,
+            conversation_history=conversation_history
+        )
+        
+        # Сохраняем ответ в историю
+        conv_memory.add_message(conv_id, "assistant", response.content)
+        
+        # Отправляем stage_end с ответом
+        yield await SSEManager.stream_stage_end(
+            stage="chat",
+            message=response.content,
+            result={
+                "type": "chat",
+                "message": response.content,
+                "model_used": response.model_used
+            }
+        )
+        await asyncio.sleep(0.02)
+        
+        # Финальный результат
+        yield await SSEManager.stream_final_result(
+            task_id=task_id,
+            results={
+                "task": task,
+                "intent": {
+                    "type": "chat",
+                    "confidence": 1.0,
+                    "description": "Режим диалога"
+                },
+                "chat_response": response.content,
+                "conversation_id": conv_id,
+                "greeting_message": response.content  # Для совместимости с frontend
+            },
+            metrics={
+                "planning": 0.0,
+                "research": 0.0,
+                "testing": 0.0,
+                "coding": 0.0,
+                "overall": 0.0
+            }
+        )
+        await asyncio.sleep(0.1)
+        
+        logger.info(f"✅ Chat ответ отправлен ({len(response.content)} символов)")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в chat режиме: {e}", error=e)
+        yield await SSEManager.stream_error(
+            stage="chat",
+            error_message=f"Ошибка генерации ответа: {str(e)}"
+        )
 
 
 async def run_workflow_stream(
@@ -174,33 +277,56 @@ async def run_workflow_stream(
     config = get_config()
     max_iterations = min(max_iterations, config.max_iterations, 5)
     
-    # Определяем модель для использования
-    from utils.model_checker import check_model_available, get_any_available_model
+    # УМНЫЙ ВЫБОР МОДЕЛИ:
+    # 1. Сначала определяем сложность задачи через Intent (быстрая эвристика)
+    # 2. Выбираем модель через SmartModelRouter на основе сложности
     
-    # Если модель не указана или пустая, выбираем автоматически
     model_to_use = (model.strip() if model and isinstance(model, str) and model.strip() else None)
-    if not model_to_use:
-        # Автоматически выбираем доступную модель
-        model_to_use = get_any_available_model()
+    task_complexity = TaskComplexity.MEDIUM  # По умолчанию medium
+    
+    # Быстрая эвристика для определения сложности без полного LLM вызова
+    intent_agent = IntentAgent(lazy_llm=True)
+    task_complexity = intent_agent._estimate_complexity_heuristic(task)
+    logger.info(f"📊 Определена сложность задачи: {task_complexity.value}")
+    
+    # Используем SmartModelRouter для выбора модели
+    router = get_model_router()
+    
+    try:
         if model_to_use:
-            logger.info(f"🤖 Автоматически выбрана модель: {model_to_use}")
+            # Проверяем, подходит ли указанная модель для сложности
+            if check_model_available(model_to_use):
+                model_selection = router.select_model_for_complexity(
+                    complexity=task_complexity,
+                    task_type="coding",
+                    preferred_model=model_to_use
+                )
+                model_to_use = model_selection.model
+                logger.info(f"🤖 {model_selection.reason}: {model_to_use}")
+            else:
+                logger.warning(f"⚠️ Модель {model_to_use} недоступна, выбираю оптимальную")
+                model_selection = router.select_model_for_complexity(
+                    complexity=task_complexity,
+                    task_type="coding"
+                )
+                model_to_use = model_selection.model
+                logger.info(f"🤖 {model_selection.reason}: {model_to_use}")
         else:
-            logger.error("❌ Нет доступных моделей Ollama!")
-            yield await SSEManager.stream_error(
-                stage="initialization",
-                error_message="Нет доступных моделей Ollama. Установите хотя бы одну модель."
+            # Автоматический выбор на основе сложности
+            model_selection = router.select_model_for_complexity(
+                complexity=task_complexity,
+                task_type="coding"
             )
-            return
-    elif not check_model_available(model_to_use):
-        logger.warning(f"⚠️ Модель {model_to_use} недоступна, выбираю альтернативу")
-        model_to_use = get_any_available_model()
-        if not model_to_use:
-            logger.error("❌ Нет доступных моделей Ollama!")
-            yield await SSEManager.stream_error(
-                stage="initialization",
-                error_message="Нет доступных моделей Ollama. Установите хотя бы одну модель."
-            )
-            return
+            model_to_use = model_selection.model
+            logger.info(f"🤖 {model_selection.reason}: {model_to_use}")
+            
+    except RuntimeError as e:
+        logger.error(f"❌ {e}")
+        yield await SSEManager.stream_error(
+            stage="initialization",
+            error_message=str(e)
+        )
+        return
     
     # Создаём начальный state
     initial_state: AgentState = {
@@ -209,6 +335,12 @@ async def run_workflow_stream(
         "disable_web_search": disable_web_search,
         "model": model_to_use,
         "temperature": temperature,
+        # Режим и диалог
+        "interaction_mode": "code",  # В этой функции всегда code режим
+        "conversation_id": None,
+        "conversation_history": None,
+        "chat_response": None,
+        # Результаты агентов
         "intent_result": None,
         "plan": "",
         "context": "",
@@ -217,6 +349,7 @@ async def run_workflow_stream(
         "validation_results": {},
         "debug_result": None,
         "reflection_result": None,
+        "critic_report": None,
         "iteration": 0,
         "task_id": task_id,
         "enable_sse": True,  # Флаг для SSE стриминга
@@ -254,16 +387,19 @@ async def run_workflow_stream(
                         yield event2
                         logger.info(f"✅ Отправлено stage_end, длина: {len(event2)}")
                         
-                        # Если greeting, отправляем специальное сообщение
-                        if intent_result.type == "greeting":
-                                logger.info(f"📤 Отправляю greeting stage_end")
+                        # Если greeting или help, отправляем специальное сообщение и завершаем
+                        if intent_result.type in ("greeting", "help"):
+                                message = GREETING_MESSAGE if intent_result.type == "greeting" else HELP_MESSAGE
+                                stage_name = intent_result.type
+                                
+                                logger.info(f"📤 Отправляю {stage_name} stage_end")
                                 event3 = await SSEManager.stream_stage_end(
-                                    stage="greeting",
-                                    message=GREETING_MESSAGE,
-                                    result={"type": "greeting", "message": GREETING_MESSAGE}
+                                    stage=stage_name,
+                                    message=message,
+                                    result={"type": stage_name, "message": message}
                                 )
                                 yield event3
-                                logger.info(f"✅ Отправлено greeting, длина: {len(event3)}")
+                                logger.info(f"✅ Отправлено {stage_name}, длина: {len(event3)}")
                                 
                                 logger.info(f"📤 Отправляю final_result (complete)")
                                 event4 = await SSEManager.stream_final_result(
@@ -271,10 +407,11 @@ async def run_workflow_stream(
                                     results={
                                         "task": task,
                                         "intent": {
-                                            "type": "greeting",
+                                            "type": intent_result.type,
                                             "confidence": intent_result.confidence,
                                             "description": intent_result.description
-                                        }
+                                        },
+                                        "greeting_message": message
                                     },
                                     metrics={
                                         "planning": 0.0,
@@ -587,62 +724,122 @@ async def create_task(request: TaskRequest) -> Dict[str, str]:
 
 @router.get("/models")
 async def get_models() -> Dict[str, Any]:
-    """Возвращает список доступных моделей Ollama.
+    """Возвращает список доступных моделей Ollama с детальной информацией.
     
-    Модели отсортированы по приоритету: быстрые coder модели первые.
+    Модели отсортированы по качеству (лучшие для кода первые).
+    Включает информацию о размере, специализации и рекомендациях.
     
     Returns:
-        Словарь с списком доступных моделей
+        Словарь с списком моделей и их характеристиками
     """
-    all_models = get_all_available_models()
+    # Сканируем модели заново для актуальности
+    models_info = get_all_models_info()
     
-    # Приоритетные модели (быстрые и качественные для кода)
-    priority_order = [
-        'qwen2.5-coder:1.5b',  # Лучший баланс скорость/качество
-        'gemma3:1b',
-        'stable-code:latest',
-        'phi3:mini',
-        'llama3.2:3b',
-        'gemma3:4b',
-        'qwen2.5-coder:7b',
-        'deepseek-coder:6.7b',
-        'codellama:7b',
-    ]
+    # Формируем ответ с детальной информацией
+    models_list = []
+    for info in models_info:
+        # Определяем рекомендацию по сложности
+        if info.estimated_quality >= 0.7:
+            recommended_for = ["complex", "medium", "simple"]
+        elif info.estimated_quality >= 0.5:
+            recommended_for = ["medium", "simple"]
+        else:
+            recommended_for = ["simple"]
+        
+        models_list.append({
+            "name": info.name,
+            "size_gb": round(info.size_gb, 2),
+            "parameters": info.parameter_size,
+            "family": info.family,
+            "is_coder": info.is_coder,
+            "quality_score": info.estimated_quality,
+            "recommended_for": recommended_for
+        })
     
-    # Сортируем: приоритетные первые, остальные в конце
-    def sort_key(model: str) -> int:
-        try:
-            return priority_order.index(model)
-        except ValueError:
-            # Embed модели в конец
-            if 'embed' in model.lower():
-                return 1000
-            return 100
-    
-    sorted_models = sorted(all_models, key=sort_key)
+    # Также возвращаем простой список имён для обратной совместимости
+    model_names = [m["name"] for m in models_list]
     
     return {
-        "models": sorted_models,
-        "count": len(sorted_models)
+        "models": model_names,  # Для обратной совместимости
+        "models_detailed": models_list,  # Детальная информация
+        "count": len(models_list),
+        "recommendations": {
+            "simple": _get_recommendation_for_complexity(models_info, TaskComplexity.SIMPLE),
+            "medium": _get_recommendation_for_complexity(models_info, TaskComplexity.MEDIUM),
+            "complex": _get_recommendation_for_complexity(models_info, TaskComplexity.COMPLEX)
+        }
     }
+
+
+def _get_recommendation_for_complexity(
+    models: List[ModelInfo], 
+    complexity: TaskComplexity
+) -> Optional[str]:
+    """Возвращает рекомендуемую модель для сложности."""
+    min_quality = {
+        TaskComplexity.SIMPLE: 0.3,
+        TaskComplexity.MEDIUM: 0.55,
+        TaskComplexity.COMPLEX: 0.7
+    }
+    
+    threshold = min_quality[complexity]
+    suitable = [m for m in models if m.estimated_quality >= threshold and 'embed' not in m.name.lower()]
+    
+    if suitable:
+        # Для simple предпочитаем быстрые, для complex - качественные
+        if complexity == TaskComplexity.SIMPLE:
+            # Выбираем минимально подходящую (быстрее)
+            return min(suitable, key=lambda m: m.estimated_quality).name
+        else:
+            # Выбираем лучшую по качеству
+            return max(suitable, key=lambda m: m.estimated_quality).name
+    
+    # Если нет подходящих, возвращаем лучшую из доступных
+    non_embed = [m for m in models if 'embed' not in m.name.lower()]
+    if non_embed:
+        return max(non_embed, key=lambda m: m.estimated_quality).name
+    
+    return models[0].name if models else None
+
+
+@router.post("/models/refresh")
+async def refresh_models() -> Dict[str, Any]:
+    """Принудительно обновляет список моделей Ollama.
+    
+    Используйте после добавления/удаления моделей через ollama pull/rm.
+    
+    Returns:
+        Обновлённый список моделей
+    """
+    reset_model_router()
+    return await get_models()
 
 
 @router.get("/stream")
 async def stream_task_results(
     task: str,
+    mode: str = "auto",
     model: str = "",
     temperature: float = 0.25,
     disable_web_search: bool = False,
-    max_iterations: int = 3
+    max_iterations: int = 3,
+    conversation_id: Optional[str] = None
 ):
     """SSE endpoint для стриминга результатов выполнения задачи.
     
+    Поддерживает режимы взаимодействия:
+    - auto: Автоматический выбор режима
+    - chat: Простой диалог без workflow
+    - code: Полный workflow генерации кода
+    
     Args:
         task: Текст задачи
+        mode: Режим взаимодействия (auto, chat, code)
         model: Модель Ollama
         temperature: Температура генерации
         disable_web_search: Отключить веб-поиск
         max_iterations: Максимальное количество итераций
+        conversation_id: ID диалога для сохранения контекста
         
     Returns:
         StreamingResponse с SSE событиями
@@ -652,22 +849,65 @@ async def stream_task_results(
     async def generate() -> AsyncGenerator[str, None]:
         try:
             event_count = 0
-            async for event in run_workflow_stream(
-                task=task,
-                model=model,
-                temperature=temperature,
-                disable_web_search=disable_web_search,
-                max_iterations=max_iterations
-            ):
+            selected_mode = mode
+            
+            # В режиме auto определяем нужен ли полный workflow
+            if mode == "auto":
+                # Быстрая проверка на greeting
+                if IntentAgent.is_greeting_fast(task):
+                    selected_mode = "chat"
+                else:
+                    # Определяем intent для выбора режима
+                    intent_agent = IntentAgent(lazy_llm=True)
+                    
+                    # Эвристика: короткие запросы без ключевых слов кода → chat
+                    task_lower = task.lower()
+                    code_keywords = [
+                        'напиши', 'создай', 'сделай', 'реализуй', 'сгенерируй',
+                        'write', 'create', 'make', 'implement', 'generate',
+                        'функци', 'класс', 'модуль', 'скрипт', 'код',
+                        'function', 'class', 'module', 'script', 'code',
+                        'исправ', 'отлад', 'debug', 'fix', 'оптимизир'
+                    ]
+                    
+                    has_code_keyword = any(kw in task_lower for kw in code_keywords)
+                    
+                    if has_code_keyword:
+                        selected_mode = "code"
+                    else:
+                        # Используем LLM для точного определения
+                        intent_result = intent_agent.determine_intent(task)
+                        selected_mode = intent_result.recommended_mode
+            
+            logger.info(f"🎯 Выбран режим: {selected_mode} (запрошен: {mode})")
+            
+            # Выбираем обработчик в зависимости от режима
+            if selected_mode == "chat":
+                stream_func = run_chat_stream(
+                    task=task,
+                    model=model,
+                    temperature=temperature,
+                    conversation_id=conversation_id
+                )
+            else:  # code или другой режим с workflow
+                stream_func = run_workflow_stream(
+                    task=task,
+                    model=model,
+                    temperature=temperature,
+                    disable_web_search=disable_web_search,
+                    max_iterations=max_iterations
+                )
+            
+            async for event in stream_func:
                 event_count += 1
                 logger.info(f"📤 [generate] Отправляю событие #{event_count}, длина: {len(event)}")
                 yield event
-                # Небольшая задержка для гарантии отправки каждого события
                 await asyncio.sleep(0.01)
+            
             logger.info(f"✅ [generate] Всего отправлено событий: {event_count}")
-            # ВАЖНО: Задержка перед закрытием генератора, чтобы frontend успел получить события
             await asyncio.sleep(0.5)
             logger.info("✅ [generate] Генератор завершен после задержки")
+            
         except Exception as e:
             logger.error(f"❌ Ошибка в generate(): {e}", error=e)
             error_event = await SSEManager.stream_error(
@@ -736,4 +976,144 @@ async def save_feedback(request: FeedbackRequest) -> Dict[str, str]:
     return {
         "status": "success",
         "message": f"Feedback '{request.feedback}' сохранён"
+    }
+
+
+@router.get("/settings")
+async def get_settings() -> Dict[str, Any]:
+    """Возвращает текущие настройки системы.
+    
+    Returns:
+        Словарь с настройками
+    """
+    config = get_config()
+    
+    return {
+        "interaction": {
+            "default_mode": config.interaction_default_mode,
+            "auto_confirm": config.interaction_auto_confirm,
+            "show_thinking": config.interaction_show_thinking,
+            "max_context_messages": config.interaction_max_context_messages,
+            "persist_conversations": config.interaction_persist_conversations
+        },
+        "llm": {
+            "default_model": config.default_model,
+            "temperature": config.temperature,
+            "tokens_chat": config.llm_tokens_chat,
+            "tokens_code": config.llm_tokens_code
+        },
+        "quality": {
+            "threshold": config.quality_threshold,
+            "confidence_threshold": config.confidence_threshold
+        },
+        "web_search": {
+            "enabled": config.enable_web,
+            "timeout": config.web_search_timeout
+        },
+        "modes": [
+            {"id": "auto", "name": "Авто", "description": "Автоматический выбор режима"},
+            {"id": "chat", "name": "Диалог", "description": "Простое общение без генерации кода"},
+            {"id": "code", "name": "Генерация", "description": "Полный workflow с тестами и кодом"}
+        ]
+    }
+
+
+@router.get("/conversations")
+async def list_conversations() -> Dict[str, Any]:
+    """Возвращает список диалогов.
+    
+    Returns:
+        Список диалогов с метаданными
+    """
+    conv_memory = get_conversation_memory()
+    
+    conversations = []
+    for conv_id, conv in conv_memory.conversations.items():
+        conversations.append({
+            "id": conv_id,
+            "created_at": conv.created_at.isoformat(),
+            "updated_at": conv.updated_at.isoformat(),
+            "message_count": len(conv.messages),
+            "has_summary": conv.summary is not None,
+            "preview": conv.messages[-1].content[:100] if conv.messages else ""
+        })
+    
+    # Сортируем по дате обновления (новые первые)
+    conversations.sort(key=lambda x: x["updated_at"], reverse=True)
+    
+    return {
+        "conversations": conversations,
+        "total": len(conversations)
+    }
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str) -> Dict[str, Any]:
+    """Возвращает детали диалога.
+    
+    Args:
+        conversation_id: ID диалога
+        
+    Returns:
+        Данные диалога с сообщениями
+    """
+    conv_memory = get_conversation_memory()
+    
+    if conversation_id not in conv_memory.conversations:
+        raise HTTPException(status_code=404, detail="Диалог не найден")
+    
+    conv = conv_memory.conversations[conversation_id]
+    
+    return {
+        "id": conv.id,
+        "created_at": conv.created_at.isoformat(),
+        "updated_at": conv.updated_at.isoformat(),
+        "summary": conv.summary,
+        "messages": [
+            {
+                "id": msg.id,
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat(),
+                "metadata": msg.metadata
+            }
+            for msg in conv.messages
+        ]
+    }
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str) -> Dict[str, str]:
+    """Удаляет диалог.
+    
+    Args:
+        conversation_id: ID диалога
+        
+    Returns:
+        Статус удаления
+    """
+    conv_memory = get_conversation_memory()
+    
+    if not conv_memory.delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Диалог не найден")
+    
+    return {
+        "status": "success",
+        "message": f"Диалог {conversation_id} удалён"
+    }
+
+
+@router.post("/conversations/new")
+async def create_conversation() -> Dict[str, str]:
+    """Создаёт новый диалог.
+    
+    Returns:
+        ID нового диалога
+    """
+    conv_memory = get_conversation_memory()
+    conv = conv_memory.get_or_create_conversation()
+    
+    return {
+        "conversation_id": conv.id,
+        "status": "created"
     }

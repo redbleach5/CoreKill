@@ -58,6 +58,8 @@ export interface TaskOptions {
   temperature: number
   disableWebSearch: boolean
   maxIterations: number
+  mode: 'auto' | 'chat' | 'code'
+  conversationId?: string
 }
 
 export function useAgentStream(): UseAgentStreamReturn {
@@ -145,11 +147,17 @@ export function useAgentStream(): UseAgentStreamReturn {
     // Формируем URL для SSE
     const params = new URLSearchParams({
       task,
+      mode: options.mode || 'auto',
       model: options.model,
       temperature: options.temperature.toString(),
       disable_web_search: options.disableWebSearch.toString(),
       max_iterations: options.maxIterations.toString()
     })
+    
+    // Добавляем conversation_id если есть
+    if (options.conversationId) {
+      params.set('conversation_id', options.conversationId)
+    }
 
     // В dev режиме подключаемся напрямую к backend (Vite proxy не поддерживает SSE)
     // В production можно использовать прокси
@@ -231,14 +239,13 @@ export function useAgentStream(): UseAgentStreamReturn {
         console.log('✅ Парсинг stage_end успешен:', data.stage, data.message?.substring(0, 50))
         console.log('📦 stage_end data.result:', data.result)
         
-        // Для greeting логируем детально и сохраняем message
-        if (data.stage === 'greeting') {
-          console.log('🎉 GREETING STAGE_END ПОЛУЧЕН!')
+        // Для greeting/help сохраняем message в results
+        if (data.stage === 'greeting' || data.stage === 'help') {
+          console.log(`🎉 ${data.stage.toUpperCase()} STAGE_END ПОЛУЧЕН!`)
           console.log('  - message:', data.message?.substring(0, 100))
-          console.log('  - result:', JSON.stringify(data.result))
           console.log('  - result.message:', data.result?.message?.substring(0, 100))
           
-          // Сохраняем greeting message в results как fallback
+          // Сохраняем message в results как fallback
           if (data.result?.message) {
             setResults(prev => ({
               ...prev,

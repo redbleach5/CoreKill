@@ -1,5 +1,5 @@
 """Агент для определения намерения пользователя."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 from infrastructure.local_llm import LocalLLM
 from utils.logger import get_logger
@@ -7,7 +7,8 @@ from utils.model_checker import (
     get_available_model,
     get_light_model,
     get_any_available_model,
-    check_model_available
+    check_model_available,
+    TaskComplexity
 )
 from utils.config import get_config
 from infrastructure.model_router import get_model_router
@@ -22,6 +23,28 @@ class IntentResult:
     type: str  # create | modify | debug | optimize | explain | test | refactor | greeting
     confidence: float  # 0.0 - 1.0
     description: str  # Описание намерения на русском
+    complexity: TaskComplexity = field(default=TaskComplexity.SIMPLE)  # Сложность задачи
+    recommended_mode: str = field(default="auto")  # Рекомендуемый режим: chat, plan, analyze, code
+    requires_code_generation: bool = field(default=False)  # Нужна ли генерация кода
+    
+    def __post_init__(self) -> None:
+        """Автоматически определяет рекомендуемый режим."""
+        # Типы, требующие полного workflow с генерацией кода
+        code_generation_types = {"create", "modify", "debug", "optimize", "test", "refactor"}
+        
+        # Типы для режима chat (простой диалог)
+        chat_types = {"greeting", "help", "explain"}
+        
+        # Определяем режим на основе типа намерения
+        if self.type in chat_types:
+            self.recommended_mode = "chat"
+            self.requires_code_generation = False
+        elif self.type in code_generation_types:
+            self.recommended_mode = "code"
+            self.requires_code_generation = True
+        else:
+            self.recommended_mode = "chat"
+            self.requires_code_generation = False
 
 
 class IntentAgent:
@@ -159,13 +182,13 @@ class IntentAgent:
         return intent_result
     
     def _classify_with_llm(self, query: str) -> IntentResult:
-        """Классифицирует намерение через LLM.
+        """Классифицирует намерение и сложность через LLM.
         
         Args:
             query: Запрос пользователя
             
         Returns:
-            IntentResult
+            IntentResult с типом, уверенностью и сложностью
         """
         # Формируем описание типов для промпта
         types_description = "\n".join(
@@ -180,21 +203,26 @@ REQUEST: "{query}"
 TYPES:
 {types_description}
 
+COMPLEXITY LEVELS:
+- "simple" = single function, utility, small script (1 file, <100 lines)
+- "medium" = class, module with multiple functions, API endpoint (1-2 files, 100-500 lines)
+- "complex" = game, system, multi-file project, architecture (3+ files, 500+ lines)
+
 RULES:
-- "help" = meta-questions: "что умеешь", "can you help", "как использовать", questions WITHOUT specific task
+- "help" = meta-questions: "что умеешь", "can you help", questions WITHOUT specific task
 - "greeting" = only simple greetings like "привет", "hello"  
 - "create" = specific task to generate code: "напиши X", "создай Y", "make Z"
 - "debug" = fix SPECIFIC code with errors
-- Other types = as described
 
 EXAMPLES:
-- "что ты умеешь?" -> help (meta-question about capabilities)
-- "можешь помочь?" -> help (no specific task mentioned)
-- "можешь написать функцию?" -> create (specific task: write function)
-- "напиши сортировку" -> create (specific task)
-- "ghbdtn" -> greeting (Russian "привет" in wrong layout)
+- "напиши функцию сортировки" -> intent: create, complexity: simple
+- "создай класс для работы с БД" -> intent: create, complexity: medium  
+- "напиши игру змейка" -> intent: create, complexity: complex
+- "напиши игру тетрис" -> intent: create, complexity: complex
+- "создай веб-сервер" -> intent: create, complexity: medium
+- "сделай парсер JSON" -> intent: create, complexity: simple
 
-JSON response: {{"intent": "type", "confidence": 0.0-1.0}}
+JSON response: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
 JSON:"""
 
         from utils.config import get_config
@@ -211,7 +239,7 @@ JSON:"""
             original_query: Оригинальный запрос
             
         Returns:
-            IntentResult
+            IntentResult с типом, уверенностью и сложностью
         """
         import json
         
@@ -228,6 +256,13 @@ JSON:"""
             "refactor": "Рефакторинг кода"
         }
         
+        # Маппинг строковых значений complexity в enum
+        complexity_map = {
+            "simple": TaskComplexity.SIMPLE,
+            "medium": TaskComplexity.MEDIUM,
+            "complex": TaskComplexity.COMPLEX
+        }
+        
         try:
             # Ищем JSON в ответе
             start = response.find("{")
@@ -237,6 +272,7 @@ JSON:"""
                 intent = data.get("intent", "create").lower()
                 confidence = float(data.get("confidence", 0.75))
                 reason = data.get("reason", "")
+                complexity_str = data.get("complexity", "simple").lower()
                 
                 # Валидируем тип
                 if intent not in self.INTENT_TYPES:
@@ -248,10 +284,18 @@ JSON:"""
                     else:
                         intent = "create"  # default
                 
+                # Валидируем complexity
+                complexity = complexity_map.get(complexity_str, TaskComplexity.SIMPLE)
+                
+                # Эвристика: greeting и help всегда simple
+                if intent in ("greeting", "help"):
+                    complexity = TaskComplexity.SIMPLE
+                
                 return IntentResult(
                     type=intent,
                     confidence=min(max(confidence, 0.0), 1.0),
-                    description=descriptions.get(intent, reason or "Выполнение задачи")
+                    description=descriptions.get(intent, reason or "Выполнение задачи"),
+                    complexity=complexity
                 )
         except (json.JSONDecodeError, ValueError, KeyError):
             pass
@@ -260,18 +304,63 @@ JSON:"""
         response_lower = response.lower()
         for intent_type in self.INTENT_TYPES:
             if intent_type in response_lower:
+                # Определяем complexity эвристически по запросу
+                complexity = self._estimate_complexity_heuristic(original_query)
                 return IntentResult(
                     type=intent_type,
                     confidence=0.7,
-                    description=descriptions.get(intent_type, "Выполнение задачи")
+                    description=descriptions.get(intent_type, "Выполнение задачи"),
+                    complexity=complexity
                 )
         
         # Default
         return IntentResult(
             type="create",
             confidence=0.5,
-            description="Создание кода (по умолчанию)"
+            description="Создание кода (по умолчанию)",
+            complexity=self._estimate_complexity_heuristic(original_query)
         )
+    
+    def _estimate_complexity_heuristic(self, query: str) -> TaskComplexity:
+        """Эвристическое определение сложности по ключевым словам.
+        
+        Args:
+            query: Запрос пользователя
+            
+        Returns:
+            Оценка сложности
+        """
+        query_lower = query.lower()
+        
+        # Ключевые слова для complex задач
+        complex_keywords = [
+            'игр', 'game', 'систем', 'system', 'приложен', 'application', 'app',
+            'проект', 'project', 'архитектур', 'веб-сайт', 'website', 'платформ',
+            'сервис', 'service', 'бот', 'bot', 'парсер сайт', 'scraper',
+            'змейк', 'snake', 'тетрис', 'tetris', 'шахмат', 'chess',
+            'магазин', 'shop', 'store', 'crm', 'cms', 'api сервер'
+        ]
+        
+        # Ключевые слова для medium задач
+        medium_keywords = [
+            'класс', 'class', 'модуль', 'module', 'api', 'endpoint',
+            'crud', 'база данных', 'database', 'db', 'orm', 'auth',
+            'парсер', 'parser', 'конвертер', 'converter', 'валидатор',
+            'сервер', 'server', 'клиент', 'client', 'обработчик', 'handler'
+        ]
+        
+        # Проверяем complex
+        for keyword in complex_keywords:
+            if keyword in query_lower:
+                return TaskComplexity.COMPLEX
+        
+        # Проверяем medium
+        for keyword in medium_keywords:
+            if keyword in query_lower:
+                return TaskComplexity.MEDIUM
+        
+        # По умолчанию simple
+        return TaskComplexity.SIMPLE
     
     
     def _is_greeting(self, query: str) -> bool:

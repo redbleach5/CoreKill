@@ -1,11 +1,7 @@
 import { useState, useEffect } from 'react'
+import { TaskOptions } from '../hooks/useAgentStream'
 
-export interface TaskOptions {
-  model: string
-  temperature: number
-  disableWebSearch: boolean
-  maxIterations: number
-}
+export type { TaskOptions }
 
 interface SidebarOptionsProps {
   options: TaskOptions

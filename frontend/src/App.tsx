@@ -1,13 +1,23 @@
 import { useState, useEffect, useRef } from 'react'
-import { useAgentStream } from './hooks/useAgentStream'
-import { TaskOptions } from './components/SidebarOptions'
+import { useAgentStream, TaskOptions } from './hooks/useAgentStream'
 import { SettingsPanel } from './components/SettingsPanel'
 import { 
   Zap, Send, Square, Settings, ChevronRight, 
-  Brain, ListTodo, Search, TestTube, Code2, Shield, RefreshCw,
   CheckCircle2, Loader2, AlertCircle, Copy, Download, ThumbsUp, ThumbsDown,
-  Sparkles, FileCode, MessageCircle, Bot, User, Sliders
+  FileCode, MessageCircle, Bot, User, Sliders, TestTube,
+  Sparkles, Code2, MessagesSquare, Plus
 } from 'lucide-react'
+import { AgentProgress } from './components/AgentProgress'
+
+// Типы режимов взаимодействия
+type InteractionMode = 'auto' | 'chat' | 'code'
+
+// Конфигурация режимов
+const modeConfig: Record<InteractionMode, { label: string; icon: typeof Sparkles; description: string }> = {
+  auto: { label: 'Авто', icon: Sparkles, description: 'Автовыбор режима' },
+  chat: { label: 'Диалог', icon: MessagesSquare, description: 'Простое общение' },
+  code: { label: 'Код', icon: Code2, description: 'Генерация с тестами' }
+}
 
 // Типы сообщений в чате
 interface ChatMessage {
@@ -26,31 +36,16 @@ interface ChatMessage {
   }
 }
 
-// Конфигурация этапов
-const stageConfig: Record<string, { label: string; icon: typeof Brain; description: string }> = {
-  intent: { label: 'Анализ', icon: Brain, description: 'Понимание задачи' },
-  planning: { label: 'План', icon: ListTodo, description: 'Разработка плана' },
-  research: { label: 'Поиск', icon: Search, description: 'Сбор контекста' },
-  testing: { label: 'Тесты', icon: TestTube, description: 'Генерация тестов' },
-  coding: { label: 'Код', icon: Code2, description: 'Написание кода' },
-  validation: { label: 'Проверка', icon: Shield, description: 'Валидация' },
-  debug: { label: 'Отладка', icon: AlertCircle, description: 'Анализ ошибок' },
-  fixing: { label: 'Фикс', icon: Code2, description: 'Исправление кода' },
-  reflection: { label: 'Оценка', icon: RefreshCw, description: 'Оценка качества' },
-  critic: { label: 'Критик', icon: AlertCircle, description: 'Критический анализ' },
-  greeting: { label: 'Приветствие', icon: Sparkles, description: 'Приветствие' }
-}
-
-const stageOrder = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
-
 function App() {
   const { stages, results, metrics, isRunning, error, startTask, stopTask, reset } = useAgentStream()
   const [options, setOptions] = useState<TaskOptions>({
     model: '',
     temperature: 0.25,
     disableWebSearch: false,
-    maxIterations: 3
+    maxIterations: 3,
+    mode: 'auto'
   })
+  const [conversationId, setConversationId] = useState<string | null>(null)
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [taskInput, setTaskInput] = useState<string>('')
@@ -92,7 +87,10 @@ function App() {
 
     const intentType = results.intent?.type || ''
     const isSimpleResponse = intentType === 'greeting' || intentType === 'help'
-    const greetingMessage = stages['greeting']?.result?.message || results.greeting_message
+    // Берём сообщение из соответствующего stage или из results
+    const greetingMessage = stages['greeting']?.result?.message 
+      || stages['help']?.result?.message 
+      || results.greeting_message
 
     setMessages(prev => prev.map(msg => {
       if (msg.id !== currentAssistantId) return msg
@@ -158,9 +156,15 @@ function App() {
     setCurrentAssistantId(assistantId)
     setTaskInput('')
 
-    // Reset stream state and start
+    // Создаём новый conversation_id если его нет
+    const convId = conversationId || `conv-${Date.now()}`
+    if (!conversationId) {
+      setConversationId(convId)
+    }
+
+    // Reset stream state and start with conversation context
     reset()
-    startTask(taskInput.trim(), options)
+    startTask(taskInput.trim(), { ...options, conversationId: convId })
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -203,14 +207,6 @@ function App() {
     }))
   }
 
-  const getStageStatus = (stage: string, stageData: Record<string, any>) => {
-    const data = stageData[stage]
-    if (!data || data.status === 'idle') return 'pending'
-    if (data.status === 'error') return 'error'
-    if (data.status === 'end') return 'completed'
-    return 'active'
-  }
-
   // Рендер сообщения пользователя
   const renderUserMessage = (msg: ChatMessage) => (
     <div key={msg.id} className="flex gap-3 justify-end">
@@ -235,58 +231,17 @@ function App() {
     </div>
   )
 
-  // Рендер прогресса генерации
+  // Рендер прогресса генерации — современный UI с детальным отображением этапов
   const renderProgressMessage = (msg: ChatMessage) => {
     const stageData = msg.metadata?.stages || stages
-    const completedCount = Object.values(stageData).filter((s: any) => s.status === 'end').length
-    const totalStages = stageOrder.length
 
     return (
       <div key={msg.id} className="flex gap-3">
         <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500/20 to-violet-500/20 flex items-center justify-center">
           <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
         </div>
-        <div className="flex-1 max-w-[85%]">
-          <div className="bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Loader2 className="w-4 h-4 text-blue-400 animate-spin" />
-              <span className="text-sm text-gray-300">Выполнение...</span>
-              <span className="text-xs text-gray-500 ml-auto">{completedCount}/{totalStages} этапов</span>
-            </div>
-            
-            {/* Mini progress bar */}
-            <div className="flex gap-1">
-              {stageOrder.map((stage) => {
-                const status = getStageStatus(stage, stageData)
-                const config = stageConfig[stage]
-                return (
-                  <div
-                    key={stage}
-                    className={`flex-1 h-1.5 rounded-full transition-all duration-300 ${
-                      status === 'completed' ? 'bg-emerald-500' :
-                      status === 'active' ? 'bg-blue-500 animate-pulse' :
-                      status === 'error' ? 'bg-red-500' :
-                      'bg-white/10'
-                    }`}
-                    title={config?.label}
-                  />
-                )
-              })}
-            </div>
-            
-            {/* Current stage */}
-            {Object.entries(stageData).map(([name, data]: [string, any]) => {
-              if (data.status !== 'start') return null
-              const config = stageConfig[name]
-              if (!config) return null
-              return (
-                <div key={name} className="mt-3 flex items-center gap-2 text-sm text-gray-400">
-                  <config.icon className="w-4 h-4 text-blue-400" />
-                  <span>{config.description}...</span>
-                </div>
-              )
-            })}
-          </div>
+        <div className="flex-1 max-w-[90%]">
+          <AgentProgress stages={stageData} />
         </div>
       </div>
     )
@@ -424,15 +379,61 @@ function App() {
     <div className="min-h-screen bg-[#0a0a0f] text-gray-100 flex flex-col">
       {/* Header */}
       <header className="flex-shrink-0 border-b border-white/5 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center">
-            <Zap className="w-4 h-4 text-white" />
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center">
+              <Zap className="w-4 h-4 text-white" />
+            </div>
+            <span className="font-semibold text-white">Cursor Killer</span>
+            <span className="text-xs text-gray-500 hidden sm:block">AI Code Agent</span>
           </div>
-          <span className="font-semibold text-white">Cursor Killer</span>
-          <span className="text-xs text-gray-500 hidden sm:block">AI Code Agent</span>
+          
+          {/* New Chat Button */}
+          {messages.length > 0 && (
+            <button
+              onClick={() => {
+                setMessages([])
+                setConversationId(null)
+                reset()
+              }}
+              disabled={isRunning}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-400 
+                         hover:text-white hover:bg-white/5 rounded-lg transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Новый диалог</span>
+            </button>
+          )}
         </div>
         
         <div className="flex items-center gap-3">
+          {/* Mode Switcher */}
+          <div className="flex items-center bg-white/5 rounded-lg p-0.5 border border-white/10">
+            {(Object.keys(modeConfig) as InteractionMode[]).map((mode) => {
+              const config = modeConfig[mode]
+              const Icon = config.icon
+              const isActive = options.mode === mode
+              return (
+                <button
+                  key={mode}
+                  onClick={() => setOptions(prev => ({ ...prev, mode }))}
+                  disabled={isRunning}
+                  title={config.description}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all
+                    ${isActive 
+                      ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                      : 'text-gray-400 hover:text-white hover:bg-white/5'
+                    }
+                    disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{config.label}</span>
+                </button>
+              )
+            })}
+          </div>
+
           {availableModels.length > 0 && (
             <select
               value={options.model}
@@ -527,17 +528,36 @@ function App() {
                   <MessageCircle className="w-8 h-8 text-blue-400" />
                 </div>
                 <h1 className="text-2xl font-semibold text-white mb-2">Чем могу помочь?</h1>
-                <p className="text-gray-400 max-w-md mx-auto mb-8">
-                  Опишите задачу — я сгенерирую код, помогу с отладкой или отвечу на вопросы
+                <p className="text-gray-400 max-w-md mx-auto mb-4">
+                  {options.mode === 'chat' 
+                    ? 'Режим диалога — обсудим архитектуру, ответим на вопросы'
+                    : options.mode === 'code'
+                    ? 'Режим генерации — создам код с тестами и валидацией'
+                    : 'Авто-режим — сам определю нужен ли код или достаточно обсуждения'
+                  }
                 </p>
+                
+                {/* Mode indicator */}
+                <div className="flex items-center justify-center gap-2 mb-8">
+                  {(() => {
+                    const config = modeConfig[options.mode]
+                    const Icon = config.icon
+                    return (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                        <Icon className="w-3.5 h-3.5" />
+                        {config.label}: {config.description}
+                      </span>
+                    )
+                  })()}
+                </div>
                 
                 {/* Quick suggestions */}
                 <div className="flex flex-wrap justify-center gap-2">
                   {[
                     '👋 Привет! Что ты умеешь?',
+                    '💬 Как лучше организовать проект?',
                     '📝 Напиши функцию сортировки',
-                    '🔧 Создай REST API эндпоинт',
-                    '🧪 Напиши тесты для калькулятора'
+                    '🔧 Создай REST API эндпоинт'
                   ].map((example) => (
                     <button
                       key={example}
