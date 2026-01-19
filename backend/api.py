@@ -105,7 +105,9 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 # Подключаем роутеры
+from backend.routers import code_executor
 app.include_router(agent.router)
+app.include_router(code_executor.router)
 
 
 @app.get("/")
