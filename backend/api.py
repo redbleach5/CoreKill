@@ -87,6 +87,7 @@ async def lifespan(app: FastAPI):
     
     Startup:
     - Инициализация логирования
+    - Бенчмарк производительности LLM
     - Lazy инициализация connection pool
     
     Shutdown:
@@ -102,8 +103,24 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Backend API запущен")
     setup_log_filter()
     
-    # Инициализируем connection pool (lazy — при первом использовании)
-    # get_ollama_pool() будет вызван при первом запросе
+    # Инициализируем систему метрик и запускаем бенчмарк если нужно
+    try:
+        from infrastructure.performance_metrics import get_performance_metrics
+        metrics = get_performance_metrics()
+        
+        # Запускаем бенчмарк только если нет сохранённых данных
+        if not metrics.benchmark:
+            logger.info("🔧 Первый запуск — калибровка производительности...")
+            # Запускаем в фоне чтобы не блокировать startup
+            asyncio.create_task(_run_initial_benchmark())
+        else:
+            logger.info(
+                f"📊 Загружена калибровка: {metrics.benchmark.tokens_per_second:.1f} tok/s, "
+                f"множитель {metrics.benchmark.performance_multiplier:.2f}x"
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка инициализации метрик: {e}")
+    
     logger.info("✅ Lifespan startup завершён")
     
     yield
@@ -112,6 +129,20 @@ async def lifespan(app: FastAPI):
     logger.info("🛑 Backend API завершает работу...")
     await _cleanup_on_shutdown()
     logger.info("✅ Graceful shutdown завершён")
+
+
+async def _run_initial_benchmark() -> None:
+    """Запускает первичный бенчмарк в фоне."""
+    try:
+        # Небольшая задержка чтобы сервер успел стартовать
+        await asyncio.sleep(2)
+        
+        from infrastructure.performance_metrics import get_performance_metrics
+        metrics = get_performance_metrics()
+        await metrics.run_benchmark()
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка фонового бенчмарка: {e}")
 
 # Создаём FastAPI приложение с lifespan manager
 app = FastAPI(

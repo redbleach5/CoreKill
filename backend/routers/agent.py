@@ -885,6 +885,48 @@ async def refresh_models() -> Dict[str, Any]:
     return await get_models()
 
 
+@router.get("/metrics/stages")
+async def get_stage_metrics() -> Dict[str, Any]:
+    """Возвращает метрики производительности по этапам workflow.
+    
+    Включает:
+    - Результаты бенчмарка (скорость генерации, множитель)
+    - Статистику по каждому этапу (среднее время, медиана, кол-во замеров)
+    - Адаптивные оценки времени для текущего железа
+    
+    Returns:
+        Словарь с метриками
+    """
+    from infrastructure.performance_metrics import get_performance_metrics
+    
+    metrics = get_performance_metrics()
+    return metrics.get_metrics_summary()
+
+
+@router.post("/metrics/benchmark")
+async def run_benchmark(model: Optional[str] = None) -> Dict[str, Any]:
+    """Запускает бенчмарк производительности LLM.
+    
+    Тестирует скорость генерации и обновляет коэффициент производительности.
+    Результаты сохраняются и используются для адаптивных оценок времени.
+    
+    Args:
+        model: Модель для тестирования (опционально, по умолчанию текущая)
+        
+    Returns:
+        Результаты бенчмарка
+    """
+    from infrastructure.performance_metrics import get_performance_metrics
+    
+    metrics = get_performance_metrics()
+    benchmark = await metrics.run_benchmark(model)
+    
+    return {
+        "benchmark": benchmark.to_dict(),
+        "message": f"Бенчмарк завершён: {benchmark.tokens_per_second:.1f} токенов/сек"
+    }
+
+
 @router.get("/stream")
 async def stream_task_results(
     task: str,

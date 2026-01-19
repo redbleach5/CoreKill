@@ -7,8 +7,11 @@ Checkpoint сохраняется после каждого узла для во
 
 ВАЖНО: Все узлы теперь асинхронные (async def) для совместимости с FastAPI.
 Тяжёлые LLM операции выполняются через asyncio.to_thread() чтобы не блокировать event loop.
+
+Метрики производительности записываются автоматически для каждого этапа.
 """
 import asyncio
+import time
 from typing import TYPE_CHECKING
 from infrastructure.workflow_state import AgentState
 from infrastructure.task_checkpointer import get_task_checkpointer
@@ -76,6 +79,22 @@ def _save_checkpoint(state: AgentState, stage: str, status: str = "running") -> 
         logger.warning(f"⚠️ Не удалось сохранить checkpoint: {e}")
 
 
+def _record_stage_duration(stage: str, duration: float) -> None:
+    """Записывает время выполнения этапа в метрики.
+    
+    Args:
+        stage: Название этапа
+        duration: Время в секундах
+    """
+    try:
+        from infrastructure.performance_metrics import get_performance_metrics
+        metrics = get_performance_metrics()
+        metrics.record_stage_duration(stage, duration)
+    except Exception as e:
+        # Не критично — просто логируем
+        logger.debug(f"⚠️ Не удалось записать метрику: {e}")
+
+
 def _initialize_agents(state: AgentState) -> None:
     """Инициализирует агентов если они ещё не инициализированы.
     
@@ -141,6 +160,7 @@ async def intent_node(state: AgentState) -> AgentState:
         Обновленный state с intent_result
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     task = state.get("task", "")
     
@@ -179,6 +199,9 @@ async def intent_node(state: AgentState) -> AgentState:
             description=f"Ошибка: {str(e)}"
         )
     
+    # Записываем метрику времени
+    _record_stage_duration("intent", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "intent")
     
@@ -195,6 +218,7 @@ async def planner_node(state: AgentState) -> AgentState:
         Обновленный state с plan
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     task = state.get("task", "")
     intent_result = state.get("intent_result")
@@ -227,6 +251,9 @@ async def planner_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка создания плана: {e}", error=e)
         state["plan"] = ""
     
+    # Записываем метрику времени
+    _record_stage_duration("planning", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "planner")
     
@@ -243,6 +270,7 @@ async def researcher_node(state: AgentState) -> AgentState:
         Обновленный state с context
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     task = state.get("task", "")
     intent_result = state.get("intent_result")
@@ -299,6 +327,9 @@ async def researcher_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка сбора контекста: {e}", error=e)
         state["context"] = state.get("file_context", "")
     
+    # Записываем метрику времени
+    _record_stage_duration("research", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "researcher")
     
@@ -315,6 +346,7 @@ async def generator_node(state: AgentState) -> AgentState:
         Обновленный state с tests
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     plan = state.get("plan", "")
     context = state.get("context", "")
@@ -352,6 +384,9 @@ async def generator_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка генерации тестов: {e}", error=e)
         state["tests"] = ""
     
+    # Записываем метрику времени
+    _record_stage_duration("testing", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "test_generator")
     
@@ -368,6 +403,7 @@ async def coder_node(state: AgentState) -> AgentState:
         Обновленный state с code
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     plan = state.get("plan", "")
     tests = state.get("tests", "")
@@ -407,6 +443,9 @@ async def coder_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка генерации кода: {e}", error=e)
         state["code"] = ""
     
+    # Записываем метрику времени
+    _record_stage_duration("coding", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "coder")
     
@@ -422,6 +461,7 @@ async def validator_node(state: AgentState) -> AgentState:
     Returns:
         Обновленный state с validation_results
     """
+    start_time = time.time()
     code = state.get("code", "")
     tests = state.get("tests", "")
     
@@ -449,6 +489,9 @@ async def validator_node(state: AgentState) -> AgentState:
             "all_passed": False
         }
     
+    # Записываем метрику времени
+    _record_stage_duration("validation", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "validator")
     
@@ -465,6 +508,7 @@ async def debugger_node(state: AgentState) -> AgentState:
         Обновленный state с debug_result
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     validation_results = state.get("validation_results", {})
     code = state.get("code", "")
@@ -492,6 +536,9 @@ async def debugger_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка анализа ошибок: {e}", error=e)
         state["debug_result"] = None
     
+    # Записываем метрику времени
+    _record_stage_duration("debug", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "debugger")
     
@@ -508,6 +555,7 @@ async def fixer_node(state: AgentState) -> AgentState:
         Обновленный state с исправленным code и увеличенным iteration
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     code = state.get("code", "")
     debug_result = state.get("debug_result")
@@ -544,6 +592,9 @@ async def fixer_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка исправления кода: {e}", error=e)
     
+    # Записываем метрику времени
+    _record_stage_duration("fixing", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "fixer")
     
@@ -560,6 +611,7 @@ async def reflection_node(state: AgentState) -> AgentState:
         Обновленный state с reflection_result
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     task = state.get("task", "")
     plan = state.get("plan", "")
@@ -604,6 +656,9 @@ async def reflection_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка рефлексии: {e}", error=e)
         state["reflection_result"] = None
     
+    # Записываем метрику времени
+    _record_stage_duration("reflection", time.time() - start_time)
+    
     # Сохраняем checkpoint
     _save_checkpoint(state, "reflection")
     
@@ -620,6 +675,7 @@ async def critic_node(state: AgentState) -> AgentState:
         Обновленный state с critic_report
     """
     _initialize_agents(state)
+    start_time = time.time()
     
     code = state.get("code", "")
     tests = state.get("tests", "")
@@ -646,6 +702,9 @@ async def critic_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка критического анализа: {e}", error=e)
         state["critic_report"] = None
+    
+    # Записываем метрику времени
+    _record_stage_duration("critic", time.time() - start_time)
     
     # Сохраняем финальный checkpoint как completed
     _save_checkpoint(state, "critic", status="completed")

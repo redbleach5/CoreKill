@@ -156,8 +156,8 @@ const STAGE_CONFIG: Record<string, { label: string; icon: typeof Sparkles; color
   help: { label: 'Помогаю', icon: Sparkles, color: 'text-violet-400' }
 }
 
-// Среднее время выполнения этапов (секунды) — эмпирические данные
-const STAGE_DURATIONS: Record<string, number> = {
+// Базовые оценки времени (секунды) — fallback если нет данных с сервера
+const DEFAULT_STAGE_DURATIONS: Record<string, number> = {
   intent: 3,
   planning: 8,
   research: 12,
@@ -172,6 +172,48 @@ const STAGE_DURATIONS: Record<string, number> = {
   greeting: 1,
   help: 2
 }
+
+// Кэш метрик с сервера
+let cachedStageDurations: Record<string, number> | null = null
+let lastFetchTime = 0
+const CACHE_TTL = 60000 // 1 минута
+
+// Функция для получения актуальных метрик
+async function fetchStageDurations(): Promise<Record<string, number>> {
+  const now = Date.now()
+  
+  // Используем кэш если свежий
+  if (cachedStageDurations && now - lastFetchTime < CACHE_TTL) {
+    return cachedStageDurations
+  }
+  
+  try {
+    const response = await fetch('/api/metrics/stages')
+    if (response.ok) {
+      const data = await response.json()
+      if (data.estimates) {
+        cachedStageDurations = data.estimates
+        lastFetchTime = now
+        return cachedStageDurations
+      }
+    }
+  } catch (e) {
+    // Игнорируем ошибки — используем fallback
+  }
+  
+  return DEFAULT_STAGE_DURATIONS
+}
+
+// Получаем время для этапа (синхронно из кэша или fallback)
+function getStageDuration(stage: string): number {
+  if (cachedStageDurations && cachedStageDurations[stage] !== undefined) {
+    return cachedStageDurations[stage]
+  }
+  return DEFAULT_STAGE_DURATIONS[stage] || 5
+}
+
+// Предзагрузка метрик при первом импорте
+fetchStageDurations()
 
 // Рендер прогресса генерации — компактный анимированный статус
 function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<string, StageStatus> }) {
@@ -222,18 +264,20 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
   const totalStages = 8 // Примерное количество основных этапов
   const progressPercent = Math.min(100, Math.round((completedStages / totalStages) * 100))
   
-  // Расчёт оставшегося времени
+  // Расчёт оставшегося времени (использует адаптивные метрики)
   const estimatedTimeLeft = useMemo(() => {
     let remainingSeconds = 0
     const mainStages = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
     
     for (const stage of mainStages) {
       const status = stageData[stage]
+      const stageDuration = getStageDuration(stage)
+      
       if (!status || status.status === 'idle') {
-        remainingSeconds += STAGE_DURATIONS[stage] || 5
+        remainingSeconds += stageDuration
       } else if (status.status === 'start' || status.status === 'progress') {
         // Текущий этап — добавляем половину времени
-        remainingSeconds += (STAGE_DURATIONS[stage] || 5) / 2
+        remainingSeconds += stageDuration / 2
       }
       // Завершённые этапы не учитываем
     }
@@ -350,9 +394,9 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
                       {stageConfig.label}
                     </span>
                     
-                    {/* Время этапа */}
+                    {/* Время этапа (адаптивное) */}
                     <span className="text-[10px] text-gray-600 ml-auto">
-                      ~{STAGE_DURATIONS[stage]}с
+                      ~{Math.round(getStageDuration(stage))}с
                     </span>
                   </div>
                 )
