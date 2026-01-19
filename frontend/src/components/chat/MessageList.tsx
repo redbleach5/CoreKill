@@ -192,12 +192,12 @@ async function fetchStageDurations(): Promise<Record<string, number>> {
     if (response.ok) {
       const data = await response.json()
       if (data.estimates) {
-        cachedStageDurations = data.estimates
+        cachedStageDurations = data.estimates as Record<string, number>
         lastFetchTime = now
         return cachedStageDurations
       }
     }
-  } catch (e) {
+  } catch {
     // Игнорируем ошибки — используем fallback
   }
   

@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { 
   MessageSquare, Plus, Trash2, ChevronLeft, ChevronRight, 
-  Clock, Search, X, AlertTriangle
+  Clock, Search, X
 } from 'lucide-react'
 
 // Тип диалога из API

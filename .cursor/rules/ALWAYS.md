@@ -43,3 +43,11 @@
 ## После завершения задачи
 - Проверь что код компилируется без ошибок
 - Если изменены сигнатуры агентов — упомяни что нужно обновить тесты (@test_sync.md)
+
+## Расширение правил .cursor/rules/
+Когда файл превышает ~150 строк — разбей на папку:
+```
+models.md → models/overview.md, models/timeouts.md, models/routing.md
+architecture.md → architecture/overview.md, architecture/agents.md, architecture/workflow.md
+```
+Это позволяет масштабировать документацию вместе с проектом.

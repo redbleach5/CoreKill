@@ -18,13 +18,18 @@ export function CodeEditor({
   language = 'python',
   readOnly = false,
   onCodeChange,
-  onExecute,
+  onExecute: _onExecute,
   isExecuting = false
 }: CodeEditorProps) {
+  void _onExecute // используется в будущем
   const [code, setCode] = useState(initialCode)
   const [output, setOutput] = useState('')
   const [error, setError] = useState('')
   const [showOutput, setShowOutput] = useState(false)
+  
+  // Suppress unused variable warnings - will be used when execute is implemented
+  void setOutput
+  void setError
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const highlightRef = useRef<HTMLPreElement>(null)
 

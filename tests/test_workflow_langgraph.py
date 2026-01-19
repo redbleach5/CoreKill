@@ -56,6 +56,13 @@ def create_test_state(**overrides) -> AgentState:
     return default
 
 
+# Общий патч для декораторных функций (метрики и checkpoints)
+DECORATOR_PATCHES = [
+    'infrastructure.workflow_decorators._save_checkpoint',
+    'infrastructure.workflow_decorators._record_stage_duration',
+]
+
+
 class TestWorkflowGraph:
     """Тесты для графа LangGraph."""
     
@@ -63,18 +70,16 @@ class TestWorkflowGraph:
         """Тест создания графа."""
         graph = create_workflow_graph()
         assert graph is not None
-        # Проверяем что граф скомпилирован (имеет метод invoke)
         assert hasattr(graph, "invoke")
         assert hasattr(graph, "astream")
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     @patch('infrastructure.workflow_nodes._intent_agent', new_callable=Mock)
     async def test_intent_node_greeting(self, mock_agent, mock_init, mock_record, mock_save):
         """Тест узла intent для greeting."""
-        # Патчим is_greeting_fast как staticmethod класса IntentAgent
         with patch.object(IntentAgent, 'is_greeting_fast', return_value=True):
             state = create_test_state(task="привет")
             result = await intent_node(state)
@@ -84,8 +89,8 @@ class TestWorkflowGraph:
         assert result["intent_result"].confidence == 0.95
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._intent_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_intent_node_create(self, mock_init, mock_agent, mock_record, mock_save):
@@ -97,7 +102,6 @@ class TestWorkflowGraph:
         )
         mock_agent.determine_intent.return_value = mock_result
         
-        # Патчим is_greeting_fast чтобы не сработал fast path
         with patch('infrastructure.workflow_nodes.IntentAgent.is_greeting_fast', return_value=False):
             state = create_test_state(task="создать функцию")
             result = await intent_node(state)
@@ -108,13 +112,11 @@ class TestWorkflowGraph:
     
     def test_should_skip_greeting(self):
         """Тест условного перехода skip/continue для greeting."""
-        # Greeting → skip
         greeting_state = create_test_state(
             intent_result=IntentResult(type="greeting", confidence=1.0, description="Test")
         )
         assert should_skip_greeting(greeting_state) == "skip"
         
-        # Create → continue
         create_state = create_test_state(
             intent_result=IntentResult(type="create", confidence=1.0, description="Test")
         )
@@ -122,7 +124,6 @@ class TestWorkflowGraph:
     
     def test_should_continue_self_healing(self):
         """Тест условного перехода для self-healing."""
-        # Все тесты прошли → finish
         success_state = create_test_state(
             validation_results={"all_passed": True},
             iteration=1,
@@ -130,7 +131,6 @@ class TestWorkflowGraph:
         )
         assert should_continue_self_healing(success_state) == "finish"
         
-        # Тесты не прошли, есть итерации → continue
         fail_state = create_test_state(
             validation_results={"all_passed": False},
             iteration=1,
@@ -138,7 +138,6 @@ class TestWorkflowGraph:
         )
         assert should_continue_self_healing(fail_state) == "continue"
         
-        # Достигнут лимит итераций → finish
         max_iter_state = create_test_state(
             validation_results={"all_passed": False},
             iteration=3,
@@ -147,8 +146,8 @@ class TestWorkflowGraph:
         assert should_continue_self_healing(max_iter_state) == "finish"
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._planner_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_planner_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -165,8 +164,8 @@ class TestWorkflowGraph:
         assert result["plan"] == "Plan step 1\nPlan step 2"
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._researcher_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_researcher_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -183,8 +182,8 @@ class TestWorkflowGraph:
         assert "Context" in result.get("context", "") or result["context"] == ""
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._test_generator')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_generator_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -202,8 +201,8 @@ class TestWorkflowGraph:
         assert "test" in result.get("tests", "").lower() or result["tests"] == ""
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._coder_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_coder_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -222,8 +221,8 @@ class TestWorkflowGraph:
         assert "def" in result.get("code", "") or result["code"] == ""
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes.validate_code')
     async def test_validator_node(self, mock_validate, mock_record, mock_save):
         """Тест узла validator."""
@@ -244,8 +243,8 @@ class TestWorkflowGraph:
         assert result["validation_results"]["all_passed"] is True
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._debugger_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_debugger_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -269,8 +268,8 @@ class TestWorkflowGraph:
         assert result["debug_result"] is not None
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._coder_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')
     async def test_fixer_node(self, mock_init, mock_agent, mock_record, mock_save):
@@ -292,11 +291,11 @@ class TestWorkflowGraph:
         
         result = await fixer_node(state)
         
-        assert result["iteration"] == 1  # Увеличилась
+        assert result["iteration"] == 1
     
     @pytest.mark.asyncio
-    @patch('infrastructure.workflow_nodes._save_checkpoint')
-    @patch('infrastructure.workflow_nodes._record_stage_duration')
+    @patch('infrastructure.workflow_decorators._save_checkpoint')
+    @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._get_memory_agent')
     @patch('infrastructure.workflow_nodes._reflection_agent')
     @patch('infrastructure.workflow_nodes._initialize_agents')

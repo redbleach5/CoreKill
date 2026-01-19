@@ -3,28 +3,24 @@
 Каждый узел соответствует одному агенту в workflow.
 Агенты инициализируются лениво при первом вызове.
 MemoryAgent используется через DependencyContainer (Singleton).
-Checkpoint сохраняется после каждого узла для возможности восстановления.
 
 ВАЖНО: Все узлы теперь асинхронные (async def) для совместимости с FastAPI.
 Тяжёлые LLM операции выполняются через asyncio.to_thread() чтобы не блокировать event loop.
 
-Метрики производительности записываются автоматически для каждого этапа.
-Таймауты настраиваются через config.toml [timeouts] секцию.
+Обработка ошибок, метрики и checkpoints — через декоратор @workflow_node.
 """
 import asyncio
-import time
 from typing import TYPE_CHECKING
-from infrastructure.local_llm import LLMTimeoutError
 from infrastructure.workflow_state import AgentState
-from infrastructure.task_checkpointer import get_task_checkpointer
+from infrastructure.workflow_decorators import workflow_node
 from agents.intent import IntentAgent, IntentResult
 from agents.planner import PlannerAgent
 from agents.researcher import ResearcherAgent
 from agents.test_generator import TestGeneratorAgent
 from agents.coder import CoderAgent
-from agents.debugger import DebuggerAgent, DebugResult
-from agents.reflection import ReflectionAgent, ReflectionResult
-from agents.critic import CriticAgent, get_critic_agent, CriticReport
+from agents.debugger import DebuggerAgent
+from agents.reflection import ReflectionAgent
+from agents.critic import CriticAgent, get_critic_agent
 from backend.dependencies import get_memory_agent
 from utils.validation import validate_code
 from utils.config import get_config
@@ -32,7 +28,6 @@ from utils.logger import get_logger
 from utils.file_context import extract_file_path_from_task, read_file_context, prepare_modify_context
 
 if TYPE_CHECKING:
-    from backend.sse_manager import SSEManager
     from agents.memory import MemoryAgent
 
 logger = get_logger()
@@ -56,80 +51,6 @@ def _get_memory_agent() -> 'MemoryAgent':
         Singleton экземпляр MemoryAgent
     """
     return get_memory_agent()
-
-
-def _save_checkpoint(state: AgentState, stage: str, status: str = "running") -> None:
-    """Сохраняет checkpoint после выполнения узла.
-    
-    Args:
-        state: Текущий AgentState
-        stage: Название завершенного этапа
-        status: Статус задачи
-    """
-    config = get_config()
-    if not config.persistence_enabled:
-        return
-    
-    task_id = state.get("task_id")
-    if not task_id:
-        return
-    
-    try:
-        checkpointer = get_task_checkpointer()
-        checkpointer.save_checkpoint(task_id, state, stage, status)
-    except Exception as e:
-        logger.warning(f"⚠️ Не удалось сохранить checkpoint: {e}")
-
-
-def _record_stage_duration(stage: str, duration: float) -> None:
-    """Записывает время выполнения этапа в метрики.
-    
-    Args:
-        stage: Название этапа
-        duration: Время в секундах
-    """
-    try:
-        from infrastructure.performance_metrics import get_performance_metrics
-        metrics = get_performance_metrics()
-        metrics.record_stage_duration(stage, duration)
-    except Exception as e:
-        # Не критично — просто логируем
-        logger.debug(f"⚠️ Не удалось записать метрику: {e}")
-
-
-async def _send_stage_error(
-    state: AgentState, 
-    stage: str, 
-    error_type: str, 
-    message: str
-) -> None:
-    """Отправляет событие ошибки этапа через SSE.
-    
-    Args:
-        state: Текущий AgentState
-        stage: Название этапа где произошла ошибка
-        error_type: Тип ошибки (timeout, llm_error, validation_error, etc.)
-        message: Сообщение для пользователя
-    """
-    if not state.get("enable_sse"):
-        return
-    
-    try:
-        from backend.sse_manager import get_sse_manager
-        sse = get_sse_manager()
-        task_id = state.get("task_id", "unknown")
-        
-        await sse.send_stage_event(
-            task_id=task_id,
-            stage=stage,
-            status="error",
-            data={
-                "error_type": error_type,
-                "message": message
-            }
-        )
-    except Exception as e:
-        logger.debug(f"⚠️ Не удалось отправить stage_error: {e}")
 
 
 def _initialize_agents(state: AgentState) -> None:
@@ -187,640 +108,318 @@ def _initialize_agents(state: AgentState) -> None:
 
 
 
+def _default_intent() -> IntentResult:
+    """Fallback для intent при ошибке."""
+    return IntentResult(type="explain", confidence=0.5, description="Fallback")
+
+
+@workflow_node(stage="intent", fallback_key="intent_result", fallback_value=_default_intent)
 async def intent_node(state: AgentState) -> AgentState:
-    """Узел для определения намерения пользователя (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с intent_result
-    """
+    """Узел для определения намерения пользователя."""
     _initialize_agents(state)
-    start_time = time.time()
-    
     task = state.get("task", "")
     
     logger.info("📋 Определяю намерение...")
     
-    try:
-        # Быстрая проверка на greeting (не требует LLM)
-        if _intent_agent and IntentAgent.is_greeting_fast(task):
-            intent_result = IntentResult(
-                type="greeting",
-                confidence=0.95,
-                description="Приветствие пользователя"
-            )
-        elif _intent_agent:
-            # LLM вызов в отдельном потоке чтобы не блокировать event loop
-            intent_result = await asyncio.to_thread(
-                _intent_agent.determine_intent, task
-            )
-        else:
-            # Fallback если агент не инициализирован
-            intent_result = IntentResult(
-                type="explain",
-                confidence=0.5,
-                description="Не удалось определить намерение"
-            )
-        
-        state["intent_result"] = intent_result
-        logger.info(f"✅ Намерение определено: {intent_result.type} (уверенность: {intent_result.confidence:.2f})")
-        
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут определения намерения: {e}")
-        await _send_stage_error(
-            state, "intent", "timeout", 
-            "Превышено время ожидания ответа от модели. Используется fallback."
+    # Быстрая проверка на greeting (не требует LLM)
+    if _intent_agent and IntentAgent.is_greeting_fast(task):
+        intent_result = IntentResult(
+            type="greeting",
+            confidence=0.95,
+            description="Приветствие пользователя"
         )
-        state["intent_result"] = IntentResult(
+    elif _intent_agent:
+        # LLM вызов в отдельном потоке
+        intent_result = await asyncio.to_thread(
+            _intent_agent.determine_intent, task
+        )
+    else:
+        intent_result = IntentResult(
             type="explain",
             confidence=0.5,
-            description="Таймаут LLM"
-        )
-    except Exception as e:
-        logger.error(f"❌ Ошибка определения намерения: {e}", error=e)
-        await _send_stage_error(
-            state, "intent", "error", 
-            f"Ошибка: {str(e)[:100]}"
-        )
-        state["intent_result"] = IntentResult(
-            type="explain",
-            confidence=0.5,
-            description=f"Ошибка: {str(e)}"
+            description="Агент не инициализирован"
         )
     
-    # Записываем метрику времени
-    _record_stage_duration("intent", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "intent")
+    state["intent_result"] = intent_result
+    logger.info(f"✅ Намерение: {intent_result.type} ({intent_result.confidence:.2f})")
     
     return state
 
 
+@workflow_node(stage="planning", fallback_key="plan", fallback_value="")
 async def planner_node(state: AgentState) -> AgentState:
-    """Узел для создания плана выполнения задачи (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с plan
-    """
+    """Узел для создания плана выполнения задачи."""
     _initialize_agents(state)
-    start_time = time.time()
     
     task = state.get("task", "")
     intent_result = state.get("intent_result")
     
-    if not intent_result:
-        logger.warning("⚠️ Intent result отсутствует, пропускаем планирование")
-        state["plan"] = ""
-        return state
-    
-    if intent_result.type == "greeting":
+    if not intent_result or intent_result.type == "greeting":
         state["plan"] = ""
         return state
     
     logger.info("📝 Создаю план...")
     
-    try:
-        if _planner_agent:
-            # LLM вызов в отдельном потоке
-            plan = await asyncio.to_thread(
-                _planner_agent.create_plan,
-                task=task,
-                intent_type=intent_result.type
-            )
-            state["plan"] = plan
-            logger.info(f"✅ План создан (размер: {len(plan)} символов)")
-        else:
-            state["plan"] = ""
-            logger.warning("⚠️ Planner Agent не инициализирован")
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут планирования: {e}")
-        await _send_stage_error(
-            state, "planning", "timeout",
-            "Превышено время создания плана. Продолжаем без детального плана."
+    if _planner_agent:
+        plan = await asyncio.to_thread(
+            _planner_agent.create_plan,
+            task=task,
+            intent_type=intent_result.type
         )
+        state["plan"] = plan
+        logger.info(f"✅ План создан ({len(plan)} символов)")
+    else:
         state["plan"] = ""
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания плана: {e}", error=e)
-        await _send_stage_error(state, "planning", "error", f"Ошибка: {str(e)[:100]}")
-        state["plan"] = ""
-    
-    # Записываем метрику времени
-    _record_stage_duration("planning", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "planner")
     
     return state
 
 
+@workflow_node(stage="research", fallback_key="context", fallback_value="")
 async def researcher_node(state: AgentState) -> AgentState:
-    """Узел для сбора контекста (codebase + RAG + веб-поиск) (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с context
-    """
+    """Узел для сбора контекста (codebase + RAG + веб-поиск)."""
     _initialize_agents(state)
-    start_time = time.time()
     
     task = state.get("task", "")
     intent_result = state.get("intent_result")
-    disable_web_search = state.get("disable_web_search", False)
-    project_path = state.get("project_path")
-    file_extensions = state.get("file_extensions")
     
-    if not intent_result:
-        logger.warning("⚠️ Intent result отсутствует, пропускаем исследование")
-        state["context"] = ""
-        return state
-    
-    if intent_result.type == "greeting":
+    if not intent_result or intent_result.type == "greeting":
         state["context"] = ""
         return state
     
     logger.info("🔍 Собираю контекст...")
     
-    try:
-        # Проверяем есть ли файл для modify/debug режима
-        file_path = extract_file_path_from_task(task)
-        file_context = None
-        
-        if file_path and intent_result.type in ['modify', 'debug']:
-            file_content = await asyncio.to_thread(read_file_context, file_path)
-            if file_content:
-                file_context = prepare_modify_context(task, file_content)
-                state["file_path"] = file_path
-                state["file_context"] = file_context
-                logger.info(f"📄 Найден файл для модификации: {file_path}")
-        
-        # Собираем контекст через Researcher (включая codebase если указан project_path)
-        if _researcher_agent:
-            # RAG и веб-поиск в отдельном потоке
-            context = await asyncio.to_thread(
-                _researcher_agent.research,
-                query=task,
-                intent_type=intent_result.type,
-                disable_web_search=disable_web_search,
-                project_path=project_path,
-                file_extensions=file_extensions
-            )
-            
-            # Добавляем контекст файла в начало если есть
-            if file_context:
-                context = file_context + "\n\n---\n\n" + context if context else file_context
-            
-            state["context"] = context
-            logger.info(f"✅ Контекст собран (размер: {len(context)} символов)")
-        else:
-            state["context"] = file_context or ""
-            logger.warning("⚠️ Researcher Agent не инициализирован")
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут сбора контекста: {e}")
-        await _send_stage_error(
-            state, "research", "timeout",
-            "Превышено время сбора контекста. Используется файловый контекст."
+    # Проверяем файл для modify/debug режима
+    file_path = extract_file_path_from_task(task)
+    file_context = None
+    
+    if file_path and intent_result.type in ['modify', 'debug']:
+        file_content = await asyncio.to_thread(read_file_context, file_path)
+        if file_content:
+            file_context = prepare_modify_context(task, file_content)
+            state["file_path"] = file_path
+            state["file_context"] = file_context
+            logger.info(f"📄 Файл для модификации: {file_path}")
+    
+    # Собираем контекст через Researcher
+    if _researcher_agent:
+        context = await asyncio.to_thread(
+            _researcher_agent.research,
+            query=task,
+            intent_type=intent_result.type,
+            disable_web_search=state.get("disable_web_search", False),
+            project_path=state.get("project_path"),
+            file_extensions=state.get("file_extensions")
         )
-        state["context"] = state.get("file_context", "")
-    except Exception as e:
-        logger.error(f"❌ Ошибка сбора контекста: {e}", error=e)
-        await _send_stage_error(state, "research", "error", f"Ошибка: {str(e)[:100]}")
-        state["context"] = state.get("file_context", "")
-    
-    # Записываем метрику времени
-    _record_stage_duration("research", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "researcher")
+        
+        if file_context:
+            context = file_context + "\n\n---\n\n" + context if context else file_context
+        
+        state["context"] = context
+        logger.info(f"✅ Контекст собран ({len(context)} символов)")
+    else:
+        state["context"] = file_context or ""
     
     return state
 
 
+@workflow_node(stage="testing", fallback_key="tests", fallback_value="")
 async def generator_node(state: AgentState) -> AgentState:
-    """Узел для генерации тестов (test generator node) (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с tests
-    """
+    """Узел для генерации тестов (TDD)."""
     _initialize_agents(state)
-    start_time = time.time()
     
-    plan = state.get("plan", "")
-    context = state.get("context", "")
     intent_result = state.get("intent_result")
-    
-    if not intent_result:
-        logger.warning("⚠️ Intent result отсутствует, пропускаем генерацию тестов")
-        state["tests"] = ""
-        return state
-    
-    if intent_result.type == "greeting":
+    if not intent_result or intent_result.type == "greeting":
         state["tests"] = ""
         return state
     
     logger.info("🧪 Генерирую тесты...")
     
-    try:
-        if _test_generator:
-            # LLM вызов в отдельном потоке
-            tests = await asyncio.to_thread(
-                _test_generator.generate_tests,
-                plan=plan,
-                context=context,
-                intent_type=intent_result.type
-            )
-            state["tests"] = tests
-            if tests:
-                logger.info(f"✅ Тесты сгенерированы (размер: {len(tests)} символов)")
-            else:
-                logger.warning("⚠️ Не удалось сгенерировать тесты")
-        else:
-            state["tests"] = ""
-            logger.warning("⚠️ TestGenerator Agent не инициализирован")
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут генерации тестов: {e}")
-        await _send_stage_error(
-            state, "testing", "timeout",
-            "Превышено время генерации тестов. Продолжаем без тестов."
+    if _test_generator:
+        tests = await asyncio.to_thread(
+            _test_generator.generate_tests,
+            plan=state.get("plan", ""),
+            context=state.get("context", ""),
+            intent_type=intent_result.type
         )
+        state["tests"] = tests
+        if tests:
+            logger.info(f"✅ Тесты сгенерированы ({len(tests)} символов)")
+    else:
         state["tests"] = ""
-    except Exception as e:
-        logger.error(f"❌ Ошибка генерации тестов: {e}", error=e)
-        await _send_stage_error(state, "testing", "error", f"Ошибка: {str(e)[:100]}")
-        state["tests"] = ""
-    
-    # Записываем метрику времени
-    _record_stage_duration("testing", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "test_generator")
     
     return state
 
 
+@workflow_node(stage="coding", fallback_key="code", fallback_value="")
 async def coder_node(state: AgentState) -> AgentState:
-    """Узел для генерации кода (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с code
-    """
+    """Узел для генерации кода."""
     _initialize_agents(state)
-    start_time = time.time()
     
-    plan = state.get("plan", "")
-    tests = state.get("tests", "")
-    context = state.get("context", "")
     intent_result = state.get("intent_result")
-    
-    if not intent_result:
-        logger.warning("⚠️ Intent result отсутствует, пропускаем генерацию кода")
-        state["code"] = ""
-        return state
-    
-    if intent_result.type == "greeting":
+    if not intent_result or intent_result.type == "greeting":
         state["code"] = ""
         return state
     
     logger.info("💻 Генерирую код...")
     
-    try:
-        if _coder_agent:
-            # LLM вызов в отдельном потоке (самый тяжёлый)
-            code = await asyncio.to_thread(
-                _coder_agent.generate_code,
-                plan=plan,
-                tests=tests,
-                context=context,
-                intent_type=intent_result.type
-            )
-            state["code"] = code
-            if code:
-                logger.info(f"✅ Код сгенерирован (размер: {len(code)} символов)")
-            else:
-                logger.warning("⚠️ Не удалось сгенерировать код")
-        else:
-            state["code"] = ""
-            logger.warning("⚠️ Coder Agent не инициализирован")
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут генерации кода: {e}")
-        await _send_stage_error(
-            state, "coding", "timeout",
-            "Превышено время генерации кода. Задача слишком сложная или модель перегружена."
+    if _coder_agent:
+        code = await asyncio.to_thread(
+            _coder_agent.generate_code,
+            plan=state.get("plan", ""),
+            tests=state.get("tests", ""),
+            context=state.get("context", ""),
+            intent_type=intent_result.type
         )
+        state["code"] = code
+        if code:
+            logger.info(f"✅ Код сгенерирован ({len(code)} символов)")
+    else:
         state["code"] = ""
-    except Exception as e:
-        logger.error(f"❌ Ошибка генерации кода: {e}", error=e)
-        await _send_stage_error(state, "coding", "error", f"Ошибка: {str(e)[:100]}")
-        state["code"] = ""
-    
-    # Записываем метрику времени
-    _record_stage_duration("coding", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "coder")
     
     return state
 
 
+def _default_validation() -> dict:
+    """Fallback для validation при ошибке."""
+    return {
+        "pytest": {"success": False, "output": "Validation error"},
+        "mypy": {"success": False, "errors": "Validation error"},
+        "bandit": {"success": False, "issues": "Validation error"},
+        "all_passed": False
+    }
+
+
+@workflow_node(stage="validation", fallback_key="validation_results", fallback_value=_default_validation)
 async def validator_node(state: AgentState) -> AgentState:
-    """Узел для валидации кода (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с validation_results
-    """
-    start_time = time.time()
-    code = state.get("code", "")
-    tests = state.get("tests", "")
-    
+    """Узел для валидации кода (pytest, mypy, bandit)."""
     logger.info("🔍 Валидирую код...")
     
-    try:
-        # Валидация запускает subprocess (pytest, mypy, bandit) — выносим в поток
-        validation_results = await asyncio.to_thread(
-            validate_code,
-            code_str=code,
-            test_str=tests if tests else None
-        )
-        state["validation_results"] = validation_results
-        
-        if validation_results.get("all_passed", False):
-            logger.info("✅ Валидация пройдена")
-        else:
-            logger.warning("⚠️ Валидация не пройдена")
-    except Exception as e:
-        logger.error(f"❌ Ошибка валидации: {e}", error=e)
-        state["validation_results"] = {
-            "pytest": {"success": False, "output": str(e)},
-            "mypy": {"success": False, "errors": str(e)},
-            "bandit": {"success": False, "issues": str(e)},
-            "all_passed": False
-        }
+    validation_results = await asyncio.to_thread(
+        validate_code,
+        code_str=state.get("code", ""),
+        test_str=state.get("tests") or None
+    )
+    state["validation_results"] = validation_results
     
-    # Записываем метрику времени
-    _record_stage_duration("validation", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "validator")
+    if validation_results.get("all_passed", False):
+        logger.info("✅ Валидация пройдена")
+    else:
+        logger.warning("⚠️ Валидация не пройдена")
     
     return state
 
 
+@workflow_node(stage="debug", fallback_key="debug_result", fallback_value=None)
 async def debugger_node(state: AgentState) -> AgentState:
-    """Узел для анализа ошибок через Debugger Agent (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с debug_result
-    """
+    """Узел для анализа ошибок."""
     _initialize_agents(state)
-    start_time = time.time()
-    
-    validation_results = state.get("validation_results", {})
-    code = state.get("code", "")
-    tests = state.get("tests", "")
-    task = state.get("task", "")
     
     logger.info("🐛 Анализирую ошибки...")
     
-    try:
-        if _debugger_agent:
-            # LLM вызов в отдельном потоке
-            debug_result = await asyncio.to_thread(
-                _debugger_agent.analyze_errors,
-                validation_results=validation_results,
-                code=code,
-                tests=tests,
-                task=task
-            )
-            state["debug_result"] = debug_result
-            logger.info(f"✅ Анализ завершён. Тип ошибки: {debug_result.error_type}")
-        else:
-            logger.warning("⚠️ Debugger Agent не инициализирован")
-            state["debug_result"] = None
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут анализа ошибок: {e}")
-        await _send_stage_error(
-            state, "debug", "timeout",
-            "Превышено время анализа ошибок. Пропускаем этап исправления."
+    if _debugger_agent:
+        debug_result = await asyncio.to_thread(
+            _debugger_agent.analyze_errors,
+            validation_results=state.get("validation_results", {}),
+            code=state.get("code", ""),
+            tests=state.get("tests", ""),
+            task=state.get("task", "")
         )
+        state["debug_result"] = debug_result
+        logger.info(f"✅ Анализ завершён. Тип: {debug_result.error_type}")
+    else:
         state["debug_result"] = None
-    except Exception as e:
-        logger.error(f"❌ Ошибка анализа ошибок: {e}", error=e)
-        await _send_stage_error(state, "debug", "error", f"Ошибка: {str(e)[:100]}")
-        state["debug_result"] = None
-    
-    # Записываем метрику времени
-    _record_stage_duration("debug", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "debugger")
     
     return state
 
 
+@workflow_node(stage="fixing")
 async def fixer_node(state: AgentState) -> AgentState:
-    """Узел для исправления кода по инструкциям от Debugger (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с исправленным code и увеличенным iteration
-    """
+    """Узел для исправления кода по инструкциям от Debugger."""
     _initialize_agents(state)
-    start_time = time.time()
-    
-    code = state.get("code", "")
-    debug_result = state.get("debug_result")
-    tests = state.get("tests", "")
-    validation_results = state.get("validation_results", {})
     
     # Увеличиваем счетчик итераций
-    current_iteration = state.get("iteration", 0)
-    state["iteration"] = current_iteration + 1
+    state["iteration"] = state.get("iteration", 0) + 1
     
-    logger.info(f"🔧 Исправляю код (итерация {state['iteration']})...")
-    
+    debug_result = state.get("debug_result")
     if not debug_result or not debug_result.fix_instructions:
         logger.warning("⚠️ Нет инструкций для исправления")
         return state
     
-    try:
-        if _coder_agent:
-            # LLM вызов в отдельном потоке
-            fixed_code = await asyncio.to_thread(
-                _coder_agent.fix_code,
-                code=code,
-                instructions=debug_result.fix_instructions,
-                tests=tests,
-                validation_results=validation_results
-            )
-            if fixed_code:
-                state["code"] = fixed_code
-                logger.info(f"✅ Код исправлен (размер: {len(fixed_code)} символов)")
-            else:
-                logger.warning("⚠️ Не удалось исправить код")
-        else:
-            logger.warning("⚠️ Coder Agent не инициализирован")
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут исправления кода: {e}")
-        await _send_stage_error(
-            state, "fixing", "timeout",
-            "Превышено время исправления кода."
+    logger.info(f"🔧 Исправляю код (итерация {state['iteration']})...")
+    
+    if _coder_agent:
+        fixed_code = await asyncio.to_thread(
+            _coder_agent.fix_code,
+            code=state.get("code", ""),
+            instructions=debug_result.fix_instructions,
+            tests=state.get("tests", ""),
+            validation_results=state.get("validation_results", {})
         )
-    except Exception as e:
-        logger.error(f"❌ Ошибка исправления кода: {e}", error=e)
-        await _send_stage_error(state, "fixing", "error", f"Ошибка: {str(e)[:100]}")
-    
-    # Записываем метрику времени
-    _record_stage_duration("fixing", time.time() - start_time)
-    
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "fixer")
+        if fixed_code:
+            state["code"] = fixed_code
+            logger.info(f"✅ Код исправлен ({len(fixed_code)} символов)")
     
     return state
 
 
+@workflow_node(stage="reflection", fallback_key="reflection_result", fallback_value=None)
 async def reflection_node(state: AgentState) -> AgentState:
-    """Узел для рефлексии и оценки результатов (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с reflection_result
-    """
+    """Узел для рефлексии и оценки результатов."""
     _initialize_agents(state)
-    start_time = time.time()
     
-    task = state.get("task", "")
-    plan = state.get("plan", "")
-    context = state.get("context", "")
-    tests = state.get("tests", "")
-    code = state.get("code", "")
-    validation_results = state.get("validation_results", {})
     intent_result = state.get("intent_result")
+    if not _reflection_agent or not intent_result:
+        state["reflection_result"] = None
+        return state
     
     logger.info("🔍 Анализирую результаты...")
     
-    try:
-        if _reflection_agent and intent_result:
-            # LLM вызов в отдельном потоке
-            reflection_result = await asyncio.to_thread(
-                _reflection_agent.reflect,
-                task=task,
-                plan=plan,
-                context=context,
-                tests=tests,
-                code=code,
-                validation_results=validation_results
-            )
-            state["reflection_result"] = reflection_result
-            
-            # Сохраняем опыт в память через DependencyContainer
-            memory_agent = _get_memory_agent()
-            await asyncio.to_thread(
-                memory_agent.save_task_experience,
-                task=task,
-                intent_type=intent_result.type,
-                reflection_result=reflection_result,
-                key_decisions=plan[:500] if plan else "",
-                what_worked=reflection_result.analysis
-            )
-            
-            logger.info(f"✅ Рефлексия завершена. Общая оценка: {reflection_result.overall_score:.2f}")
-        else:
-            logger.warning("⚠️ Reflection Agent не инициализирован или отсутствует intent_result")
-            state["reflection_result"] = None
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут рефлексии: {e}")
-        await _send_stage_error(
-            state, "reflection", "timeout",
-            "Превышено время анализа результатов."
-        )
-        state["reflection_result"] = None
-    except Exception as e:
-        logger.error(f"❌ Ошибка рефлексии: {e}", error=e)
-        await _send_stage_error(state, "reflection", "error", f"Ошибка: {str(e)[:100]}")
-        state["reflection_result"] = None
+    reflection_result = await asyncio.to_thread(
+        _reflection_agent.reflect,
+        task=state.get("task", ""),
+        plan=state.get("plan", ""),
+        context=state.get("context", ""),
+        tests=state.get("tests", ""),
+        code=state.get("code", ""),
+        validation_results=state.get("validation_results", {})
+    )
+    state["reflection_result"] = reflection_result
     
-    # Записываем метрику времени
-    _record_stage_duration("reflection", time.time() - start_time)
+    # Сохраняем опыт в память
+    memory_agent = _get_memory_agent()
+    await asyncio.to_thread(
+        memory_agent.save_task_experience,
+        task=state.get("task", ""),
+        intent_type=intent_result.type,
+        reflection_result=reflection_result,
+        key_decisions=state.get("plan", "")[:500],
+        what_worked=reflection_result.analysis
+    )
     
-    # Сохраняем checkpoint
-    _save_checkpoint(state, "reflection")
-    
+    logger.info(f"✅ Рефлексия завершена. Оценка: {reflection_result.overall_score:.2f}")
     return state
 
 
+@workflow_node(stage="critic", fallback_key="critic_report", fallback_value=None)
 async def critic_node(state: AgentState) -> AgentState:
-    """Узел для критического анализа сгенерированного кода (async).
-    
-    Args:
-        state: Текущий state
-        
-    Returns:
-        Обновленный state с critic_report
-    """
+    """Узел для критического анализа кода."""
     _initialize_agents(state)
-    start_time = time.time()
     
     code = state.get("code", "")
-    tests = state.get("tests", "")
-    task = state.get("task", "")
-    validation_results = state.get("validation_results", {})
+    if not _critic_agent or not code:
+        state["critic_report"] = None
+        return state
     
     logger.info("🔎 Критический анализ кода...")
     
-    try:
-        if _critic_agent and code:
-            # LLM вызов в отдельном потоке
-            critic_report = await asyncio.to_thread(
-                _critic_agent.analyze,
-                code=code,
-                tests=tests,
-                task_description=task,
-                validation_results=validation_results
-            )
-            state["critic_report"] = critic_report
-            logger.info(f"✅ Критический анализ завершён. Оценка: {critic_report.overall_score:.2f}")
-        else:
-            logger.warning("⚠️ Critic Agent не инициализирован или код пустой")
-            state["critic_report"] = None
-    except LLMTimeoutError as e:
-        logger.warning(f"⏱️ Таймаут критического анализа: {e}")
-        await _send_stage_error(
-            state, "critic", "timeout",
-            "Превышено время критического анализа."
-        )
-        state["critic_report"] = None
-    except Exception as e:
-        logger.error(f"❌ Ошибка критического анализа: {e}", error=e)
-        await _send_stage_error(state, "critic", "error", f"Ошибка: {str(e)[:100]}")
-        state["critic_report"] = None
-    
-    # Записываем метрику времени
-    _record_stage_duration("critic", time.time() - start_time)
-    
-    # Сохраняем финальный checkpoint как completed
-    _save_checkpoint(state, "critic", status="completed")
+    critic_report = await asyncio.to_thread(
+        _critic_agent.analyze,
+        code=code,
+        tests=state.get("tests", ""),
+        task_description=state.get("task", ""),
+        validation_results=state.get("validation_results", {})
+    )
+    state["critic_report"] = critic_report
+    logger.info(f"✅ Критический анализ завершён. Оценка: {critic_report.overall_score:.2f}")
     
     return state

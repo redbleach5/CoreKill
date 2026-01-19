@@ -54,7 +54,7 @@ export function IDEPanel({
   const [tempExtensions, setTempExtensions] = useState(fileExtensions)
   const [isIndexing, setIsIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState<'idle' | 'success' | 'error'>('idle')
-  const [indexedFiles, setIndexedFiles] = useState(0)
+  const [, setIndexedFiles] = useState(0)
 
   // Синхронизация с props
   useEffect(() => {
