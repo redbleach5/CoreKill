@@ -4,10 +4,15 @@
 - Синхронный (generate) — для CLI и простых скриптов
 - Асинхронный (generate_async) — для FastAPI и многопользовательского режима
 
+Поддержка удалённого Ollama:
+- Настраивается через config.toml [ollama] секцию
+- Для связи между сетями рекомендуется Tailscale (работает в РФ)
+
 Асинхронный режим использует asyncio.to_thread() для совместимости с существующим кодом,
 а также может использовать httpx через OllamaConnectionPool для лучшей производительности.
 """
 import asyncio
+import os
 import ollama
 from typing import Optional, Dict, Any
 import time
@@ -17,6 +22,32 @@ from utils.logger import get_logger
 
 
 logger = get_logger()
+
+
+def _configure_ollama_host() -> None:
+    """Настраивает хост Ollama из config.toml.
+    
+    Устанавливает переменную окружения OLLAMA_HOST которую
+    использует ollama Python SDK.
+    """
+    # Не перезаписываем если уже установлено вручную
+    if os.environ.get("OLLAMA_HOST"):
+        return
+    
+    try:
+        from utils.config import get_config
+        config = get_config()
+        host = config.ollama_host
+        
+        if host and host != "http://localhost:11434":
+            os.environ["OLLAMA_HOST"] = host
+            logger.info(f"🌐 Ollama хост: {host}")
+    except Exception:
+        pass  # Используем дефолт
+
+
+# Настраиваем при импорте модуля
+_configure_ollama_host()
 
 
 class LLMTimeoutError(Exception):

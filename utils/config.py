@@ -60,6 +60,25 @@ class Config:
                 }
             }
     
+    # === Ollama Connection ===
+    
+    @property
+    def ollama_host(self) -> str:
+        """Хост Ollama API."""
+        return self._config_data.get("ollama", {}).get("host", "http://localhost:11434")
+    
+    @property
+    def ollama_connect_timeout(self) -> int:
+        """Таймаут подключения к Ollama."""
+        return self._config_data.get("ollama", {}).get("connect_timeout", 10)
+    
+    @property
+    def ollama_use_remote(self) -> bool:
+        """Использовать удалённый Ollama."""
+        return self._config_data.get("ollama", {}).get("use_remote", False)
+    
+    # === Default Model ===
+    
     @property
     def default_model(self) -> str:
         """Модель Ollama по умолчанию."""
