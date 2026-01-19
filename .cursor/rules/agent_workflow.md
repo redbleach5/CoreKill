@@ -12,7 +12,10 @@ Workflow определён в `infrastructure/workflow_graph.py` и испол�
 
 3. Researcher      → 
    • сначала локальный RAG (ChromaDB)
-   • если confidence < 0.7 → веб-поиск (Tavily → DuckDuckGo → Google)
+   • веб-поиск включается ТОЛЬКО если:
+     - intent НЕ в {create, test, refactor, greeting, modify}
+     - И (confidence < 0.7 ИЛИ мало результатов ИЛИ RAG пустой)
+   • для explain/debug/optimize: поиск если RAG пустой
    • для modify/debug: загружает файл как контекст
    • результат → в контекст
    • → TestGenerator

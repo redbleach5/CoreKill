@@ -28,12 +28,24 @@ class IntentResult:
     requires_code_generation: bool = field(default=False)  # Нужна ли генерация кода
     
     def __post_init__(self) -> None:
-        """Автоматически определяет рекомендуемый режим."""
-        # Типы, требующие полного workflow с генерацией кода
-        code_generation_types = {"create", "modify", "debug", "optimize", "test", "refactor"}
+        """Автоматически определяет рекомендуемый режим.
         
-        # Типы для режима chat (простой диалог)
+        Логика выбора режима:
+        - chat: диалог, объяснения, помощь (без генерации кода)
+        - code: создание/изменение кода через TDD workflow
+        
+        Важно: debug и optimize могут быть как chat (обсуждение), так и code (исправление).
+        По умолчанию для них выбираем code, но эвристика в API может переопределить.
+        """
+        # Типы, ОДНОЗНАЧНО требующие генерации кода
+        code_generation_types = {"create", "modify", "test", "refactor"}
+        
+        # Типы для режима chat (диалог без генерации кода)
         chat_types = {"greeting", "help", "explain"}
+        
+        # Типы, которые МОГУТ требовать код (зависит от контекста)
+        # По умолчанию отправляем в code, но API может переопределить на chat
+        ambiguous_types = {"debug", "optimize"}
         
         # Определяем режим на основе типа намерения
         if self.type in chat_types:
@@ -42,7 +54,12 @@ class IntentResult:
         elif self.type in code_generation_types:
             self.recommended_mode = "code"
             self.requires_code_generation = True
+        elif self.type in ambiguous_types:
+            # Для debug/optimize — по умолчанию code, но с флагом что это неоднозначно
+            self.recommended_mode = "code"
+            self.requires_code_generation = True
         else:
+            # Неизвестный тип — лучше chat чтобы не запускать тяжёлый workflow
             self.recommended_mode = "chat"
             self.requires_code_generation = False
 

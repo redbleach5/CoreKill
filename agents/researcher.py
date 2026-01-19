@@ -110,12 +110,23 @@ class ResearcherAgent:
             context_parts.append("")  # Пустая строка для разделения
         
         # Шаг 3: Веб-поиск если нужно
+        # Типы intent где веб-поиск обычно не нужен (генерация кода, тесты, рефакторинг)
+        skip_web_for_intents = {"create", "test", "refactor", "greeting", "modify"}
+        
         needs_web_search = (
             not disable_web_search and
+            intent_type not in skip_web_for_intents and  # Пропускаем поиск для code-задач
             (rag_confidence < self.min_confidence_threshold or
             not has_enough_rag or
             not rag_context.strip())
         )
+        
+        # Для explain, debug, optimize — поиск может быть полезен
+        if intent_type in ("explain", "debug", "optimize") and not disable_web_search:
+            # Для этих типов ищем даже если RAG нашёл что-то
+            if not rag_context.strip():
+                needs_web_search = True
+                logger.info(f"🌐 Intent {intent_type} требует контекста — включаем веб-поиск")
         
         if needs_web_search:
             logger.info("🌐 RAG недостаточно, выполняю веб-поиск...")

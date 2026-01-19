@@ -931,8 +931,31 @@ async def stream_task_results(
             detected_intent_type: Optional[str] = None
             detected_complexity: Optional[TaskComplexity] = None
             
-            # В режиме auto определяем нужен ли полный workflow
-            if mode == "auto":
+            # ВАЖНО: Уважаем явно выбранный пользователем режим
+            # Режим "chat" = диалог без генерации кода
+            # Режим "code" = полный workflow с TDD
+            # Режим "auto" = система сама определяет
+            
+            if mode == "chat":
+                # Пользователь ЯВНО выбрал режим диалога — не переключаем на code
+                selected_mode = "chat"
+                intent_agent = IntentAgent(lazy_llm=True)
+                detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                # Для диалога определяем intent только для выбора модели
+                if IntentAgent.is_greeting_fast(task):
+                    detected_intent_type = "greeting"
+                    detected_complexity = TaskComplexity.SIMPLE
+                logger.info(f"💬 Явный режим диалога, сложность: {detected_complexity.value}")
+                
+            elif mode == "code":
+                # Пользователь ЯВНО выбрал режим генерации кода
+                selected_mode = "code"
+                intent_agent = IntentAgent(lazy_llm=True)
+                detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                logger.info(f"🔧 Явный режим генерации кода, сложность: {detected_complexity.value}")
+                
+            elif mode == "auto":
+                # Только в auto режиме система сама определяет режим
                 intent_agent = IntentAgent(lazy_llm=True)
                 
                 # Быстрая проверка на greeting
@@ -942,21 +965,36 @@ async def stream_task_results(
                     detected_complexity = TaskComplexity.SIMPLE
                     logger.info("🚀 Быстрое определение: greeting → chat + SIMPLE")
                 else:
-                    # Эвристика: короткие запросы без ключевых слов кода → chat
+                    # Эвристика: ключевые слова для генерации кода
                     task_lower = task.lower()
                     code_keywords = [
                         'напиши', 'создай', 'сделай', 'реализуй', 'сгенерируй',
                         'write', 'create', 'make', 'implement', 'generate',
-                        'функци', 'класс', 'модуль', 'скрипт', 'код',
-                        'function', 'class', 'module', 'script', 'code',
+                        'функци', 'класс', 'модуль', 'скрипт',
+                        'function', 'class', 'module', 'script',
                         'исправ', 'отлад', 'debug', 'fix', 'оптимизир'
                     ]
                     
-                    has_code_keyword = any(kw in task_lower for kw in code_keywords)
+                    # Ключевые слова для диалога (НЕ генерация кода)
+                    chat_keywords = [
+                        'объясни', 'расскажи', 'что такое', 'как работает',
+                        'explain', 'tell me', 'what is', 'how does',
+                        'почему', 'зачем', 'когда', 'можно ли',
+                        'why', 'when', 'can you', 'should i',
+                        'посоветуй', 'подскажи', 'помоги понять'
+                    ]
                     
-                    if has_code_keyword:
+                    has_code_keyword = any(kw in task_lower for kw in code_keywords)
+                    has_chat_keyword = any(kw in task_lower for kw in chat_keywords)
+                    
+                    # Если есть chat-ключевые слова и НЕТ code-ключевых → диалог
+                    if has_chat_keyword and not has_code_keyword:
+                        selected_mode = "chat"
+                        detected_complexity = intent_agent._estimate_complexity_heuristic(task)
+                        detected_intent_type = "explain"
+                        logger.info(f"💬 Обнаружены chat-ключевые слова → chat + {detected_complexity.value}")
+                    elif has_code_keyword:
                         selected_mode = "code"
-                        # Определяем сложность эвристически для code режима
                         detected_complexity = intent_agent._estimate_complexity_heuristic(task)
                         logger.info(f"🔧 Обнаружены code-ключевые слова → code + {detected_complexity.value}")
                     else:
@@ -964,9 +1002,6 @@ async def stream_task_results(
                         intent_result = intent_agent.determine_intent(task)
                         selected_mode = intent_result.recommended_mode
                         detected_intent_type = intent_result.type
-                        
-                        # Для chat режима пересчитываем сложность эвристикой
-                        # (LLM определяет intent, но сложность лучше определять эвристикой)
                         detected_complexity = intent_agent._estimate_complexity_heuristic(task)
                         
                         # Для explain intent минимум MEDIUM сложность
@@ -975,12 +1010,6 @@ async def stream_task_results(
                             logger.info(f"📊 Explain intent повышен до MEDIUM")
                         
                         logger.info(f"🧠 LLM определение: {intent_result.type} → {selected_mode} + {detected_complexity.value}")
-            
-            # Для явно указанного chat режима тоже определяем сложность
-            elif mode == "chat" and detected_complexity is None:
-                intent_agent = IntentAgent(lazy_llm=True)
-                detected_complexity = intent_agent._estimate_complexity_heuristic(task)
-                logger.info(f"💬 Явный chat режим, сложность: {detected_complexity.value}")
             
             logger.info(f"🎯 Выбран режим: {selected_mode} (запрошен: {mode})")
             
