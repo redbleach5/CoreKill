@@ -276,6 +276,55 @@ class Config:
     def allow_ultra_models(self) -> bool:
         """Разрешить использование моделей 100B+."""
         return self._config_data.get("hardware", {}).get("allow_ultra_models", False)
+    
+    # === Context Engine Settings ===
+    
+    @property
+    def context_engine_enabled(self) -> bool:
+        """Включена ли индексация кодовой базы."""
+        return self._config_data.get("context_engine", {}).get("enabled", True)
+    
+    @property
+    def context_engine_max_context_tokens(self) -> int:
+        """Максимальный размер контекста в токенах."""
+        return self._config_data.get("context_engine", {}).get("max_context_tokens", 4000)
+    
+    @property
+    def context_engine_max_chunk_tokens(self) -> int:
+        """Максимальный размер чанка в токенах."""
+        return self._config_data.get("context_engine", {}).get("max_chunk_tokens", 500)
+    
+    @property
+    def context_engine_cache_directory(self) -> str:
+        """Директория для кэша индексов."""
+        return self._config_data.get("context_engine", {}).get("cache_directory", ".context_cache")
+    
+    @property
+    def context_engine_default_extensions(self) -> list[str]:
+        """Расширения файлов по умолчанию для индексации."""
+        return self._config_data.get("context_engine", {}).get("default_extensions", [".py"])
+    
+    # === Task Persistence Settings ===
+    
+    @property
+    def persistence_enabled(self) -> bool:
+        """Включена ли система checkpoint для сохранения состояния задач."""
+        return self._config_data.get("persistence", {}).get("enabled", True)
+    
+    @property
+    def persistence_checkpoint_directory(self) -> str:
+        """Директория для хранения checkpoint файлов."""
+        return self._config_data.get("persistence", {}).get("checkpoint_directory", ".task_checkpoints")
+    
+    @property
+    def persistence_max_checkpoint_age_hours(self) -> int:
+        """Максимальный возраст checkpoint в часах."""
+        return self._config_data.get("persistence", {}).get("max_checkpoint_age_hours", 24)
+    
+    @property
+    def persistence_auto_pause_on_disconnect(self) -> bool:
+        """Автоматически помечать задачи как paused при потере соединения."""
+        return self._config_data.get("persistence", {}).get("auto_pause_on_disconnect", True)
 
 
 def get_config() -> Config:

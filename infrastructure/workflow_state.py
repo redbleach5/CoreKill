@@ -24,6 +24,10 @@ class AgentState(TypedDict):
     conversation_history: Optional[List[Dict[str, str]]]  # История для LLM [{role, content}]
     chat_response: Optional[str]  # Ответ в режиме chat (без workflow)
     
+    # Codebase indexing
+    project_path: Optional[str]  # Путь к проекту для индексации кодовой базы
+    file_extensions: Optional[List[str]]  # Расширения файлов для индексации (по умолчанию ['.py'])
+    
     # Результаты агентов
     intent_result: Optional[IntentResult]  # Результат Intent агента
     plan: str  # План от Planner

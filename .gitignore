@@ -57,3 +57,9 @@ generated_tests.py
 # Temp files
 *.tmp
 *.bak
+
+# Task Checkpoints (persistence)
+.task_checkpoints/
+
+# Context Engine Cache
+.context_cache/

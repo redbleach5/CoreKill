@@ -1,12 +1,66 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
+import { SSE_EVENTS, AGENT_STAGES } from '../constants/sse'
+
+// Результат этапа (stage result) — структура зависит от типа этапа
+export interface StageResult {
+  message?: string
+  success?: boolean
+  // Результаты валидации
+  pytest_passed?: boolean
+  mypy_passed?: boolean
+  bandit_passed?: boolean
+  // Результаты рефлексии
+  planning_score?: number
+  research_score?: number
+  testing_score?: number
+  coding_score?: number
+  overall_score?: number
+  analysis?: string
+  improvements?: string
+  should_retry?: boolean
+  // Дополнительные данные
+  [key: string]: unknown
+}
 
 export interface StageStatus {
   stage: string
   status: 'idle' | 'start' | 'progress' | 'end' | 'error'
   message: string
   progress?: number
-  result?: any
+  result?: StageResult
   error?: string
+}
+
+// Результат проверки одного инструмента
+export interface ToolValidationResult {
+  success: boolean
+  output?: string
+  errors?: string
+  issues?: string
+}
+
+// Результат валидации (pytest, mypy, bandit)
+export interface ValidationResult {
+  success: boolean
+  pytest_passed: boolean
+  mypy_passed: boolean
+  bandit_passed: boolean
+  pytest?: ToolValidationResult
+  mypy?: ToolValidationResult
+  bandit?: ToolValidationResult
+  errors?: string[]
+}
+
+// Результат рефлексии
+export interface ReflectionResult {
+  planning_score: number
+  research_score: number
+  testing_score: number
+  coding_score: number
+  overall_score: number
+  analysis: string
+  improvements: string
+  should_retry: boolean
 }
 
 export interface AgentResults {
@@ -20,18 +74,10 @@ export interface AgentResults {
   context?: string
   tests?: string
   code?: string
-  validation?: any
-  reflection?: {
-    planning_score: number
-    research_score: number
-    testing_score: number
-    coding_score: number
-    overall_score: number
-    analysis: string
-    improvements: string
-    should_retry: boolean
-  }
-  greeting_message?: string  // Добавлено для greeting
+  codeChunks?: string[] // Чанки кода для стриминга
+  validation?: ValidationResult
+  reflection?: ReflectionResult
+  greeting_message?: string
 }
 
 export interface Metrics {
@@ -60,6 +106,8 @@ export interface TaskOptions {
   maxIterations: number
   mode: 'auto' | 'chat' | 'code'
   conversationId?: string
+  projectPath?: string  // Путь к проекту для индексации кодовой базы
+  fileExtensions?: string  // Расширения файлов через запятую, например ".py,.js"
 }
 
 export function useAgentStream(): UseAgentStreamReturn {
@@ -85,16 +133,12 @@ export function useAgentStream(): UseAgentStreamReturn {
   }, [])
 
   const startTask = useCallback((task: string, options: TaskOptions) => {
-    // АДАПТИВНАЯ ЗАЩИТА: если задача уже выполняется или есть активное соединение, блокируем новый запрос
-    if (isRunning) {
-      console.warn('⚠️ Задача уже выполняется, новый запрос заблокирован')
-      return
-    }
+    // Защита: если задача уже выполняется или есть активное соединение, блокируем новый запрос
+    if (isRunning) return
     
     if (eventSourceRef.current) {
       const currentState = eventSourceRef.current.readyState
       if (currentState === EventSource.OPEN || currentState === EventSource.CONNECTING) {
-        console.warn('⚠️ Активное SSE соединение существует, новый запрос заблокирован')
         return
       }
       // Если соединение закрыто, закрываем его явно перед созданием нового
@@ -158,6 +202,16 @@ export function useAgentStream(): UseAgentStreamReturn {
     if (options.conversationId) {
       params.set('conversation_id', options.conversationId)
     }
+    
+    // Добавляем project_path если указан (для codebase indexing)
+    if (options.projectPath) {
+      params.set('project_path', options.projectPath)
+    }
+    
+    // Добавляем file_extensions если указаны
+    if (options.fileExtensions) {
+      params.set('file_extensions', options.fileExtensions)
+    }
 
     // В dev режиме подключаемся напрямую к backend (Vite proxy не поддерживает SSE)
     // В production можно использовать прокси
@@ -166,56 +220,36 @@ export function useAgentStream(): UseAgentStreamReturn {
       ? `http://localhost:8000/api/stream?${params.toString()}`
       : `/api/stream?${params.toString()}`
     
-    console.log('🔌 Создаю EventSource:', apiUrl, { isDev })
     const eventSource = new EventSource(apiUrl)
     eventSourceRef.current = eventSource
 
-    eventSource.onopen = () => {
-      console.log('✅ SSE подключение установлено', {
-        url: apiUrl,
-        readyState: eventSource.readyState,
-        withCredentials: eventSource.withCredentials
-      })
-    }
-
     eventSource.onmessage = (event: MessageEvent) => {
-      console.log('📨 Получено сообщение через onmessage:', event.type, event.data?.substring(0, 100))
       try {
-        // Проверяем наличие данных перед парсингом
-        if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое сообщение SSE')
-          return
-        }
+        if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
         handleSSEEvent(data)
-      } catch (err) {
-        console.error('Ошибка парсинга SSE события:', err, event.data)
+      } catch {
+        // Игнорируем ошибки парсинга некорректных SSE событий
       }
     }
 
-    eventSource.addEventListener('stage_start', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.STAGE_START, (event: MessageEvent) => {
       try {
-        if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое событие stage_start')
-          return
-        }
+        if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
         updateStage(data.stage, {
           stage: data.stage,
           status: 'start',
           message: data.message || ''
         })
-      } catch (err) {
-        console.error('Ошибка парсинга stage_start:', err, event.data)
+      } catch {
+        // Игнорируем ошибки парсинга
       }
     })
 
-    eventSource.addEventListener('stage_progress', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.STAGE_PROGRESS, (event: MessageEvent) => {
       try {
-        if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое событие stage_progress')
-          return
-        }
+        if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
         updateStage(data.stage, {
           stage: data.stage,
@@ -223,33 +257,24 @@ export function useAgentStream(): UseAgentStreamReturn {
           message: data.message || '',
           progress: data.progress || 0
         })
-      } catch (err) {
-        console.error('Ошибка парсинга stage_progress:', err, event.data)
+      } catch {
+        // Игнорируем ошибки парсинга
       }
     })
 
-    eventSource.addEventListener('stage_end', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.STAGE_END, (event: MessageEvent) => {
       try {
-        console.log('📨 Получено событие stage_end:', event.type, event.data?.substring(0, 200))
-        if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое событие stage_end')
-          return
-        }
+        if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
-        console.log('✅ Парсинг stage_end успешен:', data.stage, data.message?.substring(0, 50))
-        console.log('📦 stage_end data.result:', data.result)
         
-        // Для greeting/help сохраняем message в results
-        if (data.stage === 'greeting' || data.stage === 'help') {
-          console.log(`🎉 ${data.stage.toUpperCase()} STAGE_END ПОЛУЧЕН!`)
-          console.log('  - message:', data.message?.substring(0, 100))
-          console.log('  - result.message:', data.result?.message?.substring(0, 100))
-          
-          // Сохраняем message в results как fallback
-          if (data.result?.message) {
+        // Для простых ответов (greeting/help/chat) сохраняем message в results
+        const simpleStages = [AGENT_STAGES.GREETING, AGENT_STAGES.HELP, AGENT_STAGES.CHAT]
+        if (simpleStages.includes(data.stage)) {
+          const messageContent = data.result?.message || data.message
+          if (messageContent) {
             setResults(prev => ({
               ...prev,
-              greeting_message: data.result.message
+              greeting_message: messageContent
             }))
           }
         }
@@ -261,8 +286,16 @@ export function useAgentStream(): UseAgentStreamReturn {
           result: data.result
         })
 
+        // Обновляем код в результатах если пришёл из coding/fixing этапа
+        if ((data.stage === AGENT_STAGES.CODING || data.stage === AGENT_STAGES.FIXING) && data.result?.code) {
+          setResults(prev => ({
+            ...prev,
+            code: data.result.code
+          }))
+        }
+
         // Обновляем метрики если это этап рефлексии
-        if (data.stage === 'reflection' && data.result) {
+        if (data.stage === AGENT_STAGES.REFLECTION && data.result) {
           setMetrics({
             planning: data.result.planning_score || 0,
             research: data.result.research_score || 0,
@@ -271,19 +304,39 @@ export function useAgentStream(): UseAgentStreamReturn {
             overall: data.result.overall_score || 0
           })
         }
-      } catch (err) {
-        console.error('❌ Ошибка парсинга stage_end:', err, event.data)
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // Обработчик стриминга кода (чанки по мере генерации)
+    eventSource.addEventListener(SSE_EVENTS.CODE_CHUNK, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        if (data.chunk) {
+          setResults(prev => {
+            const chunks = prev.codeChunks || []
+            const newChunks = [...chunks, data.chunk]
+            return {
+              ...prev,
+              codeChunks: newChunks,
+              code: newChunks.join('') // Собираем полный код из чанков
+            }
+          })
+        }
+      } catch {
+        // Игнорируем ошибки парсинга
       }
     })
 
     // Обработчик кастомного события 'error' от backend (не путать с onerror)
-    eventSource.addEventListener('error', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.ERROR, (event: MessageEvent) => {
       try {
         // Проверяем, что это действительно событие с данными от backend
-        if (!event.data || event.data.trim() === '') {
-          // Пустое событие error может быть от EventSource.onerror, игнорируем
-          return
-        }
+        if (!event.data || event.data.trim() === '') return
+        
         const data = JSON.parse(event.data)
         updateStage(data.stage || 'unknown', {
           stage: data.stage || 'unknown',
@@ -292,30 +345,24 @@ export function useAgentStream(): UseAgentStreamReturn {
           error: data.error
         })
         setError(data.error || 'Произошла ошибка')
-        isCompletedRef.current = true  // Помечаем как завершенную (с ошибкой)
+        isCompletedRef.current = true
         setIsRunning(false)
-        // Закрываем соединение и предотвращаем переподключение
         eventSource.close()
         eventSourceRef.current = null
-      } catch (err) {
-        console.error('Ошибка парсинга error события:', err, event.data)
+      } catch {
         setError('Ошибка обработки события')
         isCompletedRef.current = true
         setIsRunning(false)
-        // Закрываем соединение и предотвращаем переподключение
         eventSource.close()
         eventSourceRef.current = null
       }
     })
 
-    eventSource.addEventListener('complete', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.COMPLETE, (event: MessageEvent) => {
       try {
-        console.log('✅ Получено событие complete:', event.data?.substring(0, 300))
         if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое событие complete')
           isCompletedRef.current = true
           setIsRunning(false)
-          // Закрываем соединение и предотвращаем переподключение
           if (eventSourceRef.current) {
             eventSourceRef.current.close()
             eventSourceRef.current = null
@@ -323,25 +370,18 @@ export function useAgentStream(): UseAgentStreamReturn {
           return
         }
         const data = JSON.parse(event.data)
-        console.log('✅ Парсинг complete успешен:', data)
-        console.log('📦 complete data.results:', data.results)
-        console.log('📦 complete data.results.intent:', data.results?.intent)
-        // ВАЖНО: объединяем с существующими results, а не перезаписываем
-        // Это сохраняет greeting_message, установленный в stage_end
+        // Объединяем с существующими results (сохраняет greeting_message из stage_end)
         setResults(prev => ({ ...prev, ...(data.results || {}) }))
         setMetrics(data.metrics || metrics)
         isCompletedRef.current = true
         setIsRunning(false)
-        // Закрываем соединение и предотвращаем переподключение
         if (eventSourceRef.current) {
           eventSourceRef.current.close()
           eventSourceRef.current = null
         }
-      } catch (err) {
-        console.error('❌ Ошибка парсинга complete:', err, event.data)
+      } catch {
         isCompletedRef.current = true
         setIsRunning(false)
-        // Закрываем соединение и предотвращаем переподключение
         if (eventSourceRef.current) {
           eventSourceRef.current.close()
           eventSourceRef.current = null
@@ -349,27 +389,19 @@ export function useAgentStream(): UseAgentStreamReturn {
       }
     })
 
-    eventSource.addEventListener('warning', (event: MessageEvent) => {
+    eventSource.addEventListener(SSE_EVENTS.WARNING, (event: MessageEvent) => {
       try {
-        if (!event.data || event.data.trim() === '') {
-          console.warn('Получено пустое событие warning')
-          return
-        }
-        const data = JSON.parse(event.data)
-        console.warn('Предупреждение:', data.message || 'Неизвестное предупреждение')
-        // Можно добавить отображение предупреждений в UI
-      } catch (err) {
-        console.error('Ошибка парсинга warning:', err, event.data)
+        if (!event.data || event.data.trim() === '') return
+        // Предупреждения от backend обрабатываются тихо
+        // При необходимости можно добавить отображение в UI
+      } catch {
+        // Игнорируем ошибки парсинга предупреждений
       }
     })
 
-    eventSource.onerror = (_err: Event) => {
-      // onerror вызывается с Event, а не MessageEvent, поэтому нет event.data
-      // Это ошибка подключения, а не ошибка от backend
-      
-      // Если задача уже завершена, сразу закрываем и предотвращаем переподключение
+    eventSource.onerror = () => {
+      // Если задача уже завершена, закрываем соединение
       if (isCompletedRef.current) {
-        console.log('ℹ️ SSE onerror вызван, но задача уже завершена - игнорируем')
         if (eventSourceRef.current) {
           eventSourceRef.current.close()
           eventSourceRef.current = null
@@ -379,12 +411,9 @@ export function useAgentStream(): UseAgentStreamReturn {
       
       // Проверяем состояние подключения
       if (eventSource.readyState === EventSource.CLOSED) {
-        // Подключение закрыто - если задача не завершена, это ошибка
-        // НО: если поток завершился нормально (после complete), onerror может сработать
-        // Поэтому ждем немного перед установкой ошибки
+        // Подключение закрыто во время выполнения задачи
         setTimeout(() => {
           if (!isCompletedRef.current && eventSourceRef.current) {
-            console.warn('⚠️ SSE подключение закрыто во время выполнения задачи')
             setError('Подключение к серверу закрыто. Задача была прервана.')
             setIsRunning(false)
             isCompletedRef.current = true
@@ -395,36 +424,27 @@ export function useAgentStream(): UseAgentStreamReturn {
       } else if (eventSource.readyState === EventSource.CONNECTING) {
         // Попытка переподключения - предотвращаем если задача завершена
         if (isCompletedRef.current && eventSourceRef.current) {
-          console.log('ℹ️ Предотвращаем переподключение - задача завершена')
           eventSourceRef.current.close()
           eventSourceRef.current = null
         }
-      } else if (eventSource.readyState === EventSource.OPEN) {
-        // Соединение открыто - ничего не делаем, это нормально
-        // onerror может срабатывать даже при открытом соединении (например, при сетевых проблемах)
-      } else {
-        // Неизвестное состояние - закрываем на всякий случай если задача завершена
-        if (isCompletedRef.current && eventSourceRef.current) {
-          eventSourceRef.current.close()
-          eventSourceRef.current = null
-        }
+      } else if (isCompletedRef.current && eventSourceRef.current) {
+        // Другие состояния - закрываем если задача завершена
+        eventSourceRef.current.close()
+        eventSourceRef.current = null
       }
     }
   }, [updateStage, isRunning])
 
-  const handleSSEEvent = (data: any) => {
-    // Обработка стандартных SSE событий через data поля
-    // Это fallback для событий, которые приходят через onmessage
-    if (!data || typeof data !== 'object') {
-      console.warn('Получены некорректные данные в handleSSEEvent:', data)
-      return
-    }
+  const handleSSEEvent = (data: Record<string, unknown>) => {
+    // Fallback для событий, которые приходят через onmessage
+    if (!data || typeof data !== 'object') return
     
     if (data.type === 'stage_start' && data.data) {
-      updateStage(data.data.stage, {
-        stage: data.data.stage,
+      const stageData = data.data as { stage: string; message?: string }
+      updateStage(stageData.stage, {
+        stage: stageData.stage,
         status: 'start',
-        message: data.data.message || ''
+        message: stageData.message || ''
       })
     }
   }

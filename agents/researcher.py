@@ -1,7 +1,9 @@
-"""Агент для сбора контекста (RAG + веб-поиск + память)."""
+"""Агент для сбора контекста (RAG + веб-поиск + память + codebase indexing)."""
 from typing import Optional
+from pathlib import Path
 from infrastructure.rag import RAGSystem
 from infrastructure.web_search import web_search
+from infrastructure.context_engine import ContextEngine
 from agents.memory import MemoryAgent
 from utils.logger import get_logger
 
@@ -10,27 +12,31 @@ logger = get_logger()
 
 
 class ResearcherAgent:
-    """Агент для сбора релевантного контекста из RAG и веб-поиска.
+    """Агент для сбора релевантного контекста из RAG, codebase и веб-поиска.
     
     Стратегия:
-    1. Сначала пытается найти информацию в локальном RAG
-    2. Если уверенность < 0.7 или результатов мало → делает веб-поиск
-    3. Объединяет результаты в качественный контекстный блок
+    1. Если указан project_path — индексирует и ищет в кодовой базе (ContextEngine)
+    2. Пытается найти информацию в локальном RAG (память прошлых задач)
+    3. Если уверенность < 0.7 или результатов мало → делает веб-поиск
+    4. Объединяет результаты в качественный контекстный блок
     """
     
     def __init__(
         self,
         rag_system: Optional[RAGSystem] = None,
-        memory_agent: Optional[MemoryAgent] = None
+        memory_agent: Optional[MemoryAgent] = None,
+        context_engine: Optional[ContextEngine] = None
     ) -> None:
         """Инициализация агента исследования.
         
         Args:
             rag_system: Опциональный экземпляр RAGSystem. Если None, создаётся новый.
             memory_agent: Опциональный экземпляр MemoryAgent для получения рекомендаций.
+            context_engine: Опциональный экземпляр ContextEngine для индексации кодовой базы.
         """
         self.rag = rag_system if rag_system is not None else RAGSystem()
         self.memory = memory_agent
+        self.context_engine = context_engine if context_engine is not None else ContextEngine()
         self.min_confidence_threshold = 0.7
         self.min_rag_results = 2
     
@@ -39,7 +45,9 @@ class ResearcherAgent:
         query: str,
         intent_type: Optional[str] = None,
         max_web_results: int = 3,
-        disable_web_search: bool = False
+        disable_web_search: bool = False,
+        project_path: Optional[str] = None,
+        file_extensions: Optional[list[str]] = None
     ) -> str:
         """Собирает релевантный контекст для запроса.
         
@@ -48,9 +56,11 @@ class ResearcherAgent:
             intent_type: Опциональный тип намерения для поиска в памяти
             max_web_results: Максимальное количество результатов веб-поиска
             disable_web_search: Отключить веб-поиск даже если RAG не нашёл контекст
+            project_path: Путь к проекту для индексации кодовой базы (ContextEngine)
+            file_extensions: Расширения файлов для индексации (по умолчанию ['.py'])
             
         Returns:
-            Объединённый контекстный блок с информацией из RAG, памяти и веб-поиска
+            Объединённый контекстный блок с информацией из codebase, RAG, памяти и веб-поиска
         """
         if not query.strip():
             return ""
@@ -64,7 +74,15 @@ class ResearcherAgent:
         
         context_parts: list[str] = []
         
-        # Шаг 0: Проверяем память на наличие похожих задач
+        # Шаг 0: Если указан project_path — ищем в кодовой базе через ContextEngine
+        if project_path:
+            codebase_context = self._search_codebase(query, project_path, file_extensions)
+            if codebase_context:
+                context_parts.append("[Контекст кодовой базы]")
+                context_parts.append(codebase_context)
+                context_parts.append("")  # Пустая строка для разделения
+        
+        # Шаг 1: Проверяем память на наличие похожих задач
         if self.memory and intent_type:
             memory_recommendations = self.memory.get_recommendations(query, intent_type)
             if memory_recommendations:
@@ -72,7 +90,7 @@ class ResearcherAgent:
                 context_parts.append("")  # Пустая строка для разделения
                 logger.info("💾 Найдены рекомендации из памяти прошлых задач")
         
-        # Шаг 1: Поиск в локальном RAG
+        # Шаг 2: Поиск в локальном RAG
         rag_context = self.rag.get_relevant_context(query, n_results=4)
         rag_results_with_meta = self.rag.get_relevant_context_with_metadata(query, n_results=4)
         
@@ -91,7 +109,7 @@ class ResearcherAgent:
             context_parts.append(rag_context)
             context_parts.append("")  # Пустая строка для разделения
         
-        # Шаг 2: Веб-поиск если нужно
+        # Шаг 3: Веб-поиск если нужно
         needs_web_search = (
             not disable_web_search and
             (rag_confidence < self.min_confidence_threshold or
@@ -162,14 +180,85 @@ class ResearcherAgent:
         confidence = base_confidence * (0.7 + 0.3 * count_factor)
         return min(confidence, 1.0)
     
+    def _search_codebase(
+        self,
+        query: str,
+        project_path: str,
+        file_extensions: Optional[list[str]] = None
+    ) -> str:
+        """Ищет релевантный контекст в кодовой базе проекта.
+        
+        Args:
+            query: Поисковый запрос
+            project_path: Путь к проекту
+            file_extensions: Расширения файлов для поиска (по умолчанию ['.py'])
+            
+        Returns:
+            Контекст из кодовой базы или пустая строка
+        """
+        if not project_path:
+            return ""
+        
+        # Проверяем существование пути
+        project_path_obj = Path(project_path)
+        if not project_path_obj.exists():
+            logger.warning(f"⚠️ Путь к проекту не существует: {project_path}")
+            return ""
+        
+        extensions = file_extensions or ['.py']
+        
+        try:
+            # Получаем контекст через ContextEngine
+            codebase_context = self.context_engine.get_context(
+                query=query,
+                project_path=project_path,
+                extensions=extensions
+            )
+            
+            if codebase_context:
+                logger.info(f"📂 Найден контекст в кодовой базе ({len(codebase_context)} символов)")
+                return codebase_context
+            else:
+                logger.info("ℹ️ Релевантный контекст в кодовой базе не найден")
+                return ""
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка поиска в кодовой базе: {e}", error=e)
+            return ""
+    
+    def index_project(
+        self,
+        project_path: str,
+        file_extensions: Optional[list[str]] = None
+    ) -> int:
+        """Индексирует проект для последующего поиска.
+        
+        Args:
+            project_path: Путь к проекту
+            file_extensions: Расширения файлов для индексации
+            
+        Returns:
+            Количество проиндексированных файлов
+        """
+        extensions = file_extensions or ['.py']
+        
+        try:
+            index = self.context_engine.index_project(project_path, extensions)
+            file_count = len(index)
+            logger.info(f"📚 Проиндексировано {file_count} файлов в проекте {project_path}")
+            return file_count
+        except Exception as e:
+            logger.error(f"❌ Ошибка индексации проекта: {e}", error=e)
+            return 0
+    
     def _format_web_results(self, results: list[dict[str, str]]) -> str:
-        """Форматирует результаты веб-поиска в читаемый текст.
+        """Форматирует результаты веб-поиска в markdown.
         
         Args:
             results: Список словарей с полями title, url, snippet
             
         Returns:
-            Отформатированная строка с контекстом
+            Отформатированная строка с контекстом в markdown
         """
         if not results:
             return ""
@@ -181,12 +270,16 @@ class ResearcherAgent:
             url = result.get("url", "").strip()
             snippet = result.get("snippet", "").strip()
             
-            if title:
-                formatted_parts.append(f"{i}. {title}")
-                if url:
-                    formatted_parts.append(f"   URL: {url}")
+            if title and url:
+                # Markdown ссылка
+                formatted_parts.append(f"**{i}. [{title}]({url})**")
                 if snippet:
                     formatted_parts.append(f"   {snippet}")
                 formatted_parts.append("")  # Пустая строка между результатами
+            elif title:
+                formatted_parts.append(f"**{i}. {title}**")
+                if snippet:
+                    formatted_parts.append(f"   {snippet}")
+                formatted_parts.append("")
         
         return "\n".join(formatted_parts).strip()

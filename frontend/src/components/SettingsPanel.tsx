@@ -1,6 +1,6 @@
 // Панель настроек приложения
 import React, { useState, useEffect } from 'react'
-import { X, Save, RotateCcw } from 'lucide-react'
+import { X, Save, RotateCcw, FolderOpen } from 'lucide-react'
 
 interface Settings {
   model: string
@@ -9,6 +9,8 @@ interface Settings {
   enableWebSearch: boolean
   enableRAG: boolean
   maxTokens: number
+  projectPath: string  // Путь к проекту для индексации кодовой базы
+  fileExtensions: string  // Расширения файлов для индексации
 }
 
 interface SettingsPanelProps {
@@ -24,7 +26,9 @@ const DEFAULT_SETTINGS: Settings = {
   maxIterations: 3,
   enableWebSearch: true,
   enableRAG: true,
-  maxTokens: 4096
+  maxTokens: 4096,
+  projectPath: '',
+  fileExtensions: '.py'
 }
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -159,6 +163,48 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             <p className="text-xs text-gray-500 mt-1">
               Максимальная длина генерируемого текста
             </p>
+          </div>
+
+          {/* Codebase Indexing Section */}
+          <div className="border-t border-white/10 pt-6">
+            <h3 className="text-sm font-medium text-gray-200 mb-4 flex items-center gap-2">
+              <FolderOpen className="w-4 h-4" />
+              Индексация кодовой базы
+            </h3>
+            
+            {/* Project Path */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-200 mb-2">
+                Путь к проекту
+              </label>
+              <input
+                type="text"
+                value={settings.projectPath}
+                onChange={e => handleChange('projectPath', e.target.value)}
+                placeholder="/путь/к/вашему/проекту"
+                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Укажите путь к корню проекта для контекстного анализа кода
+              </p>
+            </div>
+            
+            {/* File Extensions */}
+            <div>
+              <label className="block text-sm font-medium text-gray-200 mb-2">
+                Расширения файлов
+              </label>
+              <input
+                type="text"
+                value={settings.fileExtensions}
+                onChange={e => handleChange('fileExtensions', e.target.value)}
+                placeholder=".py,.js,.ts"
+                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Расширения файлов через запятую (например: .py,.js,.ts)
+              </p>
+            </div>
           </div>
 
           {/* Toggles */}

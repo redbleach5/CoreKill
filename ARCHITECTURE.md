@@ -110,7 +110,7 @@ allow_ultra_models = false  # 100B+ модели
     ↓
 [Planner Agent] → план выполнения
     ↓
-[Researcher Agent] → RAG → Web Search
+[Researcher Agent] → Codebase Index → RAG → Web Search
     ↓
 [Test Generator] → pytest тесты (TDD)
     ↓
@@ -126,6 +126,37 @@ allow_ultra_models = false  # 100B+ модели
     ↓
 Результат
 ```
+
+## Codebase Indexing (Context Engine)
+
+При указании `project_path` система автоматически индексирует кодовую базу:
+
+```
+project_path указан?
+    ↓ да
+[ContextEngine] → индексация файлов по расширениям
+    ↓
+[CodeChunker] → разбиение на чанки (классы, функции)
+    ↓
+[RelevanceScorer] → BM25-подобная оценка релевантности
+    ↓
+[ContextComposer] → сборка контекста в пределах лимита токенов
+    ↓
+Релевантный контекст кодовой базы → Researcher
+```
+
+**Настройки в config.toml:**
+```toml
+[context_engine]
+enabled = true
+max_context_tokens = 4000
+max_chunk_tokens = 500
+default_extensions = [".py"]
+```
+
+**API параметры:**
+- `project_path` — путь к корню проекта
+- `file_extensions` — расширения файлов (через запятую)
 
 ## Chat режим
 

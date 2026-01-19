@@ -3,9 +3,11 @@
 Каждый узел соответствует одному агенту в workflow.
 Агенты инициализируются лениво при первом вызове.
 MemoryAgent используется через DependencyContainer (Singleton).
+Checkpoint сохраняется после каждого узла для возможности восстановления.
 """
 from typing import TYPE_CHECKING
 from infrastructure.workflow_state import AgentState
+from infrastructure.task_checkpointer import get_task_checkpointer
 from agents.intent import IntentAgent, IntentResult
 from agents.planner import PlannerAgent
 from agents.researcher import ResearcherAgent
@@ -16,6 +18,7 @@ from agents.reflection import ReflectionAgent, ReflectionResult
 from agents.critic import CriticAgent, get_critic_agent, CriticReport
 from backend.dependencies import get_memory_agent
 from utils.validation import validate_code
+from utils.config import get_config
 from utils.logger import get_logger
 from utils.file_context import extract_file_path_from_task, read_file_context, prepare_modify_context
 
@@ -44,6 +47,29 @@ def _get_memory_agent() -> 'MemoryAgent':
         Singleton экземпляр MemoryAgent
     """
     return get_memory_agent()
+
+
+def _save_checkpoint(state: AgentState, stage: str, status: str = "running") -> None:
+    """Сохраняет checkpoint после выполнения узла.
+    
+    Args:
+        state: Текущий AgentState
+        stage: Название завершенного этапа
+        status: Статус задачи
+    """
+    config = get_config()
+    if not config.persistence_enabled:
+        return
+    
+    task_id = state.get("task_id")
+    if not task_id:
+        return
+    
+    try:
+        checkpointer = get_task_checkpointer()
+        checkpointer.save_checkpoint(task_id, state, stage, status)
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось сохранить checkpoint: {e}")
 
 
 def _initialize_agents(state: AgentState) -> None:
@@ -146,6 +172,9 @@ def intent_node(state: AgentState) -> AgentState:
             description=f"Ошибка: {str(e)}"
         )
     
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "intent")
+    
     return state
 
 
@@ -189,11 +218,14 @@ def planner_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка создания плана: {e}", error=e)
         state["plan"] = ""
     
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "planner")
+    
     return state
 
 
 def researcher_node(state: AgentState) -> AgentState:
-    """Узел для сбора контекста (RAG + веб-поиск).
+    """Узел для сбора контекста (codebase + RAG + веб-поиск).
     
     Args:
         state: Текущий state
@@ -206,6 +238,8 @@ def researcher_node(state: AgentState) -> AgentState:
     task = state.get("task", "")
     intent_result = state.get("intent_result")
     disable_web_search = state.get("disable_web_search", False)
+    project_path = state.get("project_path")
+    file_extensions = state.get("file_extensions")
     
     if not intent_result:
         logger.warning("⚠️ Intent result отсутствует, пропускаем исследование")
@@ -231,12 +265,14 @@ def researcher_node(state: AgentState) -> AgentState:
                 state["file_context"] = file_context
                 logger.info(f"📄 Найден файл для модификации: {file_path}")
         
-        # Собираем контекст через Researcher
+        # Собираем контекст через Researcher (включая codebase если указан project_path)
         if _researcher_agent:
             context = _researcher_agent.research(
                 query=task,
                 intent_type=intent_result.type,
-                disable_web_search=disable_web_search
+                disable_web_search=disable_web_search,
+                project_path=project_path,
+                file_extensions=file_extensions
             )
             
             # Добавляем контекст файла в начало если есть
@@ -251,6 +287,9 @@ def researcher_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка сбора контекста: {e}", error=e)
         state["context"] = state.get("file_context", "")
+    
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "researcher")
     
     return state
 
@@ -299,6 +338,9 @@ def generator_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка генерации тестов: {e}", error=e)
         state["tests"] = ""
+    
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "test_generator")
     
     return state
 
@@ -350,6 +392,9 @@ def coder_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка генерации кода: {e}", error=e)
         state["code"] = ""
     
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "coder")
+    
     return state
 
 
@@ -383,6 +428,9 @@ def validator_node(state: AgentState) -> AgentState:
             "bandit": {"success": False, "issues": str(e)},
             "all_passed": False
         }
+    
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "validator")
     
     return state
 
@@ -421,6 +469,9 @@ def debugger_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка анализа ошибок: {e}", error=e)
         state["debug_result"] = None
+    
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "debugger")
     
     return state
 
@@ -468,6 +519,9 @@ def fixer_node(state: AgentState) -> AgentState:
             logger.warning("⚠️ Coder Agent не инициализирован")
     except Exception as e:
         logger.error(f"❌ Ошибка исправления кода: {e}", error=e)
+    
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "fixer")
     
     return state
 
@@ -523,6 +577,9 @@ def reflection_node(state: AgentState) -> AgentState:
         logger.error(f"❌ Ошибка рефлексии: {e}", error=e)
         state["reflection_result"] = None
     
+    # Сохраняем checkpoint
+    _save_checkpoint(state, "reflection")
+    
     return state
 
 
@@ -560,5 +617,8 @@ def critic_node(state: AgentState) -> AgentState:
     except Exception as e:
         logger.error(f"❌ Ошибка критического анализа: {e}", error=e)
         state["critic_report"] = None
+    
+    # Сохраняем финальный checkpoint как completed
+    _save_checkpoint(state, "critic", status="completed")
     
     return state

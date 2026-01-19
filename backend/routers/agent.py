@@ -245,7 +245,9 @@ async def run_workflow_stream(
     model: str,
     temperature: float,
     disable_web_search: bool,
-    max_iterations: int
+    max_iterations: int,
+    project_path: Optional[str] = None,
+    file_extensions: Optional[List[str]] = None
 ) -> AsyncGenerator[str, None]:
     """Запускает workflow агентов с SSE стримингом через LangGraph.
     
@@ -255,6 +257,8 @@ async def run_workflow_stream(
         temperature: Температура генерации
         disable_web_search: Отключить веб-поиск
         max_iterations: Максимальное количество итераций (ограничено до 5)
+        project_path: Путь к проекту для индексации кодовой базы (опционально)
+        file_extensions: Расширения файлов для индексации (опционально)
         
     Yields:
         SSE события в формате text/event-stream
@@ -390,6 +394,9 @@ async def run_workflow_stream(
         "conversation_id": None,
         "conversation_history": None,
         "chat_response": None,
+        # Codebase indexing
+        "project_path": project_path,
+        "file_extensions": file_extensions,
         # Результаты агентов
         "intent_result": None,
         "plan": "",
@@ -523,10 +530,16 @@ async def run_workflow_stream(
                             stage="coding",
                             message="Генерирую код..."
                         )
+                        # Отправляем код как чанк для отображения в IDE
+                        yield await SSEManager.stream_code_chunk(
+                            chunk=code,
+                            is_final=True,
+                            metadata={"stage": "coding"}
+                        )
                         yield await SSEManager.stream_stage_end(
                             stage="coding",
                             message="Код сгенерирован",
-                            result={"code_length": len(code)}
+                            result={"code_length": len(code), "code": code}  # Добавляем код в result
                         )
                 
                 elif node_name == "validator":
@@ -567,10 +580,16 @@ async def run_workflow_stream(
                             stage="fixing",
                             message=f"Исправляю код по инструкциям (итерация {iteration})..."
                         )
+                        # Отправляем исправленный код для обновления IDE
+                        yield await SSEManager.stream_code_chunk(
+                            chunk=code,
+                            is_final=True,
+                            metadata={"stage": "fixing", "iteration": iteration}
+                        )
                         yield await SSEManager.stream_stage_end(
                             stage="fixing",
                             message="Код исправлен",
-                            result={"code_length": len(code)}
+                            result={"code_length": len(code), "code": code}
                         )
                 
                 elif node_name == "reflection":
@@ -873,7 +892,9 @@ async def stream_task_results(
     temperature: float = 0.25,
     disable_web_search: bool = False,
     max_iterations: int = 3,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    project_path: Optional[str] = None,
+    file_extensions: Optional[str] = None
 ):
     """SSE endpoint для стриминга результатов выполнения задачи.
     
@@ -890,11 +911,18 @@ async def stream_task_results(
         disable_web_search: Отключить веб-поиск
         max_iterations: Максимальное количество итераций
         conversation_id: ID диалога для сохранения контекста
+        project_path: Путь к проекту для индексации кодовой базы (опционально)
+        file_extensions: Расширения файлов через запятую, например ".py,.js" (опционально)
         
     Returns:
         StreamingResponse с SSE событиями
     """
     from fastapi.responses import StreamingResponse
+    
+    # Парсим file_extensions из строки в список
+    parsed_extensions: Optional[List[str]] = None
+    if file_extensions:
+        parsed_extensions = [ext.strip() for ext in file_extensions.split(",") if ext.strip()]
     
     async def generate() -> AsyncGenerator[str, None]:
         try:
@@ -972,7 +1000,9 @@ async def stream_task_results(
                     model=model,
                     temperature=temperature,
                     disable_web_search=disable_web_search,
-                    max_iterations=max_iterations
+                    max_iterations=max_iterations,
+                    project_path=project_path,
+                    file_extensions=parsed_extensions
                 )
             
             async for event in stream_func:
@@ -1195,4 +1225,373 @@ async def create_conversation() -> Dict[str, str]:
     return {
         "conversation_id": conv.id,
         "status": "created"
+    }
+
+
+# ========== TASK PERSISTENCE ENDPOINTS ==========
+
+from infrastructure.task_checkpointer import get_task_checkpointer, TaskMetadata
+
+
+@router.get("/tasks/active")
+async def get_active_tasks() -> Dict[str, Any]:
+    """Возвращает список активных (незавершенных) задач.
+    
+    Используется frontend для восстановления после обновления страницы.
+    
+    Returns:
+        Список активных задач с метаданными
+    """
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        return {
+            "tasks": [],
+            "total": 0,
+            "persistence_enabled": False
+        }
+    
+    checkpointer = get_task_checkpointer()
+    active_tasks = checkpointer.list_active_tasks()
+    
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "task_text": t.task_text,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "last_stage": t.last_stage,
+                "status": t.status,
+                "iteration": t.iteration,
+                "model": t.model
+            }
+            for t in active_tasks
+        ],
+        "total": len(active_tasks),
+        "persistence_enabled": True
+    }
+
+
+@router.get("/tasks/history")
+async def get_task_history(limit: int = 20) -> Dict[str, Any]:
+    """Возвращает историю всех задач.
+    
+    Args:
+        limit: Максимальное количество задач
+        
+    Returns:
+        Список всех задач с метаданными
+    """
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        return {
+            "tasks": [],
+            "total": 0,
+            "persistence_enabled": False
+        }
+    
+    checkpointer = get_task_checkpointer()
+    all_tasks = checkpointer.list_all_tasks()[:limit]
+    
+    return {
+        "tasks": [
+            {
+                "task_id": t.task_id,
+                "task_text": t.task_text,
+                "created_at": t.created_at,
+                "updated_at": t.updated_at,
+                "last_stage": t.last_stage,
+                "status": t.status,
+                "iteration": t.iteration,
+                "model": t.model
+            }
+            for t in all_tasks
+        ],
+        "total": len(all_tasks),
+        "persistence_enabled": True
+    }
+
+
+@router.get("/tasks/{task_id}")
+async def get_task_details(task_id: str) -> Dict[str, Any]:
+    """Возвращает детали задачи включая сохраненное состояние.
+    
+    Args:
+        task_id: ID задачи
+        
+    Returns:
+        Детали задачи с результатами
+    """
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        raise HTTPException(status_code=400, detail="Persistence отключена")
+    
+    checkpointer = get_task_checkpointer()
+    result = checkpointer.load_checkpoint(task_id)
+    
+    if not result:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    
+    state, metadata = result
+    
+    return {
+        "task_id": metadata.task_id,
+        "task_text": metadata.task_text,
+        "created_at": metadata.created_at,
+        "updated_at": metadata.updated_at,
+        "last_stage": metadata.last_stage,
+        "status": metadata.status,
+        "iteration": metadata.iteration,
+        "model": metadata.model,
+        "results": {
+            "intent": state.get("intent_result"),
+            "plan": state.get("plan", ""),
+            "context": state.get("context", "")[:500] + "..." if len(state.get("context", "")) > 500 else state.get("context", ""),
+            "tests": state.get("tests", ""),
+            "code": state.get("code", ""),
+            "validation": state.get("validation_results", {}),
+        }
+    }
+
+
+@router.post("/tasks/{task_id}/resume")
+async def resume_task(task_id: str):
+    """Возобновляет выполнение приостановленной задачи.
+    
+    Args:
+        task_id: ID задачи для возобновления
+        
+    Returns:
+        StreamingResponse с SSE событиями продолжения workflow
+    """
+    from fastapi.responses import StreamingResponse
+    
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        raise HTTPException(status_code=400, detail="Persistence отключена")
+    
+    checkpointer = get_task_checkpointer()
+    result = checkpointer.load_checkpoint(task_id)
+    
+    if not result:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    
+    state, metadata = result
+    
+    # Проверяем что задачу можно возобновить
+    if metadata.status == "completed":
+        raise HTTPException(status_code=400, detail="Задача уже завершена")
+    
+    async def generate() -> AsyncGenerator[str, None]:
+        """Генератор SSE событий для возобновления задачи."""
+        try:
+            # Определяем следующий этап на основе last_stage
+            stage_order = [
+                "intent", "planner", "researcher", "test_generator",
+                "coder", "validator", "debugger", "fixer", "reflection", "critic"
+            ]
+            
+            last_stage = metadata.last_stage
+            
+            # Находим индекс последнего завершенного этапа
+            if last_stage in stage_order:
+                last_index = stage_order.index(last_stage)
+            else:
+                last_index = -1
+            
+            # Отправляем событие о возобновлении
+            yield await SSEManager.stream_stage_start(
+                stage="resume",
+                message=f"Возобновление с этапа: {last_stage}"
+            )
+            await asyncio.sleep(0.05)
+            
+            # Отправляем сохраненные результаты
+            if state.get("intent_result"):
+                intent_data = state["intent_result"]
+                if isinstance(intent_data, dict):
+                    yield await SSEManager.stream_stage_end(
+                        stage="intent",
+                        message=f"Намерение: {intent_data.get('type', 'unknown')}",
+                        result=intent_data
+                    )
+                await asyncio.sleep(0.02)
+            
+            if state.get("plan"):
+                yield await SSEManager.stream_stage_end(
+                    stage="planning",
+                    message="План восстановлен",
+                    result={"plan_length": len(state["plan"])}
+                )
+                await asyncio.sleep(0.02)
+            
+            if state.get("context"):
+                yield await SSEManager.stream_stage_end(
+                    stage="research",
+                    message="Контекст восстановлен",
+                    result={"context_length": len(state["context"])}
+                )
+                await asyncio.sleep(0.02)
+            
+            if state.get("tests"):
+                yield await SSEManager.stream_stage_end(
+                    stage="testing",
+                    message="Тесты восстановлены",
+                    result={"tests_length": len(state["tests"])}
+                )
+                await asyncio.sleep(0.02)
+            
+            if state.get("code"):
+                yield await SSEManager.stream_stage_end(
+                    stage="coding",
+                    message="Код восстановлен",
+                    result={"code_length": len(state["code"]), "code": state["code"]}
+                )
+                # Отправляем код как chunk для IDE
+                yield await SSEManager.stream_code_chunk(
+                    chunk=state["code"],
+                    is_final=True,
+                    metadata={"stage": "resume"}
+                )
+                await asyncio.sleep(0.02)
+            
+            if state.get("validation_results"):
+                yield await SSEManager.stream_stage_end(
+                    stage="validation",
+                    message="Валидация восстановлена",
+                    result=state["validation_results"]
+                )
+                await asyncio.sleep(0.02)
+            
+            # Определяем нужно ли продолжать workflow
+            validation = state.get("validation_results", {})
+            all_passed = validation.get("all_passed", False)
+            iteration = state.get("iteration", 0)
+            max_iterations = state.get("max_iterations", 3)
+            
+            # Если задача не завершена, продолжаем workflow
+            if last_index < len(stage_order) - 1:
+                # Нужно продолжить с последнего этапа
+                # Для простоты пока просто отправляем финальный результат с тем что есть
+                
+                # Формируем итоговые метрики
+                reflection = state.get("reflection_result")
+                if isinstance(reflection, dict):
+                    metrics = {
+                        "planning": reflection.get("planning_score", 0.0),
+                        "research": reflection.get("research_score", 0.0),
+                        "testing": reflection.get("testing_score", 0.0),
+                        "coding": reflection.get("coding_score", 0.0),
+                        "overall": reflection.get("overall_score", 0.0)
+                    }
+                else:
+                    metrics = {
+                        "planning": 0.0,
+                        "research": 0.0,
+                        "testing": 0.0,
+                        "coding": 0.0,
+                        "overall": 0.0
+                    }
+                
+                # Формируем intent для результата
+                intent_data = state.get("intent_result", {})
+                if isinstance(intent_data, dict):
+                    intent_for_result = {
+                        "type": intent_data.get("type", "unknown"),
+                        "confidence": intent_data.get("confidence", 0.0),
+                        "description": intent_data.get("description", "")
+                    }
+                else:
+                    intent_for_result = {"type": "unknown", "confidence": 0.0, "description": ""}
+                
+                yield await SSEManager.stream_final_result(
+                    task_id=task_id,
+                    results={
+                        "task": state.get("task", ""),
+                        "intent": intent_for_result,
+                        "plan": state.get("plan", ""),
+                        "context": state.get("context", ""),
+                        "tests": state.get("tests", ""),
+                        "code": state.get("code", ""),
+                        "validation": validation,
+                        "resumed": True,
+                        "last_stage": last_stage
+                    },
+                    metrics=metrics
+                )
+            
+            await asyncio.sleep(0.2)
+            logger.info(f"✅ Задача {task_id[:8]}... возобновлена")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка возобновления задачи: {e}", error=e)
+            yield await SSEManager.stream_error(
+                stage="resume",
+                error_message=f"Ошибка возобновления: {str(e)}"
+            )
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Access-Control-Allow-Origin": "http://localhost:5173",
+            "Access-Control-Allow-Credentials": "true"
+        }
+    )
+
+
+@router.delete("/tasks/{task_id}")
+async def delete_task(task_id: str) -> Dict[str, str]:
+    """Удаляет checkpoint задачи.
+    
+    Args:
+        task_id: ID задачи
+        
+    Returns:
+        Статус удаления
+    """
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        raise HTTPException(status_code=400, detail="Persistence отключена")
+    
+    checkpointer = get_task_checkpointer()
+    
+    if not checkpointer.delete_checkpoint(task_id):
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    
+    return {
+        "status": "success",
+        "message": f"Задача {task_id} удалена"
+    }
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str) -> Dict[str, str]:
+    """Отменяет/приостанавливает задачу.
+    
+    Args:
+        task_id: ID задачи
+        
+    Returns:
+        Статус отмены
+    """
+    config = get_config()
+    
+    if not config.persistence_enabled:
+        raise HTTPException(status_code=400, detail="Persistence отключена")
+    
+    checkpointer = get_task_checkpointer()
+    checkpointer.mark_paused(task_id)
+    
+    return {
+        "status": "success",
+        "message": f"Задача {task_id} приостановлена"
     }

@@ -160,6 +160,34 @@ class SSEManager:
         return await SSEManager.send_event("error", data)
 
     @staticmethod
+    async def stream_code_chunk(
+        chunk: str,
+        is_final: bool = False,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Генерирует событие с чанком кода для стриминга.
+        
+        Используется для отображения кода в IDE по мере генерации.
+        
+        Args:
+            chunk: Часть сгенерированного кода
+            is_final: Флаг последнего чанка
+            metadata: Дополнительные метаданные (номер строки и т.д.)
+            
+        Returns:
+            SSE событие
+        """
+        data: Dict[str, Any] = {
+            "chunk": chunk,
+            "is_final": is_final
+        }
+        
+        if metadata:
+            data["metadata"] = metadata
+        
+        return await SSEManager.send_event("code_chunk", data)
+
+    @staticmethod
     async def stream_final_result(
         task_id: str,
         results: Dict[str, Any],

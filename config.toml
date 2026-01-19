@@ -100,6 +100,25 @@ similarity_threshold = 0.5
 # Максимальное количество результатов из RAG
 max_results = 5
 
+# === Context Engine (Codebase Indexing) ===
+# Настройки индексации кодовой базы
+
+[context_engine]
+# Включить индексацию кодовой базы
+enabled = true
+
+# Максимальный размер контекста в токенах
+max_context_tokens = 4000
+
+# Максимальный размер чанка в токенах
+max_chunk_tokens = 500
+
+# Директория для кэша индексов
+cache_directory = ".context_cache"
+
+# Расширения файлов по умолчанию для индексации
+default_extensions = [".py"]
+
 # === Interaction Settings ===
 # Настройки режимов взаимодействия
 
@@ -140,3 +159,19 @@ allow_heavy_models = true
 
 # Разрешить использование моделей 100B+ (требует много VRAM/RAM)
 allow_ultra_models = false
+
+# === Task Persistence (Checkpoint System) ===
+# Настройки сохранения состояния задач
+
+[persistence]
+# Включить систему checkpoint для сохранения состояния задач
+enabled = true
+
+# Директория для хранения checkpoint файлов
+checkpoint_directory = ".task_checkpoints"
+
+# Максимальный возраст checkpoint в часах (старые удаляются автоматически)
+max_checkpoint_age_hours = 24
+
+# Автоматически помечать задачи как paused при потере соединения
+auto_pause_on_disconnect = true
