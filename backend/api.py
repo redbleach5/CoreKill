@@ -5,6 +5,7 @@
 - Обработка сигналов SIGTERM/SIGINT
 - Закрытие connection pool и очистка ресурсов
 """
+import asyncio
 import os
 import signal
 from contextlib import asynccontextmanager

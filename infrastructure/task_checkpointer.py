@@ -73,39 +73,69 @@ class TaskCheckpointer:
         """Сериализует AgentState в JSON-совместимый dict.
         
         Преобразует dataclass объекты в словари.
+        Защита от циклических ссылок.
         """
         result: dict[str, Any] = {}
+        seen: set = set()  # Общее множество для всего state
         
         for key, value in state.items():
             if value is None:
                 result[key] = None
             elif hasattr(value, "__dict__"):
                 # Dataclass или объект с атрибутами
-                result[key] = self._serialize_object(value)
+                result[key] = self._serialize_object(value, seen)
             elif isinstance(value, (list, tuple)):
-                result[key] = [self._serialize_object(item) for item in value]
+                result[key] = [self._serialize_object(item, seen) for item in value]
             elif isinstance(value, dict):
-                result[key] = {k: self._serialize_object(v) for k, v in value.items()}
+                result[key] = {k: self._serialize_object(v, seen) for k, v in value.items()}
             else:
                 result[key] = value
         
         return result
     
-    def _serialize_object(self, obj: Any) -> Any:
-        """Рекурсивно сериализует объект."""
+    def _serialize_object(self, obj: Any, _seen: set | None = None) -> Any:
+        """Рекурсивно сериализует объект с защитой от циклических ссылок.
+        
+        Args:
+            obj: Объект для сериализации
+            _seen: Множество уже обработанных id объектов (для защиты от циклов)
+        """
+        from enum import Enum
+        
+        # Инициализируем множество обработанных объектов
+        if _seen is None:
+            _seen = set()
+        
         if obj is None:
             return None
         if isinstance(obj, (str, int, float, bool)):
             return obj
-        if hasattr(obj, "__dict__"):
-            # Для dataclass и подобных
-            return {k: self._serialize_object(v) for k, v in vars(obj).items()}
-        if isinstance(obj, dict):
-            return {k: self._serialize_object(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [self._serialize_object(item) for item in obj]
-        # Fallback для неизвестных типов
-        return str(obj)
+        
+        # Enum — сериализуем значение
+        if isinstance(obj, Enum):
+            return obj.value
+        
+        # Проверка на циклические ссылки
+        obj_id = id(obj)
+        if obj_id in _seen:
+            return "<circular reference>"
+        
+        # Добавляем в множество обработанных (только для сложных объектов)
+        if hasattr(obj, "__dict__") or isinstance(obj, (dict, list, tuple)):
+            _seen.add(obj_id)
+        
+        try:
+            if hasattr(obj, "__dict__"):
+                # Для dataclass и подобных
+                return {k: self._serialize_object(v, _seen) for k, v in vars(obj).items()}
+            if isinstance(obj, dict):
+                return {k: self._serialize_object(v, _seen) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [self._serialize_object(item, _seen) for item in obj]
+            # Fallback для неизвестных типов
+            return str(obj)
+        except RecursionError:
+            return "<recursion limit>"
     
     def _deserialize_state(self, data: dict[str, Any]) -> AgentState:
         """Десериализует JSON в AgentState.
