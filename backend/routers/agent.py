@@ -889,51 +889,94 @@ async def refresh_models() -> Dict[str, Any]:
 async def browse_folder(start_path: Optional[str] = None) -> Dict[str, Any]:
     """Открывает системный диалог выбора папки.
     
-    Использует tkinter для отображения нативного диалога выбора директории.
-    Работает на macOS, Windows и Linux.
+    Использует нативные средства ОС:
+    - macOS: osascript (AppleScript)
+    - Windows: PowerShell
+    - Linux: zenity или kdialog
     
     Args:
         start_path: Начальная директория для диалога (опционально)
         
     Returns:
-        Словарь с выбранным путём или null если отменено
+        Словарь с выбранным путём или cancelled если отменено
     """
     import asyncio
     import os
+    import platform
+    import subprocess
     
-    def _open_folder_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
-        """Открывает диалог выбора папки в отдельном потоке."""
+    def _open_folder_dialog_native(initial_dir: Optional[str] = None) -> Optional[str]:
+        """Открывает нативный диалог выбора папки."""
+        system = platform.system()
+        initial = initial_dir if initial_dir and os.path.isdir(initial_dir) else os.path.expanduser("~")
+        
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            
-            # Создаём скрытое окно
-            root = tk.Tk()
-            root.withdraw()  # Скрываем главное окно
-            root.attributes('-topmost', True)  # Поверх других окон
-            
-            # Определяем начальную директорию
-            initial = initial_dir if initial_dir and os.path.isdir(initial_dir) else os.path.expanduser("~")
-            
-            # Открываем диалог
-            folder_path = filedialog.askdirectory(
-                initialdir=initial,
-                title="Выберите папку проекта"
-            )
-            
-            root.destroy()
-            
-            return folder_path if folder_path else None
-            
-        except ImportError:
-            logger.warning("⚠️ tkinter недоступен для выбора папки")
+            if system == "Darwin":  # macOS
+                # AppleScript для нативного диалога
+                script = f'''
+                    set defaultFolder to POSIX file "{initial}"
+                    try
+                        set selectedFolder to choose folder with prompt "Выберите папку проекта" default location defaultFolder
+                        return POSIX path of selectedFolder
+                    on error
+                        return ""
+                    end try
+                '''
+                result = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 минут на выбор
+                )
+                path = result.stdout.strip()
+                # Убираем trailing slash если есть
+                return path.rstrip("/") if path else None
+                
+            elif system == "Windows":
+                # PowerShell для Windows
+                script = f'''
+                    Add-Type -AssemblyName System.Windows.Forms
+                    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+                    $dialog.Description = "Выберите папку проекта"
+                    $dialog.SelectedPath = "{initial}"
+                    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+                        Write-Output $dialog.SelectedPath
+                    }}
+                '''
+                result = subprocess.run(
+                    ["powershell", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                path = result.stdout.strip()
+                return path if path else None
+                
+            else:  # Linux
+                # Пробуем zenity (GNOME), потом kdialog (KDE)
+                for cmd in [
+                    ["zenity", "--file-selection", "--directory", f"--filename={initial}/", "--title=Выберите папку проекта"],
+                    ["kdialog", "--getexistingdirectory", initial, "--title", "Выберите папку проекта"]
+                ]:
+                    try:
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                        if result.returncode == 0:
+                            return result.stdout.strip()
+                    except FileNotFoundError:
+                        continue
+                        
+                logger.warning("⚠️ Не найден zenity или kdialog для выбора папки")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("⏱️ Таймаут диалога выбора папки")
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка диалога выбора папки: {e}")
             return None
     
-    # Запускаем диалог в отдельном потоке чтобы не блокировать event loop
-    selected_path = await asyncio.to_thread(_open_folder_dialog, start_path)
+    # Запускаем диалог в отдельном потоке
+    selected_path = await asyncio.to_thread(_open_folder_dialog_native, start_path)
     
     if selected_path:
         logger.info(f"📂 Выбрана папка: {selected_path}")
