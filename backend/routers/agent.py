@@ -1002,67 +1002,32 @@ async def get_project_files(
     
     Args:
         path: Путь к корневой папке проекта
-        extensions: Расширения файлов через запятую (опционально, например: .py,.js,.ts)
-        max_depth: Максимальная глубина сканирования (по умолчанию 5)
+        extensions: Расширения файлов через запятую (опционально)
+        max_depth: Максимальная глубина сканирования
         
     Returns:
         Древовидная структура файлов и папок
     """
     import os
-    from pathlib import Path
     
-    # Проверка существования пути
     if not path or not os.path.isdir(path):
-        return {
-            "error": "Путь не существует или не является директорией",
-            "path": path
-        }
+        return {"error": "Путь не существует", "path": path}
     
-    # Папки которые игнорируем
     IGNORED_DIRS = {
         '__pycache__', '.git', '.svn', '.hg', 'node_modules', 
-        '.venv', 'venv', 'env', '.env', '.idea', '.vscode',
-        'dist', 'build', '.next', '.nuxt', 'coverage',
-        '.pytest_cache', '.mypy_cache', '__pypackages__',
-        '.tox', '.eggs', '*.egg-info', '.cache'
+        '.venv', 'venv', 'env', '.idea', '.vscode', 'dist', 'build',
+        '.next', '.nuxt', 'coverage', '.pytest_cache', '.mypy_cache',
+        '__pypackages__', '.tox', '.eggs', '.cache'
     }
     
-    # Файлы которые игнорируем
-    IGNORED_FILES = {
-        '.DS_Store', 'Thumbs.db', '.gitignore', '.gitattributes',
-        '*.pyc', '*.pyo', '*.so', '*.dylib'
-    }
+    IGNORED_FILES = {'.DS_Store', 'Thumbs.db', '.gitignore', '.gitattributes'}
     
-    # Парсим расширения если указаны
-    allowed_extensions: set[str] | None = None
+    allowed_ext: set[str] | None = None
     if extensions:
-        allowed_extensions = {ext.strip().lower() for ext in extensions.split(',')}
-        # Добавляем точку если нет
-        allowed_extensions = {ext if ext.startswith('.') else f'.{ext}' for ext in allowed_extensions}
+        allowed_ext = {(e.strip() if e.strip().startswith('.') else f'.{e.strip()}').lower() 
+                       for e in extensions.split(',')}
     
-    def should_ignore_dir(name: str) -> bool:
-        """Проверяет нужно ли игнорировать директорию."""
-        return name in IGNORED_DIRS or name.startswith('.')
-    
-    def should_ignore_file(name: str) -> bool:
-        """Проверяет нужно ли игнорировать файл."""
-        if name in IGNORED_FILES:
-            return True
-        # Проверяем паттерны с *
-        for pattern in IGNORED_FILES:
-            if pattern.startswith('*') and name.endswith(pattern[1:]):
-                return True
-        return False
-    
-    def matches_extension(name: str) -> bool:
-        """Проверяет соответствует ли файл разрешённым расширениям."""
-        if allowed_extensions is None:
-            return True
-        ext = os.path.splitext(name)[1].lower()
-        return ext in allowed_extensions
-    
-    def scan_directory(dir_path: str, current_depth: int = 0) -> Dict[str, Any]:
-        """Рекурсивно сканирует директорию."""
+    def scan_dir(dir_path: str, depth: int = 0) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "name": os.path.basename(dir_path) or dir_path,
             "path": dir_path,
@@ -1070,7 +1035,7 @@ async def get_project_files(
             "children": []
         }
         
-        if current_depth >= max_depth:
+        if depth >= max_depth:
             result["truncated"] = True
             return result
         
@@ -1080,46 +1045,37 @@ async def get_project_files(
             result["error"] = "Нет доступа"
             return result
         
-        dirs: list[Dict[str, Any]] = []
-        files: list[Dict[str, Any]] = []
+        dirs, files = [], []
         
         for entry in entries:
             entry_path = os.path.join(dir_path, entry)
             
             if os.path.isdir(entry_path):
-                if not should_ignore_dir(entry):
-                    child = scan_directory(entry_path, current_depth + 1)
-                    # Добавляем только если есть файлы или поддиректории
+                if entry not in IGNORED_DIRS and not entry.startswith('.'):
+                    child = scan_dir(entry_path, depth + 1)
                     if child.get("children") or child.get("truncated"):
                         dirs.append(child)
             else:
-                if not should_ignore_file(entry) and matches_extension(entry):
-                    # Определяем тип файла по расширению
+                if entry not in IGNORED_FILES and not entry.startswith('.'):
                     ext = os.path.splitext(entry)[1].lower()
-                    file_info: Dict[str, Any] = {
-                        "name": entry,
-                        "path": entry_path,
-                        "type": "file",
-                        "extension": ext,
-                        "size": os.path.getsize(entry_path)
-                    }
-                    files.append(file_info)
+                    if allowed_ext is None or ext in allowed_ext:
+                        files.append({
+                            "name": entry,
+                            "path": entry_path,
+                            "type": "file",
+                            "extension": ext,
+                            "size": os.path.getsize(entry_path)
+                        })
         
-        # Сначала папки, потом файлы (оба отсортированы по имени)
         result["children"] = dirs + files
-        
         return result
     
-    tree = scan_directory(path)
+    tree = scan_dir(path)
     
-    # Считаем статистику
     def count_items(node: Dict[str, Any]) -> tuple[int, int]:
-        """Считает количество файлов и папок."""
-        files = 0
-        dirs = 0
         if node["type"] == "file":
             return 1, 0
-        dirs = 1
+        files, dirs = 0, 1
         for child in node.get("children", []):
             f, d = count_items(child)
             files += f
@@ -1132,10 +1088,44 @@ async def get_project_files(
         "tree": tree,
         "stats": {
             "total_files": total_files,
-            "total_directories": total_dirs - 1,  # Не считаем корень
+            "total_directories": total_dirs - 1,
             "root_path": path
         }
     }
+
+
+@router.get("/file-content")
+async def get_file_content(path: str) -> Dict[str, Any]:
+    """Читает содержимое файла.
+    
+    Args:
+        path: Полный путь к файлу
+        
+    Returns:
+        Содержимое файла
+    """
+    import os
+    
+    if not path or not os.path.isfile(path):
+        return {"error": "Файл не найден", "path": path}
+    
+    try:
+        # Ограничиваем размер файла (макс 1MB)
+        size = os.path.getsize(path)
+        if size > 1024 * 1024:
+            return {"error": "Файл слишком большой (>1MB)", "path": path, "size": size}
+        
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        
+        return {
+            "path": path,
+            "name": os.path.basename(path),
+            "content": content,
+            "size": size
+        }
+    except Exception as e:
+        return {"error": str(e), "path": path}
 
 
 @router.get("/metrics/stages")
