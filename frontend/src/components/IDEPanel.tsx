@@ -2,8 +2,8 @@
  * Компонент IDEPanel - полноценная IDE для редактирования и выполнения кода
  * Поддерживает несколько файлов, выполнение кода и просмотр результатов
  */
-import { useState, useEffect } from 'react'
-import { Plus, X, FolderOpen, Database, RefreshCw, Loader2, CheckCircle2, XCircle, Play, Copy, Download, RotateCcw, FileCode, FileText } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { Plus, X, FolderOpen, Database, RefreshCw, Loader2, CheckCircle2, XCircle, Play, Copy, Download, RotateCcw, FileCode, FileText, ChevronRight, ChevronDown, File, Folder } from 'lucide-react'
 import { CodeEditor } from './CodeEditor'
 
 interface CodeFile {
@@ -12,6 +12,28 @@ interface CodeFile {
   language: string
   content: string
   isNew?: boolean
+}
+
+// Типы для дерева файлов
+interface FileTreeNode {
+  name: string
+  path: string
+  type: 'file' | 'directory'
+  extension?: string
+  size?: number
+  children?: FileTreeNode[]
+  truncated?: boolean
+  error?: string
+}
+
+interface ProjectFilesResponse {
+  tree: FileTreeNode
+  stats: {
+    total_files: number
+    total_directories: number
+    root_path: string
+  }
+  error?: string
 }
 
 interface IDEPanelProps {
@@ -55,6 +77,12 @@ export function IDEPanel({
   const [isIndexing, setIsIndexing] = useState(false)
   const [indexStatus, setIndexStatus] = useState<'idle' | 'success' | 'error'>('idle')
   const [, setIndexedFiles] = useState(0)
+  
+  // Состояние дерева файлов
+  const [fileTree, setFileTree] = useState<FileTreeNode | null>(null)
+  const [isLoadingTree, setIsLoadingTree] = useState(false)
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set())
+  const [fileTreeStats, setFileTreeStats] = useState<{ total_files: number; total_directories: number } | null>(null)
 
   // Синхронизация с props
   useEffect(() => {
@@ -78,6 +106,62 @@ export function IDEPanel({
       setTempExtensions(savedExt)
     }
   }, [])
+
+  // Загрузка дерева файлов проекта
+  const loadFileTree = useCallback(async (path: string, extensions?: string) => {
+    if (!path.trim()) {
+      setFileTree(null)
+      setFileTreeStats(null)
+      return
+    }
+    
+    setIsLoadingTree(true)
+    try {
+      const params = new URLSearchParams({ path })
+      if (extensions) {
+        params.append('extensions', extensions)
+      }
+      
+      const response = await fetch(`/api/project-files?${params}`)
+      if (response.ok) {
+        const data: ProjectFilesResponse = await response.json()
+        if (data.error) {
+          console.error('Ошибка загрузки файлов:', data.error)
+          setFileTree(null)
+        } else {
+          setFileTree(data.tree)
+          setFileTreeStats(data.stats)
+          // Раскрываем корневую папку по умолчанию
+          setExpandedDirs(new Set([data.tree.path]))
+        }
+      }
+    } catch (error) {
+      console.error('Ошибка загрузки дерева файлов:', error)
+      setFileTree(null)
+    } finally {
+      setIsLoadingTree(false)
+    }
+  }, [])
+
+  // Автоматическая загрузка дерева при изменении пути проекта
+  useEffect(() => {
+    if (projectPath) {
+      loadFileTree(projectPath, fileExtensions)
+    }
+  }, [projectPath, loadFileTree])
+
+  // Переключение раскрытия директории
+  const toggleDirectory = (path: string) => {
+    setExpandedDirs(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) {
+        next.delete(path)
+      } else {
+        next.add(path)
+      }
+      return next
+    })
+  }
 
   // Индексация проекта
   const handleIndex = async () => {
@@ -157,6 +241,100 @@ export function IDEPanel({
   }
 
   const activeFile = files.find(f => f.id === activeFileId)
+
+  // Получение иконки для файла по расширению
+  const getFileIcon = (extension: string) => {
+    const iconClass = "w-4 h-4 flex-shrink-0"
+    switch (extension) {
+      case '.py':
+        return <FileCode className={`${iconClass} text-yellow-400`} />
+      case '.js':
+      case '.jsx':
+        return <FileCode className={`${iconClass} text-yellow-300`} />
+      case '.ts':
+      case '.tsx':
+        return <FileCode className={`${iconClass} text-blue-400`} />
+      case '.json':
+        return <FileCode className={`${iconClass} text-yellow-500`} />
+      case '.md':
+        return <FileText className={`${iconClass} text-gray-400`} />
+      case '.html':
+        return <FileCode className={`${iconClass} text-orange-400`} />
+      case '.css':
+        return <FileCode className={`${iconClass} text-blue-300`} />
+      default:
+        return <File className={`${iconClass} text-gray-400`} />
+    }
+  }
+
+  // Рекурсивный компонент для отображения элемента дерева
+  const FileTreeItem = ({ node, depth = 0 }: { node: FileTreeNode; depth?: number }) => {
+    const isExpanded = expandedDirs.has(node.path)
+    const paddingLeft = depth * 12 + 8
+    
+    if (node.type === 'directory') {
+      const hasChildren = node.children && node.children.length > 0
+      
+      return (
+        <div>
+          <div
+            className="flex items-center gap-1.5 py-1 px-2 hover:bg-white/5 cursor-pointer text-sm text-gray-300 hover:text-white transition-colors"
+            style={{ paddingLeft }}
+            onClick={() => toggleDirectory(node.path)}
+          >
+            {hasChildren ? (
+              isExpanded ? (
+                <ChevronDown className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" />
+              )
+            ) : (
+              <span className="w-3.5" />
+            )}
+            <Folder className={`w-4 h-4 flex-shrink-0 ${isExpanded ? 'text-blue-400' : 'text-yellow-500'}`} />
+            <span className="truncate">{node.name}</span>
+          </div>
+          {isExpanded && hasChildren && (
+            <div>
+              {node.children!.map((child, idx) => (
+                <FileTreeItem key={child.path || idx} node={child} depth={depth + 1} />
+              ))}
+            </div>
+          )}
+          {node.truncated && isExpanded && (
+            <div 
+              className="text-xs text-gray-500 italic py-1"
+              style={{ paddingLeft: paddingLeft + 24 }}
+            >
+              ... ещё файлы (достигнут лимит глубины)
+            </div>
+          )}
+        </div>
+      )
+    }
+    
+    // Файл
+    return (
+      <div
+        className="flex items-center gap-1.5 py-1 px-2 hover:bg-white/5 cursor-pointer text-sm text-gray-400 hover:text-white transition-colors"
+        style={{ paddingLeft: paddingLeft + 14 }}
+        title={node.path}
+      >
+        {getFileIcon(node.extension || '')}
+        <span className="truncate">{node.name}</span>
+        {node.size !== undefined && node.size > 0 && (
+          <span className="text-xs text-gray-600 ml-auto">
+            {node.size < 1024 
+              ? `${node.size}B` 
+              : node.size < 1024 * 1024 
+                ? `${(node.size / 1024).toFixed(1)}K`
+                : `${(node.size / 1024 / 1024).toFixed(1)}M`
+            }
+          </span>
+        )}
+      </div>
+    )
+  }
 
   // Копировать код
   const handleCopy = async () => {
@@ -250,17 +428,17 @@ export function IDEPanel({
           {/* Dropdown */}
           {showProjectMenu && (
             <div 
-              className="absolute top-full left-0 mt-1 w-56 bg-[#1a1a24] border border-white/10 rounded-lg shadow-2xl overflow-hidden z-50"
+              className="absolute top-full left-0 mt-1 w-72 bg-[#1a1a24] border border-white/10 rounded-lg shadow-2xl overflow-hidden z-50 max-h-[70vh] flex flex-col"
               onMouseLeave={() => setShowProjectMenu(false)}
             >
               {projectPath && (
-                <div className="px-3 py-2 border-b border-white/5">
+                <div className="px-3 py-2 border-b border-white/5 flex-shrink-0">
                   <div className="text-[10px] text-gray-500 uppercase tracking-wide">Проект</div>
                   <div className="text-xs text-gray-300 truncate mt-0.5" title={projectPath}>{projectPath}</div>
                 </div>
               )}
 
-              <div className="py-0.5">
+              <div className="py-0.5 border-b border-white/5 flex-shrink-0">
                 <button
                   onClick={() => { setShowProjectModal(true); setShowProjectMenu(false) }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 hover:text-white transition-colors"
@@ -280,17 +458,43 @@ export function IDEPanel({
                 </button>
 
                 <button
-                  onClick={handleIndex}
-                  disabled={isIndexing || !projectPath}
+                  onClick={() => loadFileTree(projectPath, fileExtensions)}
+                  disabled={isLoadingTree || !projectPath}
                   className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-white/5 hover:text-white transition-colors disabled:opacity-50"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${isIndexing ? 'animate-spin' : ''}`} />
-                  Переиндексировать
+                  <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${isLoadingTree ? 'animate-spin' : ''}`} />
+                  Обновить дерево
                 </button>
               </div>
 
-              {fileExtensions && (
-                <div className="px-3 py-2 border-t border-white/5">
+              {/* Дерево файлов */}
+              {projectPath && (
+                <div className="flex-1 overflow-y-auto min-h-0">
+                  {isLoadingTree ? (
+                    <div className="flex items-center justify-center py-8 text-gray-500">
+                      <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                      <span className="text-xs">Загрузка...</span>
+                    </div>
+                  ) : fileTree ? (
+                    <div className="py-1">
+                      <FileTreeItem node={fileTree} depth={0} />
+                    </div>
+                  ) : (
+                    <div className="py-4 text-center text-xs text-gray-500">
+                      Нет файлов для отображения
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Статистика и расширения */}
+              <div className="px-3 py-2 border-t border-white/5 flex-shrink-0 bg-[#0d0d12]">
+                {fileTreeStats && (
+                  <div className="text-[10px] text-gray-500 mb-1">
+                    {fileTreeStats.total_files} файлов, {fileTreeStats.total_directories} папок
+                  </div>
+                )}
+                {fileExtensions && (
                   <div className="flex flex-wrap gap-1">
                     {fileExtensions.split(',').map((ext, i) => (
                       <span key={i} className="px-1 py-0.5 text-[10px] bg-white/5 text-gray-500 rounded">
@@ -298,8 +502,8 @@ export function IDEPanel({
                       </span>
                     ))}
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           )}
         </div>

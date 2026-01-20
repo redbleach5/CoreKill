@@ -992,6 +992,152 @@ async def browse_folder(start_path: Optional[str] = None) -> Dict[str, Any]:
         }
 
 
+@router.get("/project-files")
+async def get_project_files(
+    path: str,
+    extensions: Optional[str] = None,
+    max_depth: int = 5
+) -> Dict[str, Any]:
+    """Возвращает структуру файлов проекта.
+    
+    Args:
+        path: Путь к корневой папке проекта
+        extensions: Расширения файлов через запятую (опционально, например: .py,.js,.ts)
+        max_depth: Максимальная глубина сканирования (по умолчанию 5)
+        
+    Returns:
+        Древовидная структура файлов и папок
+    """
+    import os
+    from pathlib import Path
+    
+    # Проверка существования пути
+    if not path or not os.path.isdir(path):
+        return {
+            "error": "Путь не существует или не является директорией",
+            "path": path
+        }
+    
+    # Папки которые игнорируем
+    IGNORED_DIRS = {
+        '__pycache__', '.git', '.svn', '.hg', 'node_modules', 
+        '.venv', 'venv', 'env', '.env', '.idea', '.vscode',
+        'dist', 'build', '.next', '.nuxt', 'coverage',
+        '.pytest_cache', '.mypy_cache', '__pypackages__',
+        '.tox', '.eggs', '*.egg-info', '.cache'
+    }
+    
+    # Файлы которые игнорируем
+    IGNORED_FILES = {
+        '.DS_Store', 'Thumbs.db', '.gitignore', '.gitattributes',
+        '*.pyc', '*.pyo', '*.so', '*.dylib'
+    }
+    
+    # Парсим расширения если указаны
+    allowed_extensions: set[str] | None = None
+    if extensions:
+        allowed_extensions = {ext.strip().lower() for ext in extensions.split(',')}
+        # Добавляем точку если нет
+        allowed_extensions = {ext if ext.startswith('.') else f'.{ext}' for ext in allowed_extensions}
+    
+    def should_ignore_dir(name: str) -> bool:
+        """Проверяет нужно ли игнорировать директорию."""
+        return name in IGNORED_DIRS or name.startswith('.')
+    
+    def should_ignore_file(name: str) -> bool:
+        """Проверяет нужно ли игнорировать файл."""
+        if name in IGNORED_FILES:
+            return True
+        # Проверяем паттерны с *
+        for pattern in IGNORED_FILES:
+            if pattern.startswith('*') and name.endswith(pattern[1:]):
+                return True
+        return False
+    
+    def matches_extension(name: str) -> bool:
+        """Проверяет соответствует ли файл разрешённым расширениям."""
+        if allowed_extensions is None:
+            return True
+        ext = os.path.splitext(name)[1].lower()
+        return ext in allowed_extensions
+    
+    def scan_directory(dir_path: str, current_depth: int = 0) -> Dict[str, Any]:
+        """Рекурсивно сканирует директорию."""
+        result: Dict[str, Any] = {
+            "name": os.path.basename(dir_path) or dir_path,
+            "path": dir_path,
+            "type": "directory",
+            "children": []
+        }
+        
+        if current_depth >= max_depth:
+            result["truncated"] = True
+            return result
+        
+        try:
+            entries = sorted(os.listdir(dir_path))
+        except PermissionError:
+            result["error"] = "Нет доступа"
+            return result
+        
+        dirs: list[Dict[str, Any]] = []
+        files: list[Dict[str, Any]] = []
+        
+        for entry in entries:
+            entry_path = os.path.join(dir_path, entry)
+            
+            if os.path.isdir(entry_path):
+                if not should_ignore_dir(entry):
+                    child = scan_directory(entry_path, current_depth + 1)
+                    # Добавляем только если есть файлы или поддиректории
+                    if child.get("children") or child.get("truncated"):
+                        dirs.append(child)
+            else:
+                if not should_ignore_file(entry) and matches_extension(entry):
+                    # Определяем тип файла по расширению
+                    ext = os.path.splitext(entry)[1].lower()
+                    file_info: Dict[str, Any] = {
+                        "name": entry,
+                        "path": entry_path,
+                        "type": "file",
+                        "extension": ext,
+                        "size": os.path.getsize(entry_path)
+                    }
+                    files.append(file_info)
+        
+        # Сначала папки, потом файлы (оба отсортированы по имени)
+        result["children"] = dirs + files
+        
+        return result
+    
+    tree = scan_directory(path)
+    
+    # Считаем статистику
+    def count_items(node: Dict[str, Any]) -> tuple[int, int]:
+        """Считает количество файлов и папок."""
+        files = 0
+        dirs = 0
+        if node["type"] == "file":
+            return 1, 0
+        dirs = 1
+        for child in node.get("children", []):
+            f, d = count_items(child)
+            files += f
+            dirs += d
+        return files, dirs
+    
+    total_files, total_dirs = count_items(tree)
+    
+    return {
+        "tree": tree,
+        "stats": {
+            "total_files": total_files,
+            "total_directories": total_dirs - 1,  # Не считаем корень
+            "root_path": path
+        }
+    }
+
+
 @router.get("/metrics/stages")
 async def get_stage_metrics() -> Dict[str, Any]:
     """Возвращает метрики производительности по этапам workflow.
