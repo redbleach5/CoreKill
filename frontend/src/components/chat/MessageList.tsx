@@ -220,17 +220,28 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
   const stageData = msg.metadata?.stages || stages
   const [showDetails, setShowDetails] = useState(false)
   
-  // Порядок этапов для workflow
-  const stageOrder = useMemo(() => 
-    ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'debug', 'fixing', 'reflection', 'critic', 'chat', 'greeting', 'help'],
-    []
-  )
+  // Определяем тип запроса по активным этапам
+  const isSimpleChat = useMemo(() => {
+    // Если есть chat, greeting или help этап — это простой запрос
+    return !!(stageData['chat'] || stageData['greeting'] || stageData['help'])
+  }, [stageData])
+  
+  // Порядок этапов зависит от типа запроса
+  const stageOrder = useMemo(() => {
+    if (isSimpleChat) {
+      return ['chat', 'greeting', 'help']
+    }
+    return ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'debug', 'fixing', 'reflection', 'critic']
+  }, [isSimpleChat])
   
   // Основные этапы для отображения в деталях
-  const mainStages = useMemo(() => 
-    ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic'],
-    []
-  )
+  const mainStages = useMemo(() => {
+    if (isSimpleChat) {
+      // Для простых запросов не показываем детали — только текущий статус
+      return []
+    }
+    return ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
+  }, [isSimpleChat])
   
   // Находим текущий активный этап (последний со статусом start или progress)
   const currentStage = useMemo(() => {
@@ -261,15 +272,20 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
   
   // Считаем прогресс
   const completedStages = Object.values(stageData).filter(s => s.status === 'end').length
-  const totalStages = 8 // Примерное количество основных этапов
-  const progressPercent = Math.min(100, Math.round((completedStages / totalStages) * 100))
+  const totalStages = isSimpleChat ? 1 : 8 // Для chat всего 1 этап
+  const progressPercent = isSimpleChat 
+    ? (completedStages > 0 ? 100 : 50) // Для chat: либо в процессе (50%), либо готово (100%)
+    : Math.min(100, Math.round((completedStages / totalStages) * 100))
   
   // Расчёт оставшегося времени (использует адаптивные метрики)
   const estimatedTimeLeft = useMemo(() => {
-    let remainingSeconds = 0
-    const mainStages = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
+    // Для простых chat-запросов не показываем оставшееся время
+    if (isSimpleChat) return null
     
-    for (const stage of mainStages) {
+    let remainingSeconds = 0
+    const workflowStages = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
+    
+    for (const stage of workflowStages) {
       const status = stageData[stage]
       const stageDuration = getStageDuration(stage)
       
@@ -285,7 +301,7 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
     if (remainingSeconds < 5) return null
     if (remainingSeconds < 60) return `~${Math.round(remainingSeconds)} сек`
     return `~${Math.round(remainingSeconds / 60)} мин`
-  }, [stageData])
+  }, [stageData, isSimpleChat])
 
   return (
     <div key={msg.id} className="flex gap-3">
@@ -336,14 +352,16 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
             </div>
           </div>
           
-          {/* Кнопка раскрытия деталей */}
-          <button
-            onClick={() => setShowDetails(!showDetails)}
-            className="mt-2 text-xs text-gray-500 hover:text-gray-300 transition-colors flex items-center gap-1"
-          >
-            <ChevronRight className={`w-3 h-3 transition-transform ${showDetails ? 'rotate-90' : ''}`} />
-            {showDetails ? 'Скрыть этапы' : 'Показать все этапы'}
-          </button>
+          {/* Кнопка раскрытия деталей (только для code workflow) */}
+          {!isSimpleChat && (
+            <button
+              onClick={() => setShowDetails(!showDetails)}
+              className="mt-2 text-xs text-gray-500 hover:text-gray-300 transition-colors flex items-center gap-1"
+            >
+              <ChevronRight className={`w-3 h-3 transition-transform ${showDetails ? 'rotate-90' : ''}`} />
+              {showDetails ? 'Скрыть этапы' : 'Показать все этапы'}
+            </button>
+          )}
           
           {/* Детальный список этапов */}
           {showDetails && (

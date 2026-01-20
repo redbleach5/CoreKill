@@ -1024,7 +1024,12 @@ async def stream_task_results(
                         'explain', 'tell me', 'what is', 'how does',
                         'почему', 'зачем', 'когда', 'можно ли',
                         'why', 'when', 'can you', 'should i',
-                        'посоветуй', 'подскажи', 'помоги понять'
+                        'посоветуй', 'подскажи', 'помоги понять',
+                        # Запросы актуальной информации (realtime) — это тоже chat
+                        'новост', 'событи', 'погод', 'курс', 'сегодня', 'вчера', 'завтра',
+                        'news', 'weather', 'today', 'yesterday', 'tomorrow',
+                        'что происходит', 'что случилось', 'что нового', 'какие',
+                        "what's happening", 'latest', 'current'
                     ]
                     
                     has_code_keyword = any(kw in task_lower for kw in code_keywords)

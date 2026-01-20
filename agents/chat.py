@@ -7,12 +7,15 @@
 - Кэширование ответов на типовые вопросы (FAQ)
 - Поддержка истории диалога
 - Различные стили общения
+- Автоматический веб-поиск для запросов, требующих актуальной информации
 """
 import hashlib
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.cache import get_cache
+from infrastructure.web_search import web_search
 from utils.logger import get_logger
 
 
@@ -60,6 +63,12 @@ class ChatAgent:
 - Разделяй разделы заголовками ## или ###
 - Блоки кода обрамляй тройными backticks с указанием языка
 
+## Работа с актуальной информацией:
+- Если в контексте есть данные из веб-поиска — используй ИХ для ответа
+- НЕ выдумывай новости, события, даты — только то, что есть в контексте
+- Если контекста недостаточно — честно скажи, что информации нет
+- Указывай источники если они есть в контексте
+
 ## Режим диалога — что ты ДЕЛАЕШЬ:
 - Отвечаешь на вопросы о программировании
 - Объясняешь концепции, паттерны, подходы
@@ -73,6 +82,7 @@ class ChatAgent:
 - НЕ создаёшь готовый к запуску код с полной логикой
 - НЕ пишешь тесты (это делает режим "Генерация кода")
 - НЕ выполняешь TDD workflow
+- НЕ выдумывай информацию, которой нет в контексте
 
 ## Когда пользователь просит написать полноценный код:
 Если пользователь просит создать функцию, класс, скрипт или программу — 
@@ -151,9 +161,13 @@ class ChatAgent:
         """
         history_len = len(conversation_history) if conversation_history else 0
         
-        # Проверяем кэш для типовых вопросов
+        # Проверяем, требует ли запрос актуальной информации (новости, погода и т.д.)
+        # Для таких запросов кэш не используется
+        needs_realtime = self._needs_realtime_info(message)
+        
+        # Проверяем кэш для типовых вопросов (не для realtime запросов)
         cache_key = ""
-        if use_cache:
+        if use_cache and not needs_realtime:
             cache_key = self._get_cache_key(message, history_len)
             if cache_key:
                 cache = get_cache()
@@ -166,20 +180,24 @@ class ChatAgent:
                         finish_reason="cached"
                     )
         
-        # Формируем полный промпт с историей
-        full_prompt = self._build_prompt(
+        # Если запрос требует актуальной информации — делаем веб-поиск
+        web_context = ""
+        if needs_realtime:
+            web_context = self._fetch_realtime_context(message)
+        
+        # Формируем сообщения в нативном формате для ollama.chat()
+        messages = self._build_messages(
             message=message,
             history=conversation_history,
-            system_prompt=system_prompt or self.SYSTEM_PROMPT
+            system_prompt=system_prompt or self.SYSTEM_PROMPT,
+            web_context=web_context
         )
         
         logger.info(f"💬 ChatAgent: обработка сообщения ({len(message)} символов)")
         
         try:
-            response = self.llm.generate(
-                prompt=full_prompt,
-                num_predict=self.max_tokens
-            )
+            # Используем нативный chat API — модель сама применит правильный шаблон и stop-токены
+            response = self.llm.chat(messages=messages)
             
             logger.info(f"✅ ChatAgent: получен ответ ({len(response)} символов)")
             
@@ -202,41 +220,135 @@ class ChatAgent:
                 finish_reason="error"
             )
     
-    def _build_prompt(
+    def _build_messages(
         self,
         message: str,
         history: Optional[List[Dict[str, str]]],
-        system_prompt: str
-    ) -> str:
-        """Формирует полный промпт с историей диалога.
+        system_prompt: str,
+        web_context: str = ""
+    ) -> List[Dict[str, str]]:
+        """Формирует список сообщений для нативного chat API.
+        
+        Использует стандартный формат Ollama chat API:
+        [{"role": "system/user/assistant", "content": "..."}]
+        
+        Модель сама применит правильный шаблон (Gemma, Llama, etc.)
+        и stop-токены. Это исключает проблемы с кастомной разметкой.
         
         Args:
-            message: Текущее сообщение
+            message: Текущее сообщение пользователя
             history: История диалога
             system_prompt: Системный промпт
+            web_context: Контекст из веб-поиска (для realtime запросов)
             
         Returns:
-            Полный промпт для LLM
+            Список сообщений для ollama.chat()
         """
-        parts = [f"<system>\n{system_prompt}\n</system>\n"]
+        messages: List[Dict[str, str]] = []
+        
+        # Системный промпт с веб-контекстом если есть
+        full_system = system_prompt
+        if web_context:
+            today = datetime.now().strftime("%d %B %Y")
+            full_system += f"\n\n---\nСегодняшняя дата: {today}\n\nАктуальная информация из веб-поиска:\n{web_context}"
+        
+        messages.append({"role": "system", "content": full_system})
         
         # Добавляем историю диалога
         if history:
             for msg in history:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
-                if role == "user":
-                    parts.append(f"<user>\n{content}\n</user>\n")
-                elif role == "assistant":
-                    parts.append(f"<assistant>\n{content}\n</assistant>\n")
-                elif role == "system":
-                    parts.append(f"<context>\n{content}\n</context>\n")
+                # Ollama chat API поддерживает только user/assistant/system
+                if role in ("user", "assistant"):
+                    messages.append({"role": role, "content": content})
         
-        # Добавляем текущее сообщение
-        parts.append(f"<user>\n{message}\n</user>\n")
-        parts.append("<assistant>\n")
+        # Текущее сообщение пользователя
+        messages.append({"role": "user", "content": message})
         
-        return "".join(parts)
+        return messages
+    
+    def _needs_realtime_info(self, message: str) -> bool:
+        """Определяет, требует ли запрос актуальной информации из интернета.
+        
+        Запросы о новостях, событиях, погоде, курсах валют и т.д.
+        требуют веб-поиска, так как LLM не имеет актуальных данных.
+        
+        Args:
+            message: Сообщение пользователя
+            
+        Returns:
+            True если нужен веб-поиск для актуальной информации
+        """
+        message_lower = message.lower()
+        
+        # Ключевые слова, указывающие на запрос актуальной информации
+        realtime_keywords_ru = [
+            "новост", "событи", "сегодня", "вчера", "сейчас", "последн",
+            "актуальн", "свежи", "текущ", "погод", "курс валют", "курс доллар",
+            "курс евро", "биткоин", "криптовалют", "акци", "биржа", "индекс",
+            "что происходит", "что случилось", "что нового"
+        ]
+        
+        realtime_keywords_en = [
+            "news", "today", "yesterday", "current", "latest", "recent",
+            "weather", "stock", "bitcoin", "crypto", "exchange rate",
+            "what's happening", "what happened", "breaking"
+        ]
+        
+        # Проверяем наличие ключевых слов
+        for keyword in realtime_keywords_ru + realtime_keywords_en:
+            if keyword in message_lower:
+                logger.info(f"🌐 Обнаружен запрос актуальной информации (ключевое слово: {keyword})")
+                return True
+        
+        return False
+    
+    def _fetch_realtime_context(self, message: str) -> str:
+        """Выполняет веб-поиск для получения актуальной информации.
+        
+        Args:
+            message: Запрос пользователя
+            
+        Returns:
+            Форматированный контекст из веб-поиска или пустая строка
+        """
+        try:
+            logger.info(f"🌐 Выполняю веб-поиск для: {message[:50]}...")
+            
+            # Формируем поисковый запрос
+            # Добавляем текущую дату для лучших результатов
+            today = datetime.now().strftime("%Y")
+            search_query = f"{message} {today}"
+            
+            results = web_search(search_query, max_results=4, timeout=10)
+            
+            if not results:
+                logger.warning("⚠️ Веб-поиск не вернул результатов")
+                return ""
+            
+            logger.info(f"✅ Получено {len(results)} результатов веб-поиска")
+            
+            # Форматируем результаты
+            formatted_parts = []
+            for i, result in enumerate(results, 1):
+                title = result.get("title", "").strip()
+                url = result.get("url", "").strip()
+                snippet = result.get("snippet", "").strip()
+                
+                if snippet:
+                    if title:
+                        formatted_parts.append(f"{i}. **{title}**")
+                    formatted_parts.append(f"   {snippet}")
+                    if url:
+                        formatted_parts.append(f"   Источник: {url}")
+                    formatted_parts.append("")
+            
+            return "\n".join(formatted_parts).strip()
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка веб-поиска: {e}", error=e)
+            return ""
     
     def explain_code(self, code: str, question: Optional[str] = None) -> ChatResponse:
         """Объясняет код.
