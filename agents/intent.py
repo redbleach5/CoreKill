@@ -33,6 +33,7 @@ class IntentResult:
         Логика выбора режима:
         - chat: диалог, объяснения, помощь (без генерации кода)
         - code: создание/изменение кода через TDD workflow
+        - analyze: анализ проекта (workflow без генерации кода)
         
         Важно: debug и optimize могут быть как chat (обсуждение), так и code (исправление).
         По умолчанию для них выбираем code, но эвристика в API может переопределить.
@@ -47,9 +48,16 @@ class IntentResult:
         # По умолчанию отправляем в code, но API может переопределить на chat
         ambiguous_types = {"debug", "optimize"}
         
+        # Типы для анализа (workflow без генерации кода, но с индексацией проекта)
+        analyze_types = {"analyze"}
+        
         # Определяем режим на основе типа намерения
         if self.type in chat_types:
             self.recommended_mode = "chat"
+            self.requires_code_generation = False
+        elif self.type in analyze_types:
+            # Анализ проекта — запускаем workflow для сбора контекста, но без генерации кода
+            self.recommended_mode = "analyze"
             self.requires_code_generation = False
         elif self.type in code_generation_types:
             self.recommended_mode = "code"
@@ -77,7 +85,8 @@ class IntentAgent:
         "optimize": "Оптимизировать производительность, ускорить код",
         "explain": "Объяснить как работает код, документация",
         "test": "Написать тесты, проверить код",
-        "refactor": "Рефакторинг, улучшение структуры без изменения функциональности"
+        "refactor": "Рефакторинг, улучшение структуры без изменения функциональности",
+        "analyze": "Анализ проекта, кодовой базы, структуры, архитектуры, обзор кода"
     }
     
     # Единый список приветствий (используется в is_greeting_fast и _is_greeting)
@@ -232,6 +241,7 @@ RULES:
 - "greeting" = only simple greetings like "привет", "hello"  
 - "create" = specific task to generate code: "напиши X", "создай Y", "make Z"
 - "debug" = fix SPECIFIC code with errors
+- "analyze" = review/analyze project, codebase, architecture: "проанализируй проект", "review my code", "дай обзор кодовой базы", "покажи структуру проекта"
 
 EXAMPLES:
 - "напиши функцию сортировки" -> intent: create, complexity: simple
@@ -240,6 +250,10 @@ EXAMPLES:
 - "напиши игру тетрис" -> intent: create, complexity: complex
 - "создай веб-сервер" -> intent: create, complexity: medium
 - "сделай парсер JSON" -> intent: create, complexity: simple
+- "проанализируй мой проект" -> intent: analyze, complexity: complex
+- "проанализируй проект" -> intent: analyze, complexity: complex
+- "дай обзор кодовой базы" -> intent: analyze, complexity: complex
+- "review this project" -> intent: analyze, complexity: complex
 
 JSON response: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
 JSON:"""
@@ -272,7 +286,8 @@ JSON:"""
             "optimize": "Оптимизация производительности",
             "explain": "Объяснение работы кода",
             "test": "Написание тестов",
-            "refactor": "Рефакторинг кода"
+            "refactor": "Рефакторинг кода",
+            "analyze": "Анализ проекта/кодовой базы"
         }
         
         # Маппинг строковых значений complexity в enum

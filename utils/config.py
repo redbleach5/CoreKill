@@ -129,6 +129,53 @@ class Config:
         """Включено ли роевое использование моделей."""
         return self._config_data.get("default", {}).get("enable_model_roster", False)
     
+    # === Reasoning Models ===
+    
+    @property
+    def prefer_reasoning_models(self) -> bool:
+        """Предпочитать reasoning модели (DeepSeek-R1, QwQ) для complex задач."""
+        return self._config_data.get("reasoning", {}).get("prefer_reasoning_models", True)
+    
+    @property
+    def reasoning_show_thinking(self) -> bool:
+        """Показывать <think> блоки в UI."""
+        return self._config_data.get("reasoning", {}).get("show_thinking", False)
+    
+    @property
+    def reasoning_min_quality(self) -> float:
+        """Минимальное качество для reasoning модели."""
+        return self._config_data.get("reasoning", {}).get("min_quality", 0.7)
+    
+    @property
+    def reasoning_prefer_for_task_types(self) -> list[str]:
+        """Типы задач где предпочтительны reasoning модели."""
+        return self._config_data.get("reasoning", {}).get(
+            "prefer_for_task_types", 
+            ["debug", "refactor", "analyze"]
+        )
+    
+    # === Structured Output ===
+    
+    @property
+    def structured_output_enabled(self) -> bool:
+        """Включён ли structured output через Pydantic."""
+        return self._config_data.get("structured_output", {}).get("enabled", True)
+    
+    @property
+    def structured_output_max_retries(self) -> int:
+        """Количество retry при ошибке валидации."""
+        return self._config_data.get("structured_output", {}).get("max_retries", 2)
+    
+    @property
+    def structured_output_enabled_agents(self) -> list[str]:
+        """Агенты которые используют structured output."""
+        return self._config_data.get("structured_output", {}).get("enabled_agents", ["intent"])
+    
+    @property
+    def structured_output_fallback(self) -> bool:
+        """Fallback на ручной парсинг если structured output не работает."""
+        return self._config_data.get("structured_output", {}).get("fallback_to_manual_parsing", True)
+    
     @property
     def output_dir(self) -> str:
         """Директория для сохранения артефактов."""

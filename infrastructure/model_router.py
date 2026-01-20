@@ -16,6 +16,8 @@ from utils.model_checker import (
     get_coder_model,
     get_all_available_models,
     get_best_model_for_complexity,
+    get_reasoning_model,
+    get_all_reasoning_models,
     scan_available_models,
     invalidate_models_cache,
     TaskComplexity,
@@ -34,6 +36,7 @@ class ModelSelection:
     confidence: float = 1.0
     reason: str = ""  # Почему выбрана эта модель
     metadata: Optional[Dict[str, Any]] = None
+    is_reasoning: bool = False  # Является ли модель reasoning (DeepSeek-R1, QwQ)
 
 
 @dataclass
@@ -126,6 +129,7 @@ class SmartModelRouter(ModelRouter):
     Особенности:
     - Динамическое сканирование моделей при старте
     - Выбор модели по сложности задачи
+    - Приоритет reasoning моделей (DeepSeek-R1, QwQ) для complex задач
     - Приоритет качества для сложных задач
     - Приоритет скорости для простых задач
     """
@@ -137,17 +141,28 @@ class SmartModelRouter(ModelRouter):
         TaskComplexity.COMPLEX: 0.7,  # Минимум 7B coder или 13B+
     }
     
-    def __init__(self, enable_roster: bool = False) -> None:
+    def __init__(self, enable_roster: bool = False, prefer_reasoning: bool = True) -> None:
         """Инициализация умного роутера.
         
         Args:
             enable_roster: Включить поддержку роя моделей (по умолчанию False)
+            prefer_reasoning: Предпочитать reasoning модели для complex задач
         """
         self.enable_roster = enable_roster
+        self.prefer_reasoning = prefer_reasoning
         self.config = get_config()
         # Сканируем модели при инициализации
         self._models = scan_available_models(force_refresh=True)
-        logger.info(f"🔍 SmartModelRouter инициализирован, найдено {len(self._models)} моделей")
+        
+        # Проверяем наличие reasoning моделей
+        reasoning_models = get_all_reasoning_models()
+        reasoning_count = len(reasoning_models)
+        
+        logger.info(
+            f"🔍 SmartModelRouter инициализирован: "
+            f"{len(self._models)} моделей, "
+            f"{reasoning_count} reasoning"
+        )
     
     def refresh_models(self) -> List[ModelInfo]:
         """Принудительно обновляет список доступных моделей."""
@@ -231,19 +246,26 @@ class SmartModelRouter(ModelRouter):
         self,
         complexity: TaskComplexity,
         task_type: str = "coding",
-        preferred_model: Optional[str] = None
+        preferred_model: Optional[str] = None,
+        prefer_reasoning: Optional[bool] = None
     ) -> ModelSelection:
         """Выбирает оптимальную модель на основе сложности задачи.
         
         Логика:
         - SIMPLE: быстрая модель (1.5B-4B), скорость важнее качества
         - MEDIUM: баланс (7B coder), хорошее качество и приемлемая скорость
-        - COMPLEX: максимальное качество (7B+ coder или 13B+), качество важнее скорости
+        - COMPLEX: reasoning модель (DeepSeek-R1, QwQ) если доступна, иначе 7B+ coder
         
         Учитывает hardware лимиты из конфига:
         - max_model_vram_gb: максимальный размер модели
         - allow_heavy_models: разрешить 30B+ модели
         - allow_ultra_models: разрешить 100B+ модели
+        
+        Args:
+            complexity: Сложность задачи
+            task_type: Тип задачи (coding, testing, debug, etc.)
+            preferred_model: Предпочтительная модель (если указана и подходит)
+            prefer_reasoning: Предпочитать reasoning модели (по умолчанию self.prefer_reasoning)
         """
         # Обновляем модели для актуальности
         self._models = scan_available_models()
@@ -257,6 +279,19 @@ class SmartModelRouter(ModelRouter):
         if not available_models:
             logger.warning("⚠️ Все модели отфильтрованы по hardware лимитам, используем все доступные")
             available_models = self._models
+        
+        # Определяем, нужно ли предпочитать reasoning модели
+        use_reasoning = prefer_reasoning if prefer_reasoning is not None else self.prefer_reasoning
+        
+        # Для COMPLEX задач пробуем сначала reasoning модель
+        if complexity == TaskComplexity.COMPLEX and use_reasoning:
+            reasoning_selection = self._try_select_reasoning_model(available_models)
+            if reasoning_selection:
+                logger.info(
+                    f"🧠 Выбрана reasoning модель {reasoning_selection.model} "
+                    f"для complex задачи (рассуждает в <think> блоках)"
+                )
+                return reasoning_selection
         
         # Если указана предпочтительная модель, проверяем её качество
         if preferred_model and preferred_model in available_models:
@@ -272,7 +307,8 @@ class SmartModelRouter(ModelRouter):
                     model=preferred_model,
                     confidence=0.95,
                     reason=f"Предпочтительная модель подходит для {complexity.value} задачи",
-                    metadata={"quality": model_info.estimated_quality, "tier": model_info.tier}
+                    metadata={"quality": model_info.estimated_quality, "tier": model_info.tier},
+                    is_reasoning=model_info.is_reasoning
                 )
             else:
                 logger.warning(
@@ -291,17 +327,20 @@ class SmartModelRouter(ModelRouter):
             model_info = available_models.get(best_model)
             quality = model_info.estimated_quality if model_info else 0.5
             tier = model_info.tier if model_info else "unknown"
+            is_reasoning = model_info.is_reasoning if model_info else False
             
             logger.info(
                 f"🤖 Выбрана модель {best_model} для {complexity.value} задачи "
-                f"(качество: {quality:.2f}, tier: {tier})"
+                f"(качество: {quality:.2f}, tier: {tier}"
+                f"{', reasoning' if is_reasoning else ''})"
             )
             
             return ModelSelection(
                 model=best_model,
                 confidence=0.9,
                 reason=f"Оптимальная модель для {complexity.value} задачи",
-                metadata={"quality": quality, "complexity": complexity.value, "tier": tier}
+                metadata={"quality": quality, "complexity": complexity.value, "tier": tier},
+                is_reasoning=is_reasoning
             )
         
         # Крайний fallback
@@ -310,6 +349,44 @@ class SmartModelRouter(ModelRouter):
             model=first_model,
             confidence=0.5,
             reason="Fallback: первая доступная модель"
+        )
+    
+    def _try_select_reasoning_model(
+        self, 
+        available_models: Dict[str, ModelInfo]
+    ) -> Optional[ModelSelection]:
+        """Пытается выбрать reasoning модель (DeepSeek-R1, QwQ).
+        
+        Args:
+            available_models: Доступные модели после фильтрации
+            
+        Returns:
+            ModelSelection с reasoning моделью или None
+        """
+        min_quality = self.MIN_QUALITY_THRESHOLDS[TaskComplexity.COMPLEX]
+        
+        # Ищем reasoning модели среди доступных
+        reasoning_models = [
+            m for m in available_models.values()
+            if m.is_reasoning and m.estimated_quality >= min_quality
+        ]
+        
+        if not reasoning_models:
+            return None
+        
+        # Выбираем лучшую reasoning модель
+        best = max(reasoning_models, key=lambda m: m.estimated_quality)
+        
+        return ModelSelection(
+            model=best.name,
+            confidence=0.95,
+            reason="Reasoning модель для complex задачи (встроенный CoT)",
+            metadata={
+                "quality": best.estimated_quality,
+                "tier": best.tier,
+                "reasoning": True
+            },
+            is_reasoning=True
         )
     
     def _filter_by_hardware_limits(
@@ -430,9 +507,13 @@ def get_model_router() -> ModelRouter:
     
     if _default_router is None:
         config = get_config()
-        # Проверяем конфиг на наличие настройки роя моделей
+        # Проверяем конфиг на наличие настройки роя моделей и reasoning
         enable_roster = getattr(config, 'enable_model_roster', False)
-        _default_router = SmartModelRouter(enable_roster=enable_roster)
+        prefer_reasoning = getattr(config, 'prefer_reasoning_models', True)
+        _default_router = SmartModelRouter(
+            enable_roster=enable_roster,
+            prefer_reasoning=prefer_reasoning
+        )
     
     return _default_router
 

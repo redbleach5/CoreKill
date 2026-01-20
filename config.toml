@@ -43,6 +43,42 @@ output_dir = "output"
 # Роевое использование моделей (будущее расширение)
 enable_model_roster = false
 
+# === Reasoning Models ===
+# Настройки для моделей с встроенным chain-of-thought (DeepSeek-R1, QwQ)
+
+[reasoning]
+# Предпочитать reasoning модели для complex задач
+# Если true, SmartModelRouter выберет DeepSeek-R1/QwQ вместо qwen2.5-coder для сложных задач
+prefer_reasoning_models = true
+
+# Показывать <think> блоки в UI (для отладки)
+# Если true, рассуждения модели будут отображаться пользователю
+show_thinking = false
+
+# Минимальное качество для использования reasoning модели (0.0-1.0)
+min_quality = 0.7
+
+# Типы задач где предпочтительны reasoning модели
+# complex задачи автоматически используют reasoning, но можно расширить
+prefer_for_task_types = ["debug", "refactor", "analyze"]
+
+# === Structured Output ===
+# Настройки для Pydantic валидации ответов LLM
+
+[structured_output]
+# Включить structured output через JSON Schema + Pydantic
+enabled = true
+
+# Количество retry при ошибке валидации
+max_retries = 2
+
+# Агенты которые используют structured output
+# По мере миграции сюда добавляются агенты
+enabled_agents = ["intent"]
+
+# Fallback на ручной парсинг если structured output не работает
+fallback_to_manual_parsing = true
+
 # === LLM Generation Limits ===
 # Лимиты токенов для разных этапов генерации
 # Меньшие значения = быстрее, но менее детально

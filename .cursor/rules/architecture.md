@@ -53,3 +53,23 @@ llm = create_llm_for_stage(stage="coding", model="qwen2.5-coder:7b")
 | `infrastructure/task_checkpointer.py` | Сохранение состояния задач |
 | `backend/sse_manager.py` | Server-Sent Events |
 | `utils/config.py` | Конфигурация из config.toml |
+
+## Передовая архитектура (2026)
+
+См. `future/ROADMAP_2026.md` для плана перехода на:
+
+| Технология | Статус | Документ |
+|------------|--------|----------|
+| Reasoning Models (DeepSeek-R1) | 🚀 Приоритет | `future/reasoning_models.md` |
+| Structured Output (Pydantic) | 🚀 Приоритет | `future/structured_output.md` |
+| Compiler-in-the-Loop | 🚀 Приоритет | `future/compiler_in_the_loop.md` |
+| Code Retrieval (Few-shot) | 📋 Планируется | `future/code_retrieval.md` |
+| Multi-Agent Debate | 📋 Планируется | `future/advanced_architecture_2026.md` |
+| AST Analysis | 📋 Планируется | `future/context_engine_ast_parsing.md` |
+
+**Принципы новой архитектуры:**
+- Reasoning models вместо prompt engineering
+- Structured output вместо хрупкого парсинга
+- Немедленная валидация вместо отложенной
+- Примеры кода вместо инструкций
+- AST парсинг где LLM не нужен

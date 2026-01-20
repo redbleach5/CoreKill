@@ -75,11 +75,16 @@ HELP_MESSAGE = (
     "  • Генерация pytest тестов (TDD)\n"
     "  • Валидация через mypy, bandit\n"
     "  • Автоматическое исправление ошибок\n\n"
+    "🔍 **Анализ проекта:**\n"
+    "  • Обзор структуры и архитектуры\n"
+    "  • Анализ кодовой базы\n"
+    "  • Выявление проблемных мест\n\n"
     "💡 **Как использовать:**\n"
     "Просто опишите задачу на естественном языке, например:\n"
     "  • «напиши функцию сортировки»\n"
     "  • «создай калькулятор»\n"
-    "  • «сделай парсер JSON»\n\n"
+    "  • «сделай парсер JSON»\n"
+    "  • «проанализируй проект»\n\n"
     "Я понимаю русский и английский. Даже если вы напечатали в неправильной раскладке — я пойму! 😊"
 )
 
@@ -90,6 +95,180 @@ from backend.dependencies import get_memory_agent as _get_memory_agent
 
 
 # TaskRequest импортирован из backend.types
+
+
+async def run_analyze_stream(
+    task: str,
+    model: str,
+    temperature: float,
+    project_path: Optional[str] = None,
+    file_extensions: Optional[List[str]] = None,
+    conversation_id: Optional[str] = None
+) -> AsyncGenerator[str, None]:
+    """Обрабатывает запрос на анализ проекта.
+    
+    Workflow:
+    1. Индексирует кодовую базу через ContextEngine
+    2. Собирает контекст релевантных файлов
+    3. Генерирует отчёт через ChatAgent
+    
+    Args:
+        task: Запрос пользователя на анализ
+        model: Модель Ollama
+        temperature: Температура генерации
+        project_path: Путь к проекту для анализа
+        file_extensions: Расширения файлов для индексации
+        conversation_id: ID диалога для сохранения контекста
+        
+    Yields:
+        SSE события с результатами анализа
+    """
+    import uuid
+    from agents.researcher import ResearcherAgent
+    
+    task_id = str(uuid.uuid4())
+    conv_id = conversation_id or task_id
+    
+    config = get_config()
+    
+    # Проверяем, указан ли путь к проекту
+    if not project_path:
+        logger.warning("⚠️ Не указан путь к проекту для анализа")
+        yield await SSEManager.stream_error(
+            stage="analyze",
+            error_message="Для анализа необходимо выбрать папку проекта. Используйте кнопку 'Выбрать папку' в IDE панели."
+        )
+        return
+    
+    # Отправляем stage_start для intent
+    yield await SSEManager.stream_stage_start(
+        stage="intent",
+        message="Определяю намерение..."
+    )
+    await asyncio.sleep(0.02)
+    
+    yield await SSEManager.stream_stage_end(
+        stage="intent",
+        message="Намерение определено: analyze",
+        result={"type": "analyze", "confidence": 0.95}
+    )
+    await asyncio.sleep(0.02)
+    
+    # Stage: indexing - индексация проекта
+    yield await SSEManager.stream_stage_start(
+        stage="indexing",
+        message=f"Индексирую проект: {project_path}..."
+    )
+    await asyncio.sleep(0.02)
+    
+    try:
+        # Собираем контекст из проекта
+        researcher = ResearcherAgent()
+        
+        codebase_context = await asyncio.to_thread(
+            researcher.research,
+            query=task,
+            intent_type="analyze",
+            disable_web_search=True,
+            project_path=project_path,
+            file_extensions=file_extensions or [".py"]
+        )
+        
+        if not codebase_context:
+            logger.warning("⚠️ Не удалось собрать контекст из проекта")
+            yield await SSEManager.stream_stage_end(
+                stage="indexing",
+                message="Проект проиндексирован, но релевантный контекст не найден",
+                result={"context_length": 0}
+            )
+        else:
+            yield await SSEManager.stream_stage_end(
+                stage="indexing",
+                message=f"Проект проиндексирован ({len(codebase_context)} символов контекста)",
+                result={"context_length": len(codebase_context)}
+            )
+        await asyncio.sleep(0.02)
+        
+        # Stage: analysis - генерация отчёта
+        yield await SSEManager.stream_stage_start(
+            stage="analysis",
+            message="Анализирую кодовую базу..."
+        )
+        await asyncio.sleep(0.02)
+        
+        # Выбираем модель через SmartModelRouter
+        router = get_model_router()
+        try:
+            model_selection = router.select_model_for_complexity(
+                complexity=TaskComplexity.COMPLEX,
+                task_type="chat"
+            )
+            analyze_model = model_selection.model
+            logger.info(f"🤖 Модель для анализа: {analyze_model}")
+        except RuntimeError:
+            analyze_model = model or config.default_model
+        
+        # Генерируем отчёт через ChatAgent
+        chat_agent = get_chat_agent(model=analyze_model, temperature=temperature)
+        
+        analysis_response = await asyncio.to_thread(
+            chat_agent.analyze_project,
+            task=task,
+            codebase_context=codebase_context or "Контекст не найден",
+            project_path=project_path
+        )
+        
+        analysis_text = analysis_response.content
+        
+        yield await SSEManager.stream_stage_end(
+            stage="analysis",
+            message=analysis_text,
+            result={
+                "type": "analyze",
+                "analysis": analysis_text,
+                "model_used": analysis_response.model_used
+            }
+        )
+        await asyncio.sleep(0.02)
+        
+        # Сохраняем в историю диалога
+        conv_memory = get_conversation_memory()
+        conv_memory.add_message(conv_id, "user", task)
+        conv_memory.add_message(conv_id, "assistant", analysis_text)
+        
+        # Финальный результат
+        yield await SSEManager.stream_final_result(
+            task_id=task_id,
+            results={
+                "task": task,
+                "intent": {
+                    "type": "analyze",
+                    "confidence": 0.95,
+                    "description": "Анализ проекта"
+                },
+                "analysis": analysis_text,
+                "context_length": len(codebase_context) if codebase_context else 0,
+                "project_path": project_path,
+                "conversation_id": conv_id
+            },
+            metrics={
+                "planning": 0.0,
+                "research": 1.0,
+                "testing": 0.0,
+                "coding": 0.0,
+                "overall": 0.8
+            }
+        )
+        await asyncio.sleep(0.1)
+        
+        logger.info(f"✅ Анализ проекта завершён ({len(analysis_text)} символов)")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка анализа проекта: {e}", error=e)
+        yield await SSEManager.stream_error(
+            stage="analyze",
+            error_message=f"Ошибка анализа проекта: {str(e)}"
+        )
 
 
 async def run_chat_stream(
@@ -445,7 +624,7 @@ async def run_workflow_stream(
                         yield event2
                         logger.info(f"✅ Отправлено stage_end, длина: {len(event2)}")
                         
-                        # Если greeting или help, отправляем специальное сообщение и завершаем
+                        # Если greeting или help (но НЕ analyze), отправляем специальное сообщение и завершаем
                         if intent_result.type in ("greeting", "help"):
                                 message = GREETING_MESSAGE if intent_result.type == "greeting" else HELP_MESSAGE
                                 stage_name = intent_result.type
@@ -1278,12 +1457,26 @@ async def stream_task_results(
                     has_code_keyword = any(kw in task_lower for kw in code_keywords)
                     has_chat_keyword = any(kw in task_lower for kw in chat_keywords)
                     
+                    # Ключевые слова анализа проекта
+                    analyze_keywords = [
+                        'проанализируй', 'анализ', 'обзор', 'структур', 'архитектур',
+                        'analyze', 'review', 'overview', 'structure', 'architecture',
+                        'покажи проект', 'изучи проект', 'посмотри проект'
+                    ]
+                    has_analyze_keyword = any(kw in task_lower for kw in analyze_keywords)
+                    
                     # Если есть chat-ключевые слова и НЕТ code-ключевых → диалог
-                    if has_chat_keyword and not has_code_keyword:
+                    if has_chat_keyword and not has_code_keyword and not has_analyze_keyword:
                         selected_mode = "chat"
                         detected_complexity = intent_agent._estimate_complexity_heuristic(task)
                         detected_intent_type = "explain"
                         logger.info(f"💬 Обнаружены chat-ключевые слова → chat + {detected_complexity.value}")
+                    elif has_analyze_keyword and not has_code_keyword:
+                        # Анализ проекта — специальный режим
+                        selected_mode = "analyze"
+                        detected_complexity = TaskComplexity.COMPLEX
+                        detected_intent_type = "analyze"
+                        logger.info(f"🔍 Обнаружены analyze-ключевые слова → analyze + {detected_complexity.value}")
                     elif has_code_keyword:
                         selected_mode = "code"
                         detected_complexity = intent_agent._estimate_complexity_heuristic(task)
@@ -1300,6 +1493,12 @@ async def stream_task_results(
                             detected_complexity = TaskComplexity.MEDIUM
                             logger.info(f"📊 Explain intent повышен до MEDIUM")
                         
+                        # Для analyze intent используем analyze режим
+                        if intent_result.type == "analyze":
+                            selected_mode = "analyze"
+                            detected_complexity = TaskComplexity.COMPLEX
+                            logger.info(f"🔍 Analyze intent → analyze + {detected_complexity.value}")
+                        
                         logger.info(f"🧠 LLM определение: {intent_result.type} → {selected_mode} + {detected_complexity.value}")
             
             logger.info(f"🎯 Выбран режим: {selected_mode} (запрошен: {mode})")
@@ -1313,6 +1512,16 @@ async def stream_task_results(
                     conversation_id=conversation_id,
                     task_complexity=detected_complexity,
                     intent_type=detected_intent_type
+                )
+            elif detected_intent_type == "analyze" or selected_mode == "analyze":
+                # Режим анализа проекта — собираем контекст и генерируем отчёт
+                stream_func = run_analyze_stream(
+                    task=task,
+                    model=model,
+                    temperature=temperature,
+                    project_path=project_path,
+                    file_extensions=parsed_extensions,
+                    conversation_id=conversation_id
                 )
             else:  # code или другой режим с workflow
                 stream_func = run_workflow_stream(

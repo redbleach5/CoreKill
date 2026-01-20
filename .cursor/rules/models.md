@@ -8,7 +8,35 @@
 |-----------|--------|---------------|
 | SIMPLE | phi3:mini, tinyllama | Intent, короткие ответы |
 | MEDIUM | qwen2.5-coder:7b | Код, тесты, планы |
-| COMPLEX | codellama:13b, deepseek-coder | Сложные задачи |
+| COMPLEX | deepseek-r1, qwq (reasoning) | Сложные задачи с рассуждениями |
+| COMPLEX (fallback) | codellama:13b, deepseek-coder | Если нет reasoning моделей |
+
+## Reasoning Models (DeepSeek-R1, QwQ)
+
+Reasoning модели имеют встроенный chain-of-thought и рассуждают в `<think>` блоках.
+
+**Преимущества:**
+- Сами разбивают задачу на шаги
+- Лучше справляются со сложными задачами
+- Не требуют промптов "think step by step"
+
+**Настройка в config.toml:**
+```toml
+[reasoning]
+prefer_reasoning_models = true  # Предпочитать для COMPLEX задач
+show_thinking = false           # Показывать <think> блоки в UI
+```
+
+**Парсинг ответа:**
+```python
+from infrastructure.reasoning_utils import parse_reasoning_response
+
+response = llm.generate(prompt)
+parsed = parse_reasoning_response(response)
+
+print(parsed.thinking)  # Рассуждения из <think> блока
+print(parsed.answer)    # Финальный ответ
+```
 
 ## Таймауты по этапам (config.toml)
 
@@ -47,6 +75,37 @@ llm = create_llm_for_stage(
     model="qwen2.5-coder:7b",
     temperature=0.25
 )
+```
+
+## Structured Output (Pydantic)
+
+Для гарантированного формата ответа используй `generate_structured()`:
+
+```python
+from models import IntentResponse
+
+response = llm.generate_structured(
+    prompt="Classify: напиши функцию",
+    response_model=IntentResponse
+)
+
+print(response.intent)       # "create" — типизировано
+print(response.confidence)   # 0.95 — валидировано
+```
+
+**Доступные модели:**
+- `IntentResponse` — классификация намерений
+- `PlanResponse` — план реализации
+- `DebugResponse` — анализ ошибок
+- `CriticResponse` — критический анализ
+- `AnalyzeResponse` — анализ проекта
+
+**Настройка в config.toml:**
+```toml
+[structured_output]
+enabled = true
+max_retries = 2
+fallback_to_manual_parsing = true
 ```
 
 ## Обработка таймаутов

@@ -114,3 +114,14 @@ class TestIntentAgent:
         # Объяснение → chat
         explain = IntentResult(type="explain", confidence=1.0, description="Test")
         assert explain.recommended_mode == "chat"
+        
+        # Анализ проекта → analyze
+        analyze = IntentResult(type="analyze", confidence=1.0, description="Test")
+        assert analyze.recommended_mode == "analyze"
+        assert analyze.requires_code_generation is False
+    
+    def test_intent_types_include_analyze(self):
+        """Тест наличия типа analyze в INTENT_TYPES."""
+        assert "analyze" in IntentAgent.INTENT_TYPES
+        assert "analyze" in IntentAgent.INTENT_TYPES.get("analyze", "").lower() or \
+               "анализ" in IntentAgent.INTENT_TYPES.get("analyze", "").lower()

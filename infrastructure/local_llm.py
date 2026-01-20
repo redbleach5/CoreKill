@@ -8,15 +8,26 @@
 - Настраивается через config.toml [ollama] секцию
 - Для связи между сетями рекомендуется Tailscale (работает в РФ)
 
+Structured Output:
+- generate_structured() возвращает Pydantic модели с гарантированным форматом
+- Использует format="json" Ollama для принудительного JSON
+
+Reasoning Models:
+- Поддержка DeepSeek-R1, QwQ с <think> блоками
+- Автоматический парсинг reasoning через reasoning_utils
+
 Асинхронный режим использует asyncio.to_thread() для совместимости с существующим кодом,
 а также может использовать httpx через OllamaConnectionPool для лучшей производительности.
 """
 import asyncio
+import json
 import os
 import ollama
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Type, TypeVar
 import time
 import concurrent.futures
+
+from pydantic import BaseModel, ValidationError
 
 from utils.logger import get_logger
 
@@ -53,6 +64,15 @@ _configure_ollama_host()
 class LLMTimeoutError(Exception):
     """Исключение для таймаута LLM запроса."""
     pass
+
+
+class StructuredOutputError(Exception):
+    """Исключение при ошибке structured output."""
+    pass
+
+
+# TypeVar для generic generate_structured
+T = TypeVar('T', bound=BaseModel)
 
 
 class LocalLLM:
@@ -107,6 +127,7 @@ class LocalLLM:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         num_predict: int = 4096,
+        format: Optional[str] = None,
         **kwargs: Any
     ) -> str:
         """Генерирует текст на основе промпта.
@@ -116,6 +137,7 @@ class LocalLLM:
             temperature: Температура генерации (переопределяет значение по умолчанию)
             top_p: Параметр top_p (переопределяет значение по умолчанию)
             num_predict: Максимальное количество токенов для генерации
+            format: Формат ответа ("json" для принудительного JSON)
             **kwargs: Дополнительные параметры для ollama.generate
             
         Returns:
@@ -151,14 +173,27 @@ class LocalLLM:
                 
                 start_time = time.time()
                 
+                # Подготавливаем аргументы для ollama.generate
+                generate_kwargs = {
+                    "model": self.model,
+                    "prompt": prompt,
+                    "options": options,
+                }
+                
+                # Добавляем format если указан (для JSON output)
+                if format:
+                    generate_kwargs["format"] = format
+                
+                # Добавляем остальные kwargs (кроме options и format)
+                for k, v in kwargs.items():
+                    if k not in ("options", "format"):
+                        generate_kwargs[k] = v
+                
                 # Вызов с timeout через ThreadPoolExecutor (работает в любом потоке)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
                         ollama.generate,
-                        model=self.model,
-                        prompt=prompt,
-                        options=options,
-                        **{k: v for k, v in kwargs.items() if k != "options"}
+                        **generate_kwargs
                     )
                     
                     try:
@@ -275,6 +310,170 @@ class LocalLLM:
         error_msg = f"Ошибка Ollama chat после {self.max_retries + 1} попыток: {last_error}"
         logger.error(f"❌ {error_msg}", error=last_error)
         return ""
+    
+    # === STRUCTURED OUTPUT ===
+    # Использует Pydantic для гарантированного формата ответов
+    
+    def generate_structured(
+        self,
+        prompt: str,
+        response_model: Type[T],
+        num_predict: int = 1024,
+        retries: int = 2
+    ) -> T:
+        """Генерирует структурированный ответ с Pydantic валидацией.
+        
+        Использует format="json" Ollama для принудительного JSON формата,
+        затем валидирует через Pydantic модель.
+        
+        Args:
+            prompt: Текст промпта
+            response_model: Pydantic модель для валидации ответа
+            num_predict: Максимум токенов
+            retries: Количество повторов при ошибке валидации
+            
+        Returns:
+            Провалидированный Pydantic объект
+            
+        Raises:
+            StructuredOutputError: Если не удалось получить валидный ответ
+            
+        Example:
+            from models import IntentResponse
+            
+            response = llm.generate_structured(
+                "Classify: напиши функцию",
+                IntentResponse
+            )
+            print(response.intent)  # "create"
+        """
+        schema = response_model.model_json_schema()
+        schema_str = json.dumps(schema, indent=2)
+        
+        # Добавляем инструкцию по формату в промпт
+        enhanced_prompt = f"""{prompt}
+
+IMPORTANT: Return response as valid JSON matching this schema:
+{schema_str}
+
+JSON:"""
+        
+        last_error: Optional[Exception] = None
+        
+        for attempt in range(retries + 1):
+            try:
+                # Генерируем с format="json"
+                response = self.generate(
+                    prompt=enhanced_prompt,
+                    num_predict=num_predict,
+                    format="json"  # Ollama принудительно возвращает JSON
+                )
+                
+                if not response:
+                    raise StructuredOutputError("Пустой ответ от LLM")
+                
+                # Пробуем распарсить как JSON
+                # Иногда модель добавляет текст до/после JSON
+                json_str = self._extract_json(response)
+                
+                # Pydantic валидация
+                result = response_model.model_validate_json(json_str)
+                
+                logger.debug(
+                    f"✅ Structured output успешно: {response_model.__name__} "
+                    f"(попытка {attempt + 1})"
+                )
+                return result
+                
+            except ValidationError as e:
+                last_error = e
+                logger.warning(
+                    f"⚠️ Validation failed (попытка {attempt + 1}/{retries + 1}): {e}"
+                )
+                
+            except json.JSONDecodeError as e:
+                last_error = e
+                logger.warning(
+                    f"⚠️ JSON decode failed (попытка {attempt + 1}/{retries + 1}): {e}"
+                )
+                
+            except Exception as e:
+                last_error = e
+                logger.error(f"❌ Structured output error: {e}")
+                if attempt >= retries:
+                    break
+        
+        raise StructuredOutputError(
+            f"Не удалось получить валидный {response_model.__name__} "
+            f"после {retries + 1} попыток: {last_error}"
+        )
+    
+    def _extract_json(self, text: str) -> str:
+        """Извлекает JSON из текста ответа.
+        
+        Обрабатывает случаи когда модель добавляет текст до/после JSON.
+        
+        Args:
+            text: Текст с JSON
+            
+        Returns:
+            Извлечённый JSON string
+        """
+        text = text.strip()
+        
+        # Убираем markdown блоки если есть
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+        
+        # Ищем JSON объект
+        start = text.find('{')
+        if start == -1:
+            # Может быть массив
+            start = text.find('[')
+        
+        if start == -1:
+            return text  # Возвращаем как есть, пусть JSON парсер разберётся
+        
+        # Находим соответствующую закрывающую скобку
+        end = text.rfind('}')
+        if start >= 0 and text[start] == '[':
+            end = text.rfind(']')
+        
+        if end == -1 or end < start:
+            return text[start:]  # Возвращаем от начала JSON до конца
+        
+        return text[start:end + 1]
+    
+    async def generate_structured_async(
+        self,
+        prompt: str,
+        response_model: Type[T],
+        num_predict: int = 1024,
+        retries: int = 2
+    ) -> T:
+        """Асинхронная версия generate_structured.
+        
+        Args:
+            prompt: Текст промпта
+            response_model: Pydantic модель
+            num_predict: Максимум токенов
+            retries: Количество повторов
+            
+        Returns:
+            Провалидированный Pydantic объект
+        """
+        return await asyncio.to_thread(
+            self.generate_structured,
+            prompt,
+            response_model,
+            num_predict,
+            retries
+        )
     
     # === ASYNC МЕТОДЫ ===
     # Используют asyncio.to_thread() для совместимости с существующим синхронным кодом

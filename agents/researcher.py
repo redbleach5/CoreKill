@@ -110,8 +110,8 @@ class ResearcherAgent:
             context_parts.append("")  # Пустая строка для разделения
         
         # Шаг 3: Веб-поиск если нужно
-        # Типы intent где веб-поиск обычно не нужен (генерация кода, тесты, рефакторинг)
-        skip_web_for_intents = {"create", "test", "refactor", "greeting", "modify"}
+        # Типы intent где веб-поиск обычно не нужен (генерация кода, тесты, рефакторинг, анализ проекта)
+        skip_web_for_intents = {"create", "test", "refactor", "greeting", "modify", "analyze"}
         
         needs_web_search = (
             not disable_web_search and

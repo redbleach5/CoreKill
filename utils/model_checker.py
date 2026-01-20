@@ -31,6 +31,7 @@ class ModelInfo:
     quantization: str    # "Q4_K_M", "Q8_0", "fp16" etc.
     family: str          # "qwen", "llama", "codellama" etc.
     is_coder: bool       # Специализирована для кода
+    is_reasoning: bool   # Reasoning модель с встроенным CoT (DeepSeek-R1, QwQ, o1)
     estimated_quality: float  # 0.0-1.0 оценка качества для генерации кода
     
     @property
@@ -142,8 +143,11 @@ def _parse_model_info(model_data: object) -> Optional[ModelInfo]:
         # Проверяем, специализирована ли для кода
         is_coder = _is_coder_model(name)
         
+        # Проверяем, является ли reasoning моделью
+        is_reasoning = _is_reasoning_model(name)
+        
         # Оцениваем качество для генерации кода
-        estimated_quality = _estimate_code_quality(name, parameter_size, is_coder)
+        estimated_quality = _estimate_code_quality(name, parameter_size, is_coder, is_reasoning)
         
         return ModelInfo(
             name=name,
@@ -152,6 +156,7 @@ def _parse_model_info(model_data: object) -> Optional[ModelInfo]:
             quantization=quantization,
             family=family,
             is_coder=is_coder,
+            is_reasoning=is_reasoning,
             estimated_quality=estimated_quality
         )
     except Exception as e:
@@ -261,18 +266,51 @@ def _is_coder_model(model_name: str) -> bool:
     return any(keyword in name_lower for keyword in coder_keywords)
 
 
-def _estimate_code_quality(model_name: str, parameter_size: str, is_coder: bool) -> float:
+# Известные reasoning модели с встроенным chain-of-thought
+REASONING_MODEL_PATTERNS = frozenset([
+    'deepseek-r1',   # DeepSeek-R1: рассуждает в <think> блоках
+    'qwq',           # Qwen QwQ: reasoning модель от Alibaba
+    'o1',            # OpenAI o1 (если через API)
+    'o3',            # OpenAI o3 (если через API)
+])
+
+
+def _is_reasoning_model(model_name: str) -> bool:
+    """Проверяет, является ли модель reasoning (с встроенным CoT).
+    
+    Reasoning модели (DeepSeek-R1, QwQ, o1) автоматически рассуждают
+    в <think> блоках, не требуя промптов вроде "think step by step".
+    
+    Args:
+        model_name: Название модели
+        
+    Returns:
+        True если модель с reasoning capabilities
+    """
+    name_lower = model_name.lower()
+    
+    return any(pattern in name_lower for pattern in REASONING_MODEL_PATTERNS)
+
+
+def _estimate_code_quality(
+    model_name: str, 
+    parameter_size: str, 
+    is_coder: bool,
+    is_reasoning: bool = False
+) -> float:
     """Оценивает качество модели для генерации кода.
     
     Учитывает:
     - Размер параметров (больше = лучше качество)
     - Специализация для кода
+    - Reasoning capabilities (DeepSeek-R1, QwQ)
     - Известные бенчмарки
     
     Args:
         model_name: Название модели
         parameter_size: Размер параметров
         is_coder: Специализирована для кода
+        is_reasoning: Является reasoning моделью
         
     Returns:
         Оценка качества 0.0-1.0
@@ -331,6 +369,11 @@ def _estimate_code_quality(model_name: str, parameter_size: str, is_coder: bool)
     if is_coder:
         base_score = min(base_score + 0.15, 1.0)
     
+    # Бонус за reasoning capabilities (+0.12)
+    # Reasoning модели лучше справляются со сложными задачами
+    if is_reasoning:
+        base_score = min(base_score + 0.12, 1.0)
+    
     # Бонусы/штрафы за конкретные модели (на основе известных бенчмарков)
     name_lower = model_name.lower()
     
@@ -338,6 +381,12 @@ def _estimate_code_quality(model_name: str, parameter_size: str, is_coder: bool)
     if 'qwen2.5-coder' in name_lower:
         base_score = min(base_score + 0.1, 1.0)
     elif 'deepseek-coder' in name_lower:
+        base_score = min(base_score + 0.08, 1.0)
+    elif 'deepseek-r1' in name_lower:
+        # DeepSeek-R1 — топовая reasoning модель
+        base_score = min(base_score + 0.1, 1.0)
+    elif 'qwq' in name_lower:
+        # QwQ — сильная reasoning модель от Alibaba
         base_score = min(base_score + 0.08, 1.0)
     elif 'codellama' in name_lower:
         base_score = min(base_score + 0.05, 1.0)
@@ -553,6 +602,49 @@ def get_model_info(model_name: str) -> Optional[ModelInfo]:
     """
     models = scan_available_models()
     return models.get(model_name)
+
+
+def get_reasoning_model(min_quality: float = 0.7) -> Optional[str]:
+    """Возвращает лучшую reasoning модель (DeepSeek-R1, QwQ и др.).
+    
+    Reasoning модели имеют встроенный chain-of-thought и рассуждают
+    в <think> блоках. Они лучше справляются со сложными задачами.
+    
+    Args:
+        min_quality: Минимальный порог качества (0.0-1.0)
+        
+    Returns:
+        Название reasoning модели или None если не найдена
+    """
+    models = scan_available_models()
+    if not models:
+        return None
+    
+    # Фильтруем только reasoning модели
+    reasoning_models = [
+        m for m in models.values() 
+        if m.is_reasoning and m.estimated_quality >= min_quality
+    ]
+    
+    if not reasoning_models:
+        logger.debug("🤖 Reasoning модели не найдены")
+        return None
+    
+    # Выбираем лучшую по качеству
+    best = max(reasoning_models, key=lambda m: m.estimated_quality)
+    logger.info(f"🧠 Выбрана reasoning модель: {best.name} (качество: {best.estimated_quality})")
+    return best.name
+
+
+def get_all_reasoning_models() -> List[ModelInfo]:
+    """Возвращает список всех доступных reasoning моделей.
+    
+    Returns:
+        Список ModelInfo reasoning моделей, отсортированный по качеству
+    """
+    models = scan_available_models()
+    reasoning = [m for m in models.values() if m.is_reasoning]
+    return sorted(reasoning, key=lambda m: m.estimated_quality, reverse=True)
 
 
 def get_best_model_for_complexity(
