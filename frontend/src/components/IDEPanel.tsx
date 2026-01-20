@@ -132,12 +132,22 @@ export function IDEPanel({
   const handleBrowseFolder = async () => {
     setIsBrowsing(true)
     try {
-      const response = await fetch(`/api/browse-folder${tempPath ? `?start_path=${encodeURIComponent(tempPath)}` : ''}`)
+      const startPath = tempPath || undefined
+      const url = startPath 
+        ? `/api/browse-folder?start_path=${encodeURIComponent(startPath)}`
+        : '/api/browse-folder'
+      
+      const response = await fetch(url)
       if (response.ok) {
         const data = await response.json()
+        console.log('Browse folder response:', data)
         if (data.path) {
           setTempPath(data.path)
+          // Также сразу сохраняем в localStorage для надёжности
+          localStorage.setItem('projectPath', data.path)
         }
+      } else {
+        console.error('Browse folder error:', response.status)
       }
     } catch (error) {
       console.error('Ошибка выбора папки:', error)
@@ -425,7 +435,12 @@ export function IDEPanel({
       {showProjectModal && (
         <div 
           className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50"
-          onClick={() => setShowProjectModal(false)}
+          onClick={() => {
+            // Не закрываем модальное окно если идёт выбор папки
+            if (!isBrowsing) {
+              setShowProjectModal(false)
+            }
+          }}
         >
           <div 
             className="bg-[#16161e] border border-white/10 rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
