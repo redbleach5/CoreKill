@@ -126,6 +126,26 @@ export function IDEPanel({
     localStorage.setItem('fileExtensions', tempExtensions)
   }
 
+  // Выбор папки через системный диалог
+  const [isBrowsing, setIsBrowsing] = useState(false)
+  
+  const handleBrowseFolder = async () => {
+    setIsBrowsing(true)
+    try {
+      const response = await fetch(`/api/browse-folder${tempPath ? `?start_path=${encodeURIComponent(tempPath)}` : ''}`)
+      if (response.ok) {
+        const data = await response.json()
+        if (data.path) {
+          setTempPath(data.path)
+        }
+      }
+    } catch (error) {
+      console.error('Ошибка выбора папки:', error)
+    } finally {
+      setIsBrowsing(false)
+    }
+  }
+
   const activeFile = files.find(f => f.id === activeFileId)
 
   // Копировать код
@@ -423,15 +443,30 @@ export function IDEPanel({
                 <label className="block text-sm font-medium text-gray-300 mb-2">
                   Путь к папке проекта
                 </label>
-                <input
-                  type="text"
-                  value={tempPath}
-                  onChange={e => setTempPath(e.target.value)}
-                  placeholder="/Users/you/projects/my-app"
-                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500/50"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={tempPath}
+                    onChange={e => setTempPath(e.target.value)}
+                    placeholder="/Users/you/projects/my-app"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500/50"
+                  />
+                  <button
+                    onClick={handleBrowseFolder}
+                    disabled={isBrowsing}
+                    className="px-3 py-2.5 text-sm font-medium text-gray-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2"
+                    title="Выбрать папку"
+                  >
+                    {isBrowsing ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <FolderOpen className="w-4 h-4" />
+                    )}
+                    Обзор
+                  </button>
+                </div>
                 <p className="text-xs text-gray-500 mt-1.5">
-                  Абсолютный путь к корню проекта
+                  Выберите папку или введите путь вручную
                 </p>
               </div>
 

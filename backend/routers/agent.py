@@ -885,6 +885,70 @@ async def refresh_models() -> Dict[str, Any]:
     return await get_models()
 
 
+@router.get("/browse-folder")
+async def browse_folder(start_path: Optional[str] = None) -> Dict[str, Any]:
+    """Открывает системный диалог выбора папки.
+    
+    Использует tkinter для отображения нативного диалога выбора директории.
+    Работает на macOS, Windows и Linux.
+    
+    Args:
+        start_path: Начальная директория для диалога (опционально)
+        
+    Returns:
+        Словарь с выбранным путём или null если отменено
+    """
+    import asyncio
+    import os
+    
+    def _open_folder_dialog(initial_dir: Optional[str] = None) -> Optional[str]:
+        """Открывает диалог выбора папки в отдельном потоке."""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            
+            # Создаём скрытое окно
+            root = tk.Tk()
+            root.withdraw()  # Скрываем главное окно
+            root.attributes('-topmost', True)  # Поверх других окон
+            
+            # Определяем начальную директорию
+            initial = initial_dir if initial_dir and os.path.isdir(initial_dir) else os.path.expanduser("~")
+            
+            # Открываем диалог
+            folder_path = filedialog.askdirectory(
+                initialdir=initial,
+                title="Выберите папку проекта"
+            )
+            
+            root.destroy()
+            
+            return folder_path if folder_path else None
+            
+        except ImportError:
+            logger.warning("⚠️ tkinter недоступен для выбора папки")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка диалога выбора папки: {e}")
+            return None
+    
+    # Запускаем диалог в отдельном потоке чтобы не блокировать event loop
+    selected_path = await asyncio.to_thread(_open_folder_dialog, start_path)
+    
+    if selected_path:
+        logger.info(f"📂 Выбрана папка: {selected_path}")
+        return {
+            "path": selected_path,
+            "name": os.path.basename(selected_path),
+            "exists": os.path.isdir(selected_path)
+        }
+    else:
+        return {
+            "path": None,
+            "cancelled": True
+        }
+
+
 @router.get("/metrics/stages")
 async def get_stage_metrics() -> Dict[str, Any]:
     """Возвращает метрики производительности по этапам workflow.
