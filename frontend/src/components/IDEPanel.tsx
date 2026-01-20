@@ -2,7 +2,7 @@
  * Компонент IDEPanel - полноценная IDE для редактирования и выполнения кода
  * С боковой панелью файлов как в настоящих IDE (VS Code, PyCharm)
  */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { 
   Plus, X, FolderOpen, Database, RefreshCw, Loader2, CheckCircle2,
   Play, Copy, Download, RotateCcw, FileCode, FileText, ChevronRight, ChevronDown, 
@@ -200,7 +200,13 @@ export function IDEPanel({
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [newFileName, setNewFileName] = useState('script.py')
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const sidebarWidth = 240
+  const [sidebarWidth, setSidebarWidth] = useState(240)
+  const [isResizing, setIsResizing] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  
+  // Resize constraints
+  const MIN_SIDEBAR_WIDTH = 150
+  const MAX_SIDEBAR_WIDTH = 500
   
   // Project state
   const [showProjectModal, setShowProjectModal] = useState(false)
@@ -231,6 +237,7 @@ export function IDEPanel({
     const savedPath = localStorage.getItem('projectPath')
     const savedExt = localStorage.getItem('fileExtensions')
     const savedSidebarOpen = localStorage.getItem('ideSidebarOpen')
+    const savedSidebarWidth = localStorage.getItem('ideSidebarWidth')
     
     if (savedPath && !projectPath && onProjectPathChange) {
       onProjectPathChange(savedPath)
@@ -243,7 +250,54 @@ export function IDEPanel({
     if (savedSidebarOpen !== null) {
       setSidebarOpen(savedSidebarOpen === 'true')
     }
+    if (savedSidebarWidth !== null) {
+      const width = parseInt(savedSidebarWidth, 10)
+      if (!isNaN(width) && width >= MIN_SIDEBAR_WIDTH && width <= MAX_SIDEBAR_WIDTH) {
+        setSidebarWidth(width)
+      }
+    }
   }, [])
+
+  // Resize handlers
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }, [])
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    if (!isResizing || !containerRef.current) return
+    
+    const containerRect = containerRef.current.getBoundingClientRect()
+    const newWidth = e.clientX - containerRect.left
+    
+    // Clamp to min/max
+    const clampedWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, newWidth))
+    setSidebarWidth(clampedWidth)
+  }, [isResizing])
+
+  const handleResizeEnd = useCallback(() => {
+    if (isResizing) {
+      setIsResizing(false)
+      localStorage.setItem('ideSidebarWidth', String(sidebarWidth))
+    }
+  }, [isResizing, sidebarWidth])
+
+  // Attach global mouse events for resize
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleResizeMove)
+      document.addEventListener('mouseup', handleResizeEnd)
+      document.body.style.cursor = 'col-resize'
+      document.body.style.userSelect = 'none'
+    }
+    
+    return () => {
+      document.removeEventListener('mousemove', handleResizeMove)
+      document.removeEventListener('mouseup', handleResizeEnd)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+  }, [isResizing, handleResizeMove, handleResizeEnd])
 
   // Load file tree when project path changes
   const loadFileTree = useCallback(async (path: string, extensions?: string) => {
@@ -498,12 +552,15 @@ export function IDEPanel({
   // ============================================================================
 
   return (
-    <div className="flex h-full bg-[#0a0a0f] rounded-lg overflow-hidden border border-white/5">
+    <div 
+      ref={containerRef}
+      className={`flex h-full bg-[#0a0a0f] rounded-lg overflow-hidden border border-white/5 ${isResizing ? 'select-none' : ''}`}
+    >
       {/* Sidebar */}
       {sidebarOpen && (
         <div 
-          className="flex flex-col border-r border-white/5 bg-[#0d0d12]"
-          style={{ width: sidebarWidth, minWidth: sidebarWidth }}
+          className="flex flex-col bg-[#0d0d12] flex-shrink-0"
+          style={{ width: sidebarWidth }}
         >
           {/* Sidebar Header */}
           <div className="flex items-center justify-between px-3 py-2 border-b border-white/5">
@@ -630,6 +687,21 @@ export function IDEPanel({
               Файл
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Resize Handle */}
+      {sidebarOpen && (
+        <div
+          className={`w-1 cursor-col-resize flex-shrink-0 group relative ${
+            isResizing ? 'bg-blue-500' : 'bg-transparent hover:bg-blue-500/50'
+          }`}
+          onMouseDown={handleResizeStart}
+        >
+          {/* Visual indicator line */}
+          <div className={`absolute inset-y-0 left-0 w-px ${
+            isResizing ? 'bg-blue-500' : 'bg-white/5 group-hover:bg-blue-500/50'
+          }`} />
         </div>
       )}
 
