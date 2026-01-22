@@ -72,22 +72,11 @@ class StreamingCriticAgent:
             model: Модель (если None, используется лёгкая)
             temperature: Низкая температура для точности
         """
-        if model is None:
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="intent",
-                preferred_model=None,
-                context={"agent": "streaming_critic"}
-            )
-            model = model_selection.model
-        
-        self.model = model
-        self.temperature = temperature
-        self.llm = create_llm_for_stage(
-            stage="critic",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="critic"
         )
         self.reasoning_manager = get_reasoning_stream_manager()
         self._interrupted = False

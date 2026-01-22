@@ -27,15 +27,15 @@ from typing import Optional, Dict, Any, AsyncGenerator
 from infrastructure.local_llm import create_llm_for_stage, StreamChunk
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from infrastructure.reasoning_stream import get_reasoning_stream_manager
-from infrastructure.reasoning_utils import extract_code_from_reasoning, is_reasoning_response
 from utils.logger import get_logger
 from utils.config import get_config
-from infrastructure.model_router import get_model_router
+from utils.intent_helpers import get_intent_description
+from agents.base import BaseAgent
 
 logger = get_logger()
 
 
-class StreamingCoderAgent:
+class StreamingCoderAgent(BaseAgent):
     """Агент для генерации кода с real-time стримингом.
     
     Расширяет функциональность CoderAgent:
@@ -59,23 +59,13 @@ class StreamingCoderAgent:
             temperature: Температура генерации (0.15-0.35)
             user_query: Оригинальный запрос пользователя
         """
-        if model is None:
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="coding",
-                preferred_model=None,
-                context={"agent": "streaming_coder"}
-            )
-            model = model_selection.model
-        
-        self.model = model
-        self.temperature = temperature
-        self.llm = create_llm_for_stage(
-            stage="coding",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="coding"
         )
+        
         self.user_query = user_query
         self.prompt_enhancer = get_prompt_enhancer()
         self.reasoning_manager = get_reasoning_stream_manager()
@@ -182,14 +172,9 @@ class StreamingCoderAgent:
                 elif event_type == "done":
                     full_response = data
             
-            # Очищаем финальный код
+            # Очищаем финальный код (используем метод из BaseAgent)
             if full_response:
-                # Если был reasoning ответ — извлекаем код
-                if is_reasoning_response(full_response):
-                    code_only = extract_code_from_reasoning(full_response)
-                    cleaned_code = self._clean_code(code_only)
-                else:
-                    cleaned_code = self._clean_code(full_response)
+                cleaned_code = self._clean_code_from_reasoning(full_response)
             else:
                 cleaned_code = self._clean_code(code_buffer)
             
@@ -262,13 +247,9 @@ class StreamingCoderAgent:
                 elif event_type == "done":
                     full_response = data
             
-            # Очищаем код
+            # Очищаем код (используем метод из BaseAgent)
             if full_response:
-                if is_reasoning_response(full_response):
-                    code_only = extract_code_from_reasoning(full_response)
-                    cleaned_code = self._clean_code(code_only)
-                else:
-                    cleaned_code = self._clean_code(full_response)
+                cleaned_code = self._clean_code_from_reasoning(full_response)
             else:
                 cleaned_code = self._clean_code(code_buffer)
             
@@ -333,17 +314,8 @@ class StreamingCoderAgent:
         intent_type: str
     ) -> str:
         """Строит промпт для генерации кода."""
-        intent_descriptions = {
-            "create": "создать новую функцию/класс/модуль",
-            "modify": "изменить существующий код",
-            "debug": "исправить ошибки в коде",
-            "optimize": "оптимизировать производительность кода",
-            "explain": "объяснить код (генерация документации)",
-            "test": "написать тесты (но тесты уже есть, нужно реализовать тестируемый код)",
-            "refactor": "рефакторинг кода без изменения функциональности"
-        }
-        
-        intent_desc = intent_descriptions.get(intent_type, "выполнить задачу")
+        # Используем унифицированную функцию для получения описания intent
+        intent_desc = get_intent_description(intent_type, format="short") or "выполнить задачу"
         
         context_section = ""
         if context.strip():
@@ -428,71 +400,6 @@ Fixed code:
 """
         return prompt
     
-    def _clean_code(self, raw_code: str) -> str:
-        """Очищает сгенерированный код от markdown и лишних элементов."""
-        if not raw_code:
-            return ""
-        
-        lines = raw_code.split("\n")
-        cleaned_lines: list[str] = []
-        skip_until_code = False
-        in_code_block = False
-        
-        # Маркеры начала текстовых объяснений (не Python код)
-        explanation_markers = [
-            "in the", "the above", "this code", "this function", "this class",
-            "note:", "explanation:", "this will", "this is", "above code",
-            "вот ", "этот код", "данный код", "выше", "ниже", "здесь мы",
-            "в этом", "таким образом", "как видно",
-            "### ", "## ", "** ", "tests:", "test cases:",
-            "объяснение", "пояснение", "description:", "usage:"
-        ]
-        
-        for line in lines:
-            stripped = line.strip()
-            
-            # Пропускаем markdown блоки
-            if stripped.startswith("```"):
-                if not in_code_block:
-                    in_code_block = True
-                    skip_until_code = True
-                else:
-                    in_code_block = False
-                continue
-            
-            if skip_until_code:
-                if (stripped.startswith("import") or 
-                    stripped.startswith("from") or 
-                    stripped.startswith("def ") or 
-                    stripped.startswith("class ") or
-                    stripped.startswith("@") or
-                    stripped.startswith("#")):
-                    skip_until_code = False
-                    cleaned_lines.append(line)
-                continue
-            
-            # Пропускаем объяснения в начале
-            if not cleaned_lines and (not stripped or stripped.lower().startswith("вот")):
-                continue
-            
-            # Останавливаемся если встретили текстовое объяснение (не код)
-            stripped_lower = stripped.lower()
-            is_explanation = any(stripped_lower.startswith(marker) for marker in explanation_markers)
-            if is_explanation and cleaned_lines:
-                # Проверяем что это не часть строки или комментария
-                if not stripped.startswith("#") and not stripped.startswith("'") and not stripped.startswith('"'):
-                    logger.debug(f"Обрезаем текстовое объяснение: {stripped[:50]}...")
-                    break
-            
-            cleaned_lines.append(line)
-        
-        cleaned = "\n".join(cleaned_lines).strip()
-        
-        if "def " not in cleaned and "class " not in cleaned:
-            logger.warning("⚠️ В коде не найдено функций или классов")
-            return ""
-        
-        return cleaned
 
 
 # === Factory функция ===

@@ -11,6 +11,7 @@ pydantic
 # LLM и RAG
 ollama
 chromadb
+httpx[http2]  # HTTP/2 поддержка для connection pool (опционально, fallback на HTTP/1.1)
 
 # Code Retrieval (Phase 4)
 sentence-transformers
@@ -28,6 +29,8 @@ pytest-cov
 pytest-asyncio
 mypy
 bandit
+networkx
+matplotlib
 ruff  # Быстрый линтер для Python
 
 # UI утилиты (согласно russian_ui.md: "прогресс-бары (tqdm)")

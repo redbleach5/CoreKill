@@ -11,17 +11,8 @@ import {
   MessageSquare, Plus, Trash2, ChevronLeft, ChevronRight, 
   Clock, Search, X
 } from 'lucide-react'
-
-// Тип диалога из API
-export interface ConversationPreview {
-  id: string
-  created_at: string
-  updated_at: string
-  message_count: number
-  has_summary: boolean
-  preview: string
-  title?: string
-}
+import { ConversationPreview, ConversationsListResponse } from '../types/api'
+import { api } from '../services/apiClient'
 
 interface ChatHistoryProps {
   currentConversationId: string | null
@@ -135,11 +126,8 @@ export function ChatHistory({
   const fetchConversations = useCallback(async () => {
     try {
       setIsLoading(true)
-      const response = await fetch('/api/conversations')
-      if (response.ok) {
-        const data = await response.json()
-        setConversations(data.conversations || [])
-      }
+      const data = await api.conversations.list()
+      setConversations(data.conversations || [])
     } catch (error) {
       console.error('Ошибка загрузки диалогов:', error)
     } finally {
@@ -187,14 +175,9 @@ export function ChatHistory({
     setIsDeleting(true)
     
     try {
-      const response = await fetch(`/api/conversations/${deleteModal.conversationId}`, {
-        method: 'DELETE'
-      })
-      
-      if (response.ok) {
-        setConversations(prev => prev.filter(c => c.id !== deleteModal.conversationId))
-        onDeleteConversation(deleteModal.conversationId)
-      }
+      await api.conversations.delete(deleteModal.conversationId)
+      setConversations(prev => prev.filter(c => c.id !== deleteModal.conversationId))
+      onDeleteConversation(deleteModal.conversationId)
     } catch (error) {
       console.error('Ошибка удаления диалога:', error)
     } finally {

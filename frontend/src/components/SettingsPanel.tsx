@@ -1,17 +1,20 @@
 // Панель настроек приложения
 import React, { useState, useEffect } from 'react'
-import { X, Save, RotateCcw, FolderOpen, Zap } from 'lucide-react'
+import { X, Save, RotateCcw, Zap, Thermometer, Search, Database, Target, Code, RotateCcw as RotateIcon } from 'lucide-react'
 import { formatModelName, isReasoningModelSync } from '../utils/modelUtils'
+import { useLocalStorage } from '../hooks/useLocalStorage'
 
 interface Settings {
   model: string
   temperature: number
+  topP: number
   maxIterations: number
-  enableWebSearch: boolean
-  enableRAG: boolean
   maxTokens: number
-  projectPath: string  // Путь к проекту для индексации кодовой базы
-  fileExtensions: string  // Расширения файлов для индексации
+  enableWebSearch: boolean
+  webSearchMaxResults: number
+  enableRAG: boolean
+  ragSimilarityThreshold: number
+  qualityThreshold: number
 }
 
 interface SettingsPanelProps {
@@ -22,14 +25,16 @@ interface SettingsPanelProps {
 }
 
 const DEFAULT_SETTINGS: Settings = {
-  model: 'codellama:7b',
+  model: '',
   temperature: 0.25,
+  topP: 0.9,
   maxIterations: 3,
-  enableWebSearch: true,
-  enableRAG: true,
   maxTokens: 4096,
-  projectPath: '',
-  fileExtensions: '.py'
+  enableWebSearch: true,
+  webSearchMaxResults: 3,
+  enableRAG: true,
+  ragSimilarityThreshold: 0.5,
+  qualityThreshold: 0.7
 }
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -38,20 +43,26 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onSave,
   availableModels
 }) => {
-  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
+  const [settings, setSettings] = useLocalStorage<Settings>('appSettings', DEFAULT_SETTINGS)
+  const [advancedSettings, setAdvancedSettings] = useLocalStorage<Partial<Settings>>('advancedSettings', {})
   const [hasChanges, setHasChanges] = useState(false)
 
-  // Загружаем сохранённые настройки из localStorage
+  // Загружаем расширенные настройки при открытии
   useEffect(() => {
-    const saved = localStorage.getItem('appSettings')
-    if (saved) {
-      try {
-        setSettings(JSON.parse(saved))
-      } catch (e) {
-        console.error('Ошибка при загрузке настроек:', e)
+    if (isOpen && Object.keys(advancedSettings).length > 0) {
+      setSettings(prev => ({ ...prev, ...advancedSettings }))
+    }
+  }, [isOpen, advancedSettings, setSettings])
+
+  // Очищаем старые поля при загрузке
+  useEffect(() => {
+    if (isOpen) {
+      const { projectPath, fileExtensions, ...cleanSettings } = settings
+      if (projectPath !== undefined || fileExtensions !== undefined) {
+        setSettings(cleanSettings as Settings)
       }
     }
-  }, [isOpen])
+  }, [isOpen, settings, setSettings])
 
   const handleChange = (key: keyof Settings, value: any) => {
     setSettings(prev => ({ ...prev, [key]: value }))
@@ -59,7 +70,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   }
 
   const handleSave = () => {
-    localStorage.setItem('appSettings', JSON.stringify(settings))
     onSave(settings)
     setHasChanges(false)
     onClose()
@@ -73,35 +83,43 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   if (!isOpen) return null
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <div 
+        className="bg-slate-900 border border-white/10 rounded-2xl shadow-2xl max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-white/10 sticky top-0 bg-slate-900">
-          <h2 className="text-lg font-semibold text-white">Настройки</h2>
+        <div className="flex items-center justify-between p-6 border-b border-white/10 sticky top-0 bg-slate-900 z-10">
+          <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+            <Code className="w-5 h-5 text-blue-500" />
+            Расширенные настройки
+          </h2>
           <button
             onClick={onClose}
-            className="p-1 hover:bg-white/10 rounded transition-colors"
+            className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-gray-400 hover:text-white"
           >
-            <X className="w-5 h-5 text-gray-400" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* Content */}
         <div className="p-6 space-y-6">
           {/* Model Selection */}
-          <div>
-            <label className="block text-sm font-medium text-gray-200 mb-2 flex items-center gap-2">
-              Модель
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-200 flex items-center gap-2">
+              <Code className="w-4 h-4 text-gray-400" />
+              Модель LLM
               {settings.model && isReasoningModelSync(settings.model) && (
-                <Zap className="w-4 h-4 text-gray-400" title="Reasoning модель (поддерживает размышления)" />
+                <Zap className="w-3.5 h-3.5 text-yellow-500" title="Reasoning модель" />
               )}
             </label>
             <div className="relative">
               <select
                 value={settings.model}
                 onChange={e => handleChange('model', e.target.value)}
-                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 pr-8 text-white focus:outline-none focus:border-blue-500 transition-colors appearance-none"
+                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2.5 pr-10 text-white text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all appearance-none cursor-pointer"
               >
+                <option value="" className="bg-slate-900">Авто (умный выбор)</option>
                 {availableModels.map(model => (
                   <option key={model} value={model} className="bg-slate-900">
                     {formatModelName(model)}
@@ -115,17 +133,20 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                 </div>
               )}
             </div>
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-xs text-gray-500">
               {settings.model && isReasoningModelSync(settings.model) 
                 ? 'Reasoning модель: показывает процесс размышления в <think> блоках'
-                : 'Выберите LLM модель для генерации кода'}
+                : settings.model 
+                  ? 'Выбранная модель для генерации кода'
+                  : 'Автоматический выбор оптимальной модели'}
             </p>
           </div>
 
           {/* Temperature */}
-          <div>
-            <label className="block text-sm font-medium text-gray-200 mb-2">
-              Температура: {settings.temperature.toFixed(2)}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-200 flex items-center gap-2">
+              <Thermometer className="w-4 h-4 text-gray-400" />
+              Температура: <span className="text-blue-400 font-mono ml-1">{settings.temperature.toFixed(2)}</span>
             </label>
             <input
               type="range"
@@ -134,17 +155,19 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               step="0.05"
               value={settings.temperature}
               onChange={e => handleChange('temperature', parseFloat(e.target.value))}
-              className="w-full"
+              className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
             />
-            <p className="text-xs text-gray-500 mt-1">
-              Ниже = детерминированнее, выше = креативнее
-            </p>
+            <div className="flex justify-between text-xs text-gray-500">
+              <span>Детерминированно</span>
+              <span>Креативно</span>
+            </div>
           </div>
 
           {/* Max Iterations */}
-          <div>
-            <label className="block text-sm font-medium text-gray-200 mb-2">
-              Максимум итераций: {settings.maxIterations}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-200 flex items-center gap-2">
+              <RotateIcon className="w-4 h-4 text-gray-400" />
+              Максимум итераций: <span className="text-blue-400 font-mono ml-1">{settings.maxIterations}</span>
             </label>
             <input
               type="range"
@@ -153,17 +176,36 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               step="1"
               value={settings.maxIterations}
               onChange={e => handleChange('maxIterations', parseInt(e.target.value))}
-              className="w-full"
+              className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
             />
-            <p className="text-xs text-gray-500 mt-1">
-              Количество попыток исправления кода
+            <p className="text-xs text-gray-500">
+              Количество попыток исправления кода при ошибках
+            </p>
+          </div>
+
+          {/* Top P */}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-200">
+              Top P: <span className="text-blue-400 font-mono ml-1">{settings.topP.toFixed(2)}</span>
+            </label>
+            <input
+              type="range"
+              min="0.1"
+              max="1.0"
+              step="0.05"
+              value={settings.topP}
+              onChange={e => handleChange('topP', parseFloat(e.target.value))}
+              className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
+            />
+            <p className="text-xs text-gray-500">
+              Контролирует разнообразие генерации (nucleus sampling)
             </p>
           </div>
 
           {/* Max Tokens */}
-          <div>
-            <label className="block text-sm font-medium text-gray-200 mb-2">
-              Максимум токенов: {settings.maxTokens}
+          <div className="space-y-2">
+            <label className="block text-sm font-medium text-gray-200">
+              Максимум токенов: <span className="text-blue-400 font-mono ml-1">{settings.maxTokens}</span>
             </label>
             <input
               type="range"
@@ -172,84 +214,121 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               step="256"
               value={settings.maxTokens}
               onChange={e => handleChange('maxTokens', parseInt(e.target.value))}
-              className="w-full"
+              className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
             />
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-xs text-gray-500">
               Максимальная длина генерируемого текста
             </p>
           </div>
 
-          {/* Codebase Indexing Section */}
-          <div className="border-t border-white/10 pt-6">
-            <h3 className="text-sm font-medium text-gray-200 mb-4 flex items-center gap-2">
-              <FolderOpen className="w-4 h-4" />
-              Индексация кодовой базы
+          {/* Web Search Settings */}
+          <div className="border-t border-white/10 pt-6 space-y-4">
+            <h3 className="text-sm font-medium text-gray-200 flex items-center gap-2 mb-4">
+              <Search className="w-4 h-4 text-gray-400" />
+              Веб-поиск
             </h3>
             
-            {/* Project Path */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-200 mb-2">
-                Путь к проекту
-              </label>
-              <input
-                type="text"
-                value={settings.projectPath}
-                onChange={e => handleChange('projectPath', e.target.value)}
-                placeholder="/путь/к/вашему/проекту"
-                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Укажите путь к корню проекта для контекстного анализа кода
-              </p>
-            </div>
-            
-            {/* File Extensions */}
-            <div>
-              <label className="block text-sm font-medium text-gray-200 mb-2">
-                Расширения файлов
-              </label>
-              <input
-                type="text"
-                value={settings.fileExtensions}
-                onChange={e => handleChange('fileExtensions', e.target.value)}
-                placeholder=".py,.js,.ts"
-                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Расширения файлов через запятую (например: .py,.js,.ts)
-              </p>
-            </div>
-          </div>
-
-          {/* Toggles */}
-          <div className="space-y-3">
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
                 checked={settings.enableWebSearch}
                 onChange={e => handleChange('enableWebSearch', e.target.checked)}
-                className="w-4 h-4 rounded bg-white/10 border border-white/20 checked:bg-blue-600 checked:border-blue-600"
+                className="w-4 h-4 rounded bg-white/10 border border-white/20 checked:bg-blue-600 checked:border-blue-600 focus:ring-2 focus:ring-blue-500/50 cursor-pointer transition-colors"
               />
               <span className="text-sm text-gray-200">Включить веб-поиск</span>
             </label>
 
+            {settings.enableWebSearch && (
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-200">
+                  Максимум результатов: <span className="text-blue-400 font-mono ml-1">{settings.webSearchMaxResults}</span>
+                </label>
+                <input
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value={settings.webSearchMaxResults}
+                  onChange={e => handleChange('webSearchMaxResults', parseInt(e.target.value))}
+                  className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
+                />
+                <p className="text-xs text-gray-500">
+                  Количество результатов веб-поиска для использования в контексте
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* RAG Settings */}
+          <div className="border-t border-white/10 pt-6 space-y-4">
+            <h3 className="text-sm font-medium text-gray-200 flex items-center gap-2 mb-4">
+              <Database className="w-4 h-4 text-gray-400" />
+              RAG (Retrieval-Augmented Generation)
+            </h3>
+            
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
                 checked={settings.enableRAG}
                 onChange={e => handleChange('enableRAG', e.target.checked)}
-                className="w-4 h-4 rounded bg-white/10 border border-white/20 checked:bg-blue-600 checked:border-blue-600"
+                className="w-4 h-4 rounded bg-white/10 border border-white/20 checked:bg-blue-600 checked:border-blue-600 focus:ring-2 focus:ring-blue-500/50 cursor-pointer transition-colors"
               />
-              <span className="text-sm text-gray-200">Включить RAG (контекст)</span>
+              <span className="text-sm text-gray-200">Включить RAG (контекст из памяти)</span>
             </label>
+
+            {settings.enableRAG && (
+              <div className="space-y-2">
+                <label className="block text-sm font-medium text-gray-200">
+                  Порог схожести: <span className="text-blue-400 font-mono ml-1">{settings.ragSimilarityThreshold.toFixed(2)}</span>
+                </label>
+                <input
+                  type="range"
+                  min="0.1"
+                  max="1.0"
+                  step="0.05"
+                  value={settings.ragSimilarityThreshold}
+                  onChange={e => handleChange('ragSimilarityThreshold', parseFloat(e.target.value))}
+                  className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
+                />
+                <p className="text-xs text-gray-500">
+                  Минимальная схожесть для включения результатов в контекст (0.0-1.0)
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Quality Settings */}
+          <div className="border-t border-white/10 pt-6">
+            <h3 className="text-sm font-medium text-gray-200 flex items-center gap-2 mb-4">
+              <Target className="w-4 h-4 text-gray-400" />
+              Качество кода
+            </h3>
+            
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-gray-200">
+                Порог качества: <span className="text-blue-400 font-mono ml-1">{settings.qualityThreshold.toFixed(2)}</span>
+              </label>
+              <input
+                type="range"
+                min="0.0"
+                max="1.0"
+                step="0.05"
+                value={settings.qualityThreshold}
+                onChange={e => handleChange('qualityThreshold', parseFloat(e.target.value))}
+                className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500 hover:accent-blue-400 transition-colors"
+              />
+              <p className="text-xs text-gray-500">
+                Минимальный порог качества для успешного результата (0.0-1.0)
+              </p>
+            </div>
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex gap-3 p-6 border-t border-white/10 bg-black/20">
+        <div className="flex gap-3 p-6 border-t border-white/10 bg-gradient-to-b from-black/20 to-transparent">
           <button
             onClick={handleReset}
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-colors text-sm font-medium"
           >
             <RotateCcw className="w-4 h-4" />
             Сброс
@@ -257,7 +336,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <button
             onClick={handleSave}
             disabled={!hasChanges}
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white rounded-lg transition-colors"
+            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed text-white rounded-lg transition-colors text-sm font-medium"
           >
             <Save className="w-4 h-4" />
             Сохранить

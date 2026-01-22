@@ -15,6 +15,7 @@ from utils.logger import get_logger
 from infrastructure.model_router import get_model_router
 from utils.structured_helpers import generate_with_fallback, is_structured_output_enabled
 from models.agent_responses import DebugResponse, ErrorType
+from agents.base import BaseAgent
 
 
 logger = get_logger()
@@ -30,7 +31,7 @@ class DebugResult:
     error_type: str  # "pytest", "mypy", "bandit", "syntax", "multiple"
 
 
-class DebuggerAgent:
+class DebuggerAgent(BaseAgent):
     """Агент для анализа ошибок валидации и генерации инструкций по исправлению.
     
     Анализирует результаты валидации (pytest, mypy, bandit), определяет причину ошибок
@@ -44,20 +45,11 @@ class DebuggerAgent:
             model: Модель для анализа ошибок (если None, выбирается из config)
             temperature: Температура генерации (низкая для точности анализа)
         """
-        if model is None:
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="coding",  # Debugger использует ту же модель что и Coder
-                preferred_model=None,
-                context={"agent": "debugger"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="debug",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="debug"
         )
     
     def analyze_errors(
@@ -275,91 +267,7 @@ Analyze errors and provide:
             error_type=error_type
         )
     
-    def _extract_error_details(
-        self,
-        validation_results: Dict[str, Any]
-    ) -> Dict[str, str]:
-        """Извлекает детали ошибок из результатов валидации.
-        
-        Args:
-            validation_results: Результаты валидации
-            
-        Returns:
-            Словарь с деталями ошибок для каждого валидатора
-        """
-        details: Dict[str, str] = {}
-        
-        # Ошибки pytest
-        if not validation_results.get("pytest", {}).get("success", True):
-            pytest_output = validation_results.get("pytest", {}).get("output", "")
-            # Извлекаем traceback и основные ошибки
-            lines = pytest_output.split("\n")
-            error_lines: List[str] = []
-            in_traceback = False
-            
-            for line in lines:
-                if "FAILED" in line or "ERROR" in line:
-                    error_lines.append(line)
-                elif "Traceback" in line:
-                    in_traceback = True
-                    error_lines.append(line)
-                elif in_traceback and line.strip() and not line.startswith(" "):
-                    error_lines.append(line)
-                    if "AssertionError" in line or ":" in line:
-                        in_traceback = False
-            
-            details["pytest"] = "\n".join(error_lines[-20:])  # Последние 20 строк
-        else:
-            details["pytest"] = ""
-        
-        # Ошибки mypy
-        if not validation_results.get("mypy", {}).get("success", True):
-            mypy_errors = validation_results.get("mypy", {}).get("errors", "")
-            # Берем первые несколько ошибок
-            error_lines = mypy_errors.split("\n")[:15]
-            details["mypy"] = "\n".join(error_lines)
-        else:
-            details["mypy"] = ""
-        
-        # Проблемы bandit
-        if not validation_results.get("bandit", {}).get("success", True):
-            bandit_issues = validation_results.get("bandit", {}).get("issues", "")
-            # Берем важные части
-            lines = bandit_issues.split("\n")
-            issue_lines = [line for line in lines if "Issue:" in line or "Severity:" in line][:10]
-            details["bandit"] = "\n".join(issue_lines)
-        else:
-            details["bandit"] = ""
-        
-        return details
-    
-    def _determine_error_type(
-        self,
-        validation_results: Dict[str, Any]
-    ) -> str:
-        """Определяет тип основной ошибки.
-        
-        Args:
-            validation_results: Результаты валидации
-            
-        Returns:
-            Тип ошибки: "pytest", "mypy", "bandit", "multiple"
-        """
-        errors: List[str] = []
-        
-        if not validation_results.get("pytest", {}).get("success", True):
-            errors.append("pytest")
-        if not validation_results.get("mypy", {}).get("success", True):
-            errors.append("mypy")
-        if not validation_results.get("bandit", {}).get("success", True):
-            errors.append("bandit")
-        
-        if len(errors) > 1:
-            return "multiple"
-        elif len(errors) == 1:
-            return errors[0]
-        else:
-            return "unknown"
+    # Методы _extract_error_details и _determine_error_type теперь в BaseAgent
     
     def _build_analysis_prompt(
         self,
@@ -381,52 +289,14 @@ Analyze errors and provide:
         Returns:
             Промпт для LLM
         """
-        error_sections = []
-        
-        if error_details.get("pytest"):
-            error_sections.append(f"pytest ошибки:\n{error_details['pytest']}")
-        if error_details.get("mypy"):
-            error_sections.append(f"mypy ошибки:\n{error_details['mypy']}")
-        if error_details.get("bandit"):
-            error_sections.append(f"bandit проблемы:\n{error_details['bandit']}")
-        
-        errors_text = "\n\n".join(error_sections)
-        
-        prompt = f"""Ты - эксперт по отладке Python кода. Проанализируй ошибки и создай конкретные инструкции для исправления.
-
-Исходная задача: {task}
-
-Текущий код (с ошибками):
-```python
-{code[:1500]}
-```
-
-Тесты:
-```python
-{tests[:1000]}
-```
-
-Ошибки валидации:
-{errors_text}
-
-Проанализируй и ответь строго в следующем формате:
-
-ОПИСАНИЕ_ОШИБОК:
-[Краткое описание найденных ошибок на русском языке]
-
-ПРИЧИНА:
-[Основная причина ошибок на русском языке. Объясни почему код не работает.]
-
-ИНСТРУКЦИИ_ДЛЯ_ИСПРАВЛЕНИЯ:
-[Конкретные, атомарные инструкции на английском языке для Coder Agent. 
-Каждая инструкция должна быть чёткой и выполнимой. 
-Формат: "Fix X by doing Y" или "Add Z to function A" или "Change type annotation from X to Y"]
-[ВАЖНО: Инструкции должны быть конкретными и направленными на исправление конкретных ошибок из валидации]
-
-УВЕРЕННОСТЬ: [0.0-1.0]
-[Оценка уверенности в диагнозе]
-"""
-        return prompt
+        from infrastructure.prompt_templates import build_debug_analysis_prompt
+        return build_debug_analysis_prompt(
+            task=task,
+            code=code,
+            tests=tests,
+            error_details=error_details,
+            error_type=error_type
+        )
     
     def _parse_analysis_response(
         self,

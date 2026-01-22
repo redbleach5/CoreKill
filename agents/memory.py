@@ -60,7 +60,9 @@ class MemoryAgent:
         prompts_used: str = "",
         what_worked: str = "",
         what_didnt_work: str = "",
-        feedback: Optional[str] = None  # "positive" или "negative"
+        feedback: Optional[str] = None,  # "positive" или "negative"
+        code: str = "",  # Готовый код для переиспользования
+        plan: str = ""  # План для переиспользования
     ) -> None:
         """Сохраняет опыт выполнения задачи в память.
         
@@ -72,6 +74,8 @@ class MemoryAgent:
             prompts_used: Промпты/стратегии, которые использовались
             what_worked: Что сработало хорошо
             what_didnt_work: Что не сработало
+            code: Готовый код для переиспользования (опционально)
+            plan: План для переиспользования (опционально)
         """
         self.task_counter += 1
         
@@ -90,8 +94,8 @@ class MemoryAgent:
             what_didnt_work=what_didnt_work or ""
         )
         
-        # Формируем текст для сохранения в RAG
-        memory_text = self._format_memory_text(task_memory)
+        # Формируем текст для сохранения в RAG (включая код и план для поиска)
+        memory_text = self._format_memory_text(task_memory, code=code, plan=plan)
         
         # Создаём метаданные
         metadata = {
@@ -99,8 +103,17 @@ class MemoryAgent:
             "intent_type": intent_type,
             "success": str(reflection_result.overall_score),
             "overall_score": str(reflection_result.overall_score),
-            "timestamp": str(self.task_counter)  # Простой счётчик вместо timestamp
+            "timestamp": str(self.task_counter),  # Простой счётчик вместо timestamp
+            "has_code": "true" if code else "false",
+            "has_plan": "true" if plan else "false"
         }
+        
+        # Сохраняем код и план отдельно в метаданных для быстрого доступа
+        # (ограничиваем размер для метаданных)
+        if code:
+            metadata["code_preview"] = code[:500]  # Первые 500 символов для быстрого поиска
+        if plan:
+            metadata["plan_preview"] = plan[:500]
         
         # Сохраняем в RAG
         self.memory_rag.add_documents(
@@ -108,7 +121,78 @@ class MemoryAgent:
             metadatas=[metadata]
         )
         
-        logger.info(f"💾 Опыт задачи сохранён в память (ID: task_{self.task_counter}, успех: {reflection_result.overall_score:.2f})")
+        # Сохраняем полный код и план в отдельном хранилище (если нужно)
+        # Пока используем расширенный текст в документе
+        
+        logger.info(f"💾 Опыт задачи сохранён в память (ID: task_{self.task_counter}, успех: {reflection_result.overall_score:.2f}, код: {'да' if code else 'нет'})")
+
+    def find_exact_or_very_similar_task(
+        self,
+        query: str,
+        intent_type: Optional[str] = None,
+        min_success: float = 0.8,
+        similarity_threshold: float = 0.85  # Порог для "очень похожей" задачи
+    ) -> Optional[Dict[str, Any]]:
+        """Находит идентичную или очень похожую задачу для переиспользования решения.
+        
+        Используется для пропуска workflow, если задача уже решалась.
+        
+        Args:
+            query: Поисковый запрос (текущая задача)
+            intent_type: Опциональный фильтр по типу намерения
+            min_success: Минимальный уровень успешности прошлой задачи
+            similarity_threshold: Минимальный порог схожести (distance < 1 - threshold)
+            
+        Returns:
+            Словарь с информацией о найденной задаче или None
+        """
+        if not query.strip():
+            return None
+        
+        logger.info(f"🔍 Ищу идентичную/очень похожую задачу для: {query[:50]}...")
+        
+        # Ищем похожие задачи в RAG
+        results = self.memory_rag.get_relevant_context_with_metadata(
+            query=query,
+            n_results=5  # Берём несколько для проверки схожести
+        )
+        
+        for result in results:
+            metadata = result.get("metadata", {})
+            document = result.get("document", "")
+            distance = result.get("distance", 1.0)
+            
+            # Проверяем схожесть (distance < 0.15 означает очень высокую схожесть)
+            similarity = 1.0 - distance
+            if similarity < similarity_threshold:
+                continue
+            
+            # Фильтруем по типу намерения если указан
+            if intent_type and metadata.get("intent_type") != intent_type:
+                continue
+            
+            # Фильтруем по успешности
+            try:
+                success = float(metadata.get("success", "0.0"))
+                if success < min_success:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            
+            # Проверяем, есть ли готовый код
+            has_code = metadata.get("has_code", "false") == "true"
+            
+            # Парсим информацию из документа
+            task_info = self._parse_memory_document(document, metadata)
+            task_info["similarity"] = similarity
+            task_info["distance"] = distance
+            task_info["has_code"] = has_code
+            
+            logger.info(f"✅ Найдена очень похожая задача (схожесть: {similarity:.2f}, успех: {success:.2f})")
+            return task_info
+        
+        logger.info("ℹ️ Идентичной/очень похожей задачи не найдено")
+        return None
 
     def find_similar_tasks(
         self,
@@ -220,11 +304,13 @@ class MemoryAgent:
         
         return "\n".join(recommendations_parts)
 
-    def _format_memory_text(self, task_memory: TaskMemory) -> str:
+    def _format_memory_text(self, task_memory: TaskMemory, code: str = "", plan: str = "") -> str:
         """Форматирует TaskMemory в текст для сохранения в RAG.
         
         Args:
             task_memory: Экземпляр TaskMemory
+            code: Готовый код (опционально)
+            plan: План (опционально)
             
         Returns:
             Отформатированный текст
@@ -235,6 +321,9 @@ class MemoryAgent:
         parts.append(f"Тип намерения: {task_memory.intent_type}")
         parts.append(f"Успешность: {task_memory.overall_score:.2f}")
         
+        if plan:
+            parts.append(f"План: {plan[:1000]}")  # Ограничиваем размер плана
+        
         if task_memory.what_worked:
             parts.append(f"Что сработало: {task_memory.what_worked}")
         
@@ -243,6 +332,10 @@ class MemoryAgent:
         
         if task_memory.prompts_used:
             parts.append(f"Промпты/стратегии: {task_memory.prompts_used}")
+        
+        if code:
+            # Добавляем код для поиска (первые 2000 символов для embedding)
+            parts.append(f"Код: {code[:2000]}")
         
         if task_memory.what_didnt_work:
             parts.append(f"Что не сработало: {task_memory.what_didnt_work}")
@@ -277,6 +370,12 @@ class MemoryAgent:
             
             if "Задача:" in stripped:
                 task_info["task"] = stripped.split(":", 1)[-1].strip()
+            elif "План:" in stripped:
+                current_field = "plan"
+                task_info["plan"] = stripped.split(":", 1)[-1].strip()
+            elif "Код:" in stripped:
+                current_field = "code"
+                task_info["code"] = stripped.split(":", 1)[-1].strip()
             elif "Что сработало:" in stripped:
                 current_field = "what_worked"
                 task_info["what_worked"] = stripped.split(":", 1)[-1].strip()
@@ -285,6 +384,14 @@ class MemoryAgent:
                 task_info["key_decisions"] = stripped.split(":", 1)[-1].strip()
             elif current_field and stripped:
                 # Продолжение предыдущего поля
+                if current_field not in task_info:
+                    task_info[current_field] = ""
                 task_info[current_field] += " " + stripped
+        
+        # Извлекаем код и план из метаданных если есть
+        if metadata.get("code_preview"):
+            task_info["code_preview"] = metadata.get("code_preview", "")
+        if metadata.get("plan_preview"):
+            task_info["plan_preview"] = metadata.get("plan_preview", "")
         
         return task_info

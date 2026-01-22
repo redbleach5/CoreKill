@@ -4,6 +4,7 @@
 с сохранением обратной совместимости со старым API.
 """
 import logging
+import threading
 from typing import Optional
 from pathlib import Path
 
@@ -13,39 +14,52 @@ from infrastructure.logging.models import LogLevel, LogSource
 
 # Глобальный LogManager (singleton)
 _default_log_manager: Optional[LogManager] = None
+# Блокировка для thread-safe инициализации
+_log_manager_lock = threading.Lock()
 
 
 def _get_log_manager() -> LogManager:
-    """Получает глобальный LogManager.
+    """Получает глобальный LogManager (thread-safe).
     
     Автоматически определяет окружение и настраивает конфигурацию:
     - Если переменная окружения UI_MODE=1, использует for_ui()
     - Иначе использует for_dev()
     
+    Использует double-check locking pattern для thread-safe инициализации.
+    
     Returns:
         Глобальный экземпляр LogManager
     """
     global _default_log_manager
-    if _default_log_manager is None:
-        import os
-        
-        # Проверяем, запущены ли мы в UI режиме
-        ui_mode = os.getenv('UI_MODE', '0') == '1'
-        
-        if ui_mode:
-            # Для UI используем конфигурацию с памятью для стриминга
-            config = LoggingConfig.for_ui()
-        else:
-            # Для CLI/обычного использования - конфигурация для разработки
-            config = LoggingConfig.for_dev()
-        
-        # Убеждаемся, что файл логов настроен правильно
-        if config.enable_file:
-            # Создаём директорию для логов если её нет
-            log_dir = config.log_file.parent
-            log_dir.mkdir(parents=True, exist_ok=True)
-        
-        _default_log_manager = LogManager(config)
+    
+    # Первая проверка без блокировки (быстрый путь)
+    if _default_log_manager is not None:
+        return _default_log_manager
+    
+    # Блокируем для инициализации
+    with _log_manager_lock:
+        # Double-check: проверяем ещё раз после получения блокировки
+        if _default_log_manager is None:
+            import os
+            
+            # Проверяем, запущены ли мы в UI режиме
+            ui_mode = os.getenv('UI_MODE', '0') == '1'
+            
+            if ui_mode:
+                # Для UI используем конфигурацию с памятью для стриминга
+                config = LoggingConfig.for_ui()
+            else:
+                # Для CLI/обычного использования - конфигурация для разработки
+                config = LoggingConfig.for_dev()
+            
+            # Убеждаемся, что файл логов настроен правильно
+            if config.enable_file:
+                # Создаём директорию для логов если её нет
+                log_dir = config.log_file.parent
+                log_dir.mkdir(parents=True, exist_ok=True)
+            
+            _default_log_manager = LogManager(config)
+    
     return _default_log_manager
 
 
@@ -101,11 +115,19 @@ class LoggerAdapter:
         
         Args:
             msg: Сообщение для логирования
-            *args: Аргументы для форматирования (не используется, совместимость)
+            *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры (stage, task_id, payload и т.п.)
         """
         if self.isEnabledFor(logging.INFO):
             log_manager = _get_log_manager()
+            
+            # Поддержка форматирования из *args (совместимость со стандартным logging)
+            if args:
+                try:
+                    msg = msg % args
+                except (TypeError, ValueError):
+                    # Если форматирование не удалось, используем msg как есть
+                    pass
             
             # Извлекаем дополнительные параметры из kwargs
             source = kwargs.pop('source', LogSource.SYSTEM)
@@ -113,6 +135,11 @@ class LoggerAdapter:
             task_id = kwargs.pop('task_id', None)
             iteration = kwargs.pop('iteration', None)
             payload = kwargs.pop('payload', None)
+            
+            # Предупреждение о неизвестных kwargs (только в DEBUG режиме)
+            if kwargs and self.level <= logging.DEBUG:
+                import warnings
+                warnings.warn(f"Unknown kwargs in logger.info(): {list(kwargs.keys())}", UserWarning, stacklevel=2)
             
             log_manager.log_info(
                 message=str(msg),
@@ -128,17 +155,28 @@ class LoggerAdapter:
         
         Args:
             msg: Сообщение для логирования
-            *args: Аргументы для форматирования (не используется, совместимость)
+            *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры
         """
         if self.isEnabledFor(logging.DEBUG):
             log_manager = _get_log_manager()
+            
+            # Поддержка форматирования из *args
+            if args:
+                try:
+                    msg = msg % args
+                except (TypeError, ValueError):
+                    pass
             
             source = kwargs.pop('source', LogSource.SYSTEM)
             stage = kwargs.pop('stage', None)
             task_id = kwargs.pop('task_id', None)
             iteration = kwargs.pop('iteration', None)
             payload = kwargs.pop('payload', None)
+            
+            if kwargs and self.level <= logging.DEBUG:
+                import warnings
+                warnings.warn(f"Unknown kwargs in logger.debug(): {list(kwargs.keys())}", UserWarning, stacklevel=2)
             
             log_manager.log_debug(
                 message=str(msg),
@@ -154,17 +192,28 @@ class LoggerAdapter:
         
         Args:
             msg: Сообщение для логирования
-            *args: Аргументы для форматирования (не используется, совместимость)
+            *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры
         """
         if self.isEnabledFor(logging.WARNING):
             log_manager = _get_log_manager()
+            
+            # Поддержка форматирования из *args
+            if args:
+                try:
+                    msg = msg % args
+                except (TypeError, ValueError):
+                    pass
             
             source = kwargs.pop('source', LogSource.SYSTEM)
             stage = kwargs.pop('stage', None)
             task_id = kwargs.pop('task_id', None)
             iteration = kwargs.pop('iteration', None)
             payload = kwargs.pop('payload', None)
+            
+            if kwargs and self.level <= logging.DEBUG:
+                import warnings
+                warnings.warn(f"Unknown kwargs in logger.warning(): {list(kwargs.keys())}", UserWarning, stacklevel=2)
             
             log_manager.log_warning(
                 message=str(msg),
@@ -180,11 +229,18 @@ class LoggerAdapter:
         
         Args:
             msg: Сообщение для логирования
-            *args: Аргументы для форматирования (не используется, совместимость)
+            *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры (error для исключения)
         """
         if self.isEnabledFor(logging.ERROR):
             log_manager = _get_log_manager()
+            
+            # Поддержка форматирования из *args
+            if args:
+                try:
+                    msg = msg % args
+                except (TypeError, ValueError):
+                    pass
             
             source = kwargs.pop('source', LogSource.SYSTEM)
             stage = kwargs.pop('stage', None)
@@ -192,6 +248,10 @@ class LoggerAdapter:
             iteration = kwargs.pop('iteration', None)
             payload = kwargs.pop('payload', None)
             error = kwargs.pop('error', None)
+            
+            if kwargs and self.level <= logging.DEBUG:
+                import warnings
+                warnings.warn(f"Unknown kwargs in logger.error(): {list(kwargs.keys())}", UserWarning, stacklevel=2)
             
             log_manager.log_error(
                 message=str(msg),
@@ -208,7 +268,7 @@ class LoggerAdapter:
         
         Args:
             msg: Сообщение для логирования
-            *args: Аргументы для форматирования (не используется, совместимость)
+            *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры
         """
         self.error(msg, *args, **kwargs)
@@ -235,8 +295,16 @@ def setup_logger(
     """
     global _default_log_manager
     
-    # Если LogManager уже существует, обновляем только уровень
+    # Если LogManager уже существует, предупреждаем и обновляем только уровень
     if _default_log_manager is not None:
+        import warnings
+        warnings.warn(
+            "LogManager уже инициализирован. setup_logger() не может переинициализировать его. "
+            "Используйте get_logger() для получения существующего логгера или вызовите setup_logger() "
+            "до первого использования get_logger().",
+            UserWarning,
+            stacklevel=2
+        )
         logger = LoggerAdapter(name=name)
         logger.setLevel(level)
         return logger

@@ -11,6 +11,7 @@
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
 from infrastructure.local_llm import create_llm_for_stage
+from agents.base import BaseAgent
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -39,7 +40,7 @@ class ReflectionResult:
     should_retry: bool  # Нужно ли попробовать другую альтернативу
 
 
-class ReflectionAgent:
+class ReflectionAgent(BaseAgent):
     """Агент для анализа результатов работы системы и оценки качества.
     
     Оценивает различные аспекты выполнения задачи и предлагает улучшения.
@@ -52,21 +53,11 @@ class ReflectionAgent:
             model: Модель для анализа (если None, выбирается из config)
             temperature: Температура генерации
         """
-        if model is None:
-            # Используем ModelRouter для выбора модели (поддерживает будущее расширение роя моделей)
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="reflection",
-                preferred_model=None,
-                context={"agent": "reflection"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="reflection",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="reflection"
         )
         self.quality_threshold = 0.7  # Порог для предложения повторной попытки
 
@@ -382,56 +373,16 @@ Provide:
         base_scores: Dict[str, float]
     ) -> str:
         """Строит промпт для детального анализа."""
-        
-        validation_summary = f"""
-Результаты валидации:
-- pytest: {'✅ ПРОЙДЕН' if validation_results.get('pytest', {}).get('success') else '❌ НЕ ПРОЙДЕН'}
-- mypy: {'✅ ПРОЙДЕН' if validation_results.get('mypy', {}).get('success') else '❌ НЕ ПРОЙДЕН'}
-- bandit: {'✅ ПРОЙДЕН' if validation_results.get('bandit', {}).get('success') else '❌ НЕ ПРОЙДЕН'}
-"""
-        
-        prompt = f"""Ты - эксперт по анализу качества кода и процессов разработки. Проанализируй выполнение задачи.
-
-Задача: {task}
-
-План:
-{plan}
-
-Собранный контекст (длина: {len(context)} символов):
-{context[:500] if context else 'Контекст не собран'}
-
-Сгенерированные тесты (длина: {len(tests)} символов, количество: {tests.count('def test_')}):
-{tests[:300] if tests else 'Тесты не сгенерированы'}
-
-Сгенерированный код (длина: {len(code)} символов):
-{code[:500] if code else 'Код не сгенерирован'}
-
-{validation_summary}
-
-Базовые оценки:
-- Planning: {base_scores['planning']:.2f}
-- Research: {base_scores['research']:.2f}
-- Testing: {base_scores['testing']:.2f}
-- Coding: {base_scores['coding']:.2f}
-
-Проанализируй и ответь в следующем формате (строго придерживайся формата):
-
-ОЦЕНКИ:
-planning: [0.0-1.0]
-research: [0.0-1.0]
-testing: [0.0-1.0]
-coding: [0.0-1.0]
-overall: [0.0-1.0]
-
-АНАЛИЗ:
-[Что прошло хорошо, что плохо, какие проблемы]
-
-УЛУЧШЕНИЯ:
-[Конкретные предложения: новый план / другая стратегия / изменения в промптах]
-
-НУЖНА_ПОВТОРНАЯ_ПОПЫТКА: [да/нет]
-"""
-        return prompt
+        from infrastructure.prompt_templates import build_reflection_prompt
+        return build_reflection_prompt(
+            task=task,
+            plan=plan,
+            context=context,
+            tests=tests,
+            code=code,
+            validation_results=validation_results,
+            base_scores=base_scores
+        )
 
     def _parse_reflection_response(
         self,

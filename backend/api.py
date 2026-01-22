@@ -8,24 +8,30 @@
 import asyncio
 import os
 import signal
+import ollama
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from backend.routers import agent
+from backend.routers import agent, code_executor, metrics, database
 from backend.middleware.log_filter import setup_log_filter
 from backend.middleware.rate_limiter import RateLimiterMiddleware
-from infrastructure.connection_pool import get_ollama_pool, close_ollama_pool
+from backend.middleware.request_tracker import RequestTrackerMiddleware
+from backend.shutdown_manager import get_shutdown_manager
+from infrastructure.connection_pool import get_ollama_pool, initialize_ollama_pool
 from infrastructure.cache import get_cache
+from infrastructure.performance_metrics import get_performance_metrics
+from infrastructure.event_store import EventStore
 from utils.logger import get_logger
 
 # Инициализируем систему логирования при старте приложения
 logger = get_logger()
 
-# Флаг для graceful shutdown
-_shutdown_requested = False
+# Получаем менеджер shutdown
+shutdown_manager = get_shutdown_manager()
 
 
 def is_shutdown_requested() -> bool:
@@ -36,51 +42,19 @@ def is_shutdown_requested() -> bool:
     Returns:
         True если shutdown запрошен
     """
-    return _shutdown_requested
+    return shutdown_manager.is_shutdown_requested()
 
 
 async def _cleanup_on_shutdown() -> None:
     """Выполняет очистку ресурсов при shutdown."""
-    global _shutdown_requested
-    _shutdown_requested = True
+    # Запрашиваем shutdown
+    await shutdown_manager.request_shutdown()
     
-    # Закрываем connection pool
-    try:
-        await close_ollama_pool()
-        logger.info("✅ Connection pool закрыт")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка при закрытии connection pool: {e}")
+    # Ожидаем завершения активных запросов
+    await shutdown_manager.wait_for_active_requests(max_wait=10)
     
-    # Очищаем кэш
-    try:
-        cache = get_cache()
-        cache.clear()
-        logger.info("✅ Кэш очищен")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка при очистке кэша: {e}")
-    
-    # Сохраняем активные checkpoint
-    try:
-        from utils.config import get_config
-        config = get_config()
-        if config.persistence_enabled:
-            from infrastructure.task_checkpointer import get_task_checkpointer
-            checkpointer = get_task_checkpointer()
-            active_count = len(checkpointer.list_active_tasks())
-            if active_count > 0:
-                logger.info(f"📝 Сохранено {active_count} активных checkpoint")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка сохранения checkpoint: {e}")
-    
-    # Очищаем просроченные диалоги
-    try:
-        from agents.conversation import get_conversation_memory
-        conv_memory = get_conversation_memory()
-        cleanup_result = conv_memory.cleanup()
-        if cleanup_result["total"] > 0:
-            logger.info(f"🗑️ Очистка диалогов: {cleanup_result}")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка очистки диалогов: {e}")
+    # Выполняем все cleanup операции с таймаутами
+    await shutdown_manager.cleanup_all()
 
 
 @asynccontextmanager
@@ -98,16 +72,19 @@ async def lifespan(app: FastAPI):
     - Закрытие connection pool
     - Очистка кэша и диалогов
     """
-    global _shutdown_requested
-    _shutdown_requested = False
-    
     # Startup
     logger.info("🚀 Backend API запущен")
     setup_log_filter()
     
+    # Инициализируем connection pool для Ollama
+    try:
+        await initialize_ollama_pool()
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка предварительной инициализации connection pool: {e}")
+        logger.info("ℹ️ Connection pool будет инициализирован при первом использовании")
+    
     # Инициализируем систему метрик и запускаем бенчмарк если нужно
     try:
-        from infrastructure.performance_metrics import get_performance_metrics
         metrics = get_performance_metrics()
         
         # Запускаем бенчмарк только если нет сохранённых данных
@@ -123,9 +100,39 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Ошибка инициализации метрик: {e}")
     
+    # Запускаем периодическую очистку EventStore (каждые 10 минут)
+    async def periodic_eventstore_cleanup():
+        """Периодическая очистка старых событий и очередей в EventStore."""
+        while True:
+            try:
+                await asyncio.sleep(600)  # 10 минут
+                await EventStore.cleanup_all_old_events()
+                logger.debug("🧹 Периодическая очистка EventStore выполнена")
+            except asyncio.CancelledError:
+                logger.debug("🛑 Периодическая очистка EventStore отменена")
+                break
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка периодической очистки EventStore: {e}")
+    
+    cleanup_task = asyncio.create_task(periodic_eventstore_cleanup())
+    
     logger.info("✅ Lifespan startup завершён")
     
     yield
+    
+    # Отменяем периодическую очистку при shutdown
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    
+    # Финальная очистка EventStore
+    try:
+        await EventStore.cleanup_all_old_events()
+        logger.debug("🧹 Финальная очистка EventStore выполнена")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка финальной очистки EventStore: {e}")
     
     # Shutdown
     logger.info("🛑 Backend API завершает работу...")
@@ -139,7 +146,6 @@ async def _run_initial_benchmark() -> None:
         # Небольшая задержка чтобы сервер успел стартовать
         await asyncio.sleep(2)
         
-        from infrastructure.performance_metrics import get_performance_metrics
         metrics = get_performance_metrics()
         await metrics.run_benchmark()
         
@@ -180,13 +186,15 @@ def get_allowed_origins() -> list[str]:
 # Добавляем middleware для защиты от атак
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
 app.add_middleware(RateLimiterMiddleware, requests_per_minute=100)
+# Middleware для отслеживания активных запросов (для graceful shutdown)
+app.add_middleware(RequestTrackerMiddleware)
 
 # Настраиваем CORS для работы с frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
     max_age=3600
 )
@@ -204,10 +212,10 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 # Подключаем роутеры
-from backend.routers import code_executor, metrics
 app.include_router(agent.router)
 app.include_router(code_executor.router)
 app.include_router(metrics.router)
+app.include_router(database.router)
 
 
 @app.get("/")
@@ -222,16 +230,15 @@ async def root() -> dict:
 
 @app.get("/health")
 async def health() -> dict:
-    """Health check endpoint с проверкой зависимостей."""
-    import ollama
-    from datetime import datetime, timezone
-    
+    """Health check endpoint с проверкой всех критических зависимостей."""
     health_status: dict[str, Any] = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "services": {
             "api": "ok",
-            "ollama": "unknown"
+            "ollama": "unknown",
+            "cache": "unknown",
+            "connection_pool": "unknown"
         }
     }
     
@@ -244,6 +251,28 @@ async def health() -> dict:
     except Exception as e:
         health_status["services"]["ollama"] = "error"
         health_status["ollama_error"] = str(e)
+        health_status["status"] = "degraded"
+    
+    # Проверяем кэш
+    try:
+        cache = get_cache()
+        # Простая проверка доступности кэша
+        health_status["services"]["cache"] = "ok"
+    except Exception as e:
+        health_status["services"]["cache"] = "error"
+        health_status["cache_error"] = str(e)
+        health_status["status"] = "degraded"
+    
+    # Проверяем connection pool
+    try:
+        pool = await get_ollama_pool()
+        if pool:
+            health_status["services"]["connection_pool"] = "ok"
+        else:
+            health_status["services"]["connection_pool"] = "not_initialized"
+    except Exception as e:
+        health_status["services"]["connection_pool"] = "error"
+        health_status["connection_pool_error"] = str(e)
         health_status["status"] = "degraded"
     
     return health_status

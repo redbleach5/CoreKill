@@ -151,6 +151,12 @@ class ReasoningStreamManager:
             
         Returns:
             SSE событие в формате text/event-stream
+            
+        Формат события:
+        - thinking_started: { stage, total_chars }
+        - thinking_in_progress: { stage, content, elapsed_ms, total_chars }
+        - thinking_completed: { stage, content, summary, elapsed_ms, total_chars }
+        - thinking_interrupted: { stage, content, elapsed_ms, total_chars }
         """
         event_type = f"thinking_{chunk.status.value}"
         
@@ -415,13 +421,47 @@ class ReasoningStreamManager:
             else:
                 logger.warning(f"⚠️ [{stage}] Нет thinking блоков! Модель {llm.model} не является reasoning моделью или не генерирует <think> блоки")
             
+            # Если был thinking блок и он не был завершён, завершаем его
+            if thinking_started and not thinking_completed:
+                thinking_completed = True
+                elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
+                logger.warning(f"⚠️ [{stage}] <think> блок не был закрыт корректно, принудительно завершаю ({total_thinking_chars} символов)")
+                event = await self.create_thinking_event(ThinkingChunk(
+                    content=thinking_buffer,
+                    status=ThinkingStatus.COMPLETED,
+                    stage=stage,
+                    elapsed_ms=elapsed,
+                    total_chars=total_thinking_chars
+                ))
+                yield ("thinking", event)
+            
             # Финальное событие с полным ответом
             full_response = thinking_buffer + content_buffer if thinking_buffer else content_buffer
             yield ("done", chunk.full_response if chunk else full_response)
             
         except Exception as e:
             logger.error(f"❌ Ошибка стриминга от LLM: {e}", error=e)
+            # Если был thinking блок, отправляем событие прерывания
+            if thinking_started and not thinking_completed:
+                elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
+                try:
+                    event = await self.create_thinking_event(ThinkingChunk(
+                        content=thinking_buffer or "[ошибка стриминга]",
+                        status=ThinkingStatus.INTERRUPTED,
+                        stage=stage,
+                        elapsed_ms=elapsed,
+                        total_chars=total_thinking_chars
+                    ))
+                    yield ("thinking", event)
+                except Exception as cleanup_error:
+                    logger.warning(f"⚠️ Ошибка при отправке события прерывания: {cleanup_error}")
             yield ("done", content_buffer)
+        finally:
+            # Очищаем буферы для предотвращения утечек памяти
+            thinking_buffer = ""
+            content_buffer = ""
+            thinking_started = False
+            thinking_completed = False
 
 
 # === Factory и Singleton ===

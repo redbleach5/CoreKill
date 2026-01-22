@@ -432,12 +432,18 @@ class ContextComposer:
             if total_tokens + chunk_tokens > self.max_tokens:
                 # Если чанк слишком большой, можем взять только его часть
                 # или пропустить, если уже есть достаточно контекста
-                if total_tokens < self.max_tokens * 0.5:
-                    # Если набрали меньше половины, пробуем взять частично
+                
+                # Улучшенная логика: если набрали меньше 70% лимита, пробуем взять частично
+                # Это даёт больше шансов включить важные чанки
+                if total_tokens < self.max_tokens * 0.7:
                     remaining_tokens = self.max_tokens - total_tokens
-                    if remaining_tokens > 100:  # Минимум 100 токенов
+                    # Минимум 150 токенов для частичного чанка (чтобы было достаточно контекста)
+                    if remaining_tokens > 150:
                         partial_content = self._truncate_chunk(chunk, remaining_tokens)
                         sections.append(self._format_chunk(chunk, partial_content, scored.matched_keywords))
+                        total_tokens += remaining_tokens  # Обновляем счётчик
+                # Если уже набрали достаточно (>= 70%), останавливаемся
+                # чтобы не обрезать важные чанки слишком сильно
                 break
             
             sections.append(self._format_chunk(chunk, chunk.content, scored.matched_keywords))
@@ -463,19 +469,89 @@ class ContextComposer:
         return '\n'.join(parts)
     
     def _truncate_chunk(self, chunk: CodeChunk, max_tokens: int) -> str:
-        """Обрезает чанк до нужного количества токенов."""
+        """Умно обрезает чанк до нужного количества токенов.
+        
+        Старается сохранить:
+        - Начало (сигнатуру и начало функции/класса)
+        - Конец (return statements, важные завершающие части)
+        
+        Args:
+            chunk: Чанк для обрезки
+            max_tokens: Максимальное количество токенов
+            
+        Returns:
+            Обрезанный контент с сохранением важных частей
+        """
         max_chars = max_tokens * 4  # ~4 символа на токен
         if len(chunk.content) <= max_chars:
             return chunk.content
         
-        # Обрезаем и добавляем индикатор
-        truncated = chunk.content[:max_chars]
-        # Пробуем обрезать по строке
-        last_newline = truncated.rfind('\n')
-        if last_newline > max_chars * 0.8:  # Если не слишком далеко от конца
-            truncated = truncated[:last_newline]
+        lines = chunk.content.split('\n')
+        total_lines = len(lines)
         
-        return truncated + "\n# ... (truncated)"
+        # Если чанк небольшой, просто обрезаем
+        if total_lines <= 50:
+            truncated = chunk.content[:max_chars]
+            last_newline = truncated.rfind('\n')
+            if last_newline > max_chars * 0.8:
+                truncated = truncated[:last_newline]
+            return truncated + "\n# ... (truncated)"
+        
+        # Для больших чанков: сохраняем начало и конец
+        # Распределяем: 60% начало, 40% конец
+        start_chars = int(max_chars * 0.6)
+        end_chars = max_chars - start_chars
+        
+        # Начало: берём первые строки до start_chars
+        start_lines = []
+        start_length = 0
+        for line in lines:
+            if start_length + len(line) + 1 > start_chars:
+                break
+            start_lines.append(line)
+            start_length += len(line) + 1
+        
+        # Конец: берём последние строки до end_chars
+        # Ищем важные маркеры (return, yield, raise, class/def окончания)
+        end_lines = []
+        end_length = 0
+        
+        # Идём с конца и собираем важные строки
+        important_keywords = ['return', 'yield', 'raise', 'pass', 'break', 'continue']
+        
+        for i in range(len(lines) - 1, len(start_lines) - 1, -1):
+            line = lines[i]
+            line_len = len(line) + 1
+            
+            if end_length + line_len > end_chars:
+                break
+            
+            # Всегда включаем строки с важными ключевыми словами
+            is_important = any(kw in line for kw in important_keywords)
+            
+            if is_important or end_length == 0:  # Первая строка с конца всегда
+                end_lines.insert(0, line)
+                end_length += line_len
+            elif end_length + line_len <= end_chars * 0.9:  # Оставляем запас
+                end_lines.insert(0, line)
+                end_length += line_len
+        
+        # Объединяем начало и конец
+        if end_lines and len(end_lines) > 0:
+            result = '\n'.join(start_lines) + '\n# ... (middle part truncated) ...\n' + '\n'.join(end_lines)
+        else:
+            # Если не удалось взять конец, просто обрезаем начало
+            result = '\n'.join(start_lines) + '\n# ... (truncated)'
+        
+        # Проверяем размер и обрезаем если нужно
+        if len(result) > max_chars:
+            result = result[:max_chars]
+            last_newline = result.rfind('\n')
+            if last_newline > max_chars * 0.8:
+                result = result[:last_newline]
+            result += "\n# ... (truncated)"
+        
+        return result
 
 
 class ContextEngine:

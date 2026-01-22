@@ -69,24 +69,82 @@ class Config:
     
     @property
     def ollama_host(self) -> str:
-        """Хост Ollama API."""
+        """Хост Ollama API.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        Поддерживает OLLAMA_BASE_URL и OLLAMA_HOST для совместимости.
+        """
+        import os
+        # Проверяем переменные окружения (приоритет)
+        env_host = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST")
+        if env_host:
+            return env_host
+        # Fallback на config.toml
         return self._config_data.get("ollama", {}).get("host", "http://localhost:11434")
     
     @property
     def ollama_connect_timeout(self) -> int:
-        """Таймаут подключения к Ollama."""
+        """Таймаут подключения к Ollama.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_timeout = os.environ.get("OLLAMA_TIMEOUT")
+        if env_timeout:
+            try:
+                return int(env_timeout)
+            except ValueError:
+                pass
         return self._config_data.get("ollama", {}).get("connect_timeout", 10)
+    
+    @property
+    def ollama_timeout(self) -> int:
+        """Таймаут для запросов к Ollama (в секундах).
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_timeout = os.environ.get("OLLAMA_TIMEOUT")
+        if env_timeout:
+            try:
+                return int(env_timeout)
+            except ValueError:
+                pass
+        # Используем connect_timeout как fallback, или 300 секунд по умолчанию
+        return self._config_data.get("ollama", {}).get("timeout", 300)
     
     @property
     def ollama_use_remote(self) -> bool:
         """Использовать удалённый Ollama."""
         return self._config_data.get("ollama", {}).get("use_remote", False)
     
+    @property
+    def connection_pool_size(self) -> int:
+        """Размер пула соединений для Ollama.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_size = os.environ.get("CONNECTION_POOL_SIZE")
+        if env_size:
+            try:
+                return int(env_size)
+            except ValueError:
+                pass
+        return self._config_data.get("ollama", {}).get("connection_pool_size", 10)
+    
     # === Default Model ===
     
     @property
     def default_model(self) -> str:
-        """Модель Ollama по умолчанию."""
+        """Модель Ollama по умолчанию.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_model = os.environ.get("DEFAULT_MODEL")
+        if env_model:
+            return env_model
         return self._config_data.get("default", {}).get("default_model", "codellama:7b")
     
     @property
@@ -96,7 +154,14 @@ class Config:
     
     @property
     def intent_model(self) -> str:
-        """Модель для классификации намерений."""
+        """Модель для классификации намерений.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_model = os.environ.get("INTENT_MODEL")
+        if env_model:
+            return env_model
         return self._config_data.get("default", {}).get("intent_model", "phi3:mini")
     
     @property
@@ -106,22 +171,56 @@ class Config:
     
     @property
     def embedding_model(self) -> str:
-        """Модель для embeddings."""
+        """Модель для embeddings.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_model = os.environ.get("EMBEDDING_MODEL")
+        if env_model:
+            return env_model
         return self._config_data.get("default", {}).get("embedding_model", "nomic-embed-text")
     
     @property
     def max_iterations(self) -> int:
-        """Максимальное количество итераций."""
+        """Максимальное количество итераций.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_iter = os.environ.get("MAX_ITERATIONS")
+        if env_iter:
+            try:
+                return int(env_iter)
+            except ValueError:
+                pass
         return self._config_data.get("default", {}).get("max_iterations", 5)
     
     @property
     def enable_web(self) -> bool:
-        """Включен ли веб-поиск по умолчанию."""
+        """Включен ли веб-поиск по умолчанию.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_enable = os.environ.get("ENABLE_WEB_SEARCH")
+        if env_enable is not None:
+            return env_enable.lower() in ('true', '1', 'yes', 'on')
         return self._config_data.get("default", {}).get("enable_web", True)
     
     @property
     def temperature(self) -> float:
-        """Температура генерации по умолчанию."""
+        """Температура генерации по умолчанию.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_temp = os.environ.get("TEMPERATURE")
+        if env_temp:
+            try:
+                return float(env_temp)
+            except ValueError:
+                pass
         return self._config_data.get("default", {}).get("temperature", 0.25)
     
     @property
@@ -159,6 +258,23 @@ class Config:
             ["debug", "refactor", "analyze"]
         )
     
+    # === Quality Thresholds ===
+    
+    @property
+    def quality_min_simple(self) -> float:
+        """Минимальное качество модели для SIMPLE задач."""
+        return self._config_data.get("quality", {}).get("min_quality_simple", 0.3)
+    
+    @property
+    def quality_min_medium(self) -> float:
+        """Минимальное качество модели для MEDIUM задач."""
+        return self._config_data.get("quality", {}).get("min_quality_medium", 0.55)
+    
+    @property
+    def quality_min_complex(self) -> float:
+        """Минимальное качество модели для COMPLEX задач."""
+        return self._config_data.get("quality", {}).get("min_quality_complex", 0.7)
+    
     # === Structured Output ===
     
     @property
@@ -183,7 +299,14 @@ class Config:
     
     @property
     def output_dir(self) -> str:
-        """Директория для сохранения артефактов."""
+        """Директория для сохранения артефактов.
+        
+        Приоритет: переменная окружения > config.toml > значение по умолчанию
+        """
+        import os
+        env_dir = os.environ.get("OUTPUT_DIR")
+        if env_dir:
+            return env_dir
         return self._config_data.get("default", {}).get("output_dir", "output")
     
     # === LLM Generation Limits ===

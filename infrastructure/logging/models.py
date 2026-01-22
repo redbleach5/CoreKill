@@ -1,6 +1,6 @@
 """Модели данных для системы логирования."""
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -49,7 +49,7 @@ class LogEvent:
         task_id: Уникальный идентификатор задачи
         iteration: Номер итерации (опционально)
     """
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     level: LogLevel = LogLevel.INFO
     source: LogSource = LogSource.SYSTEM
     stage: Optional[LogStage] = None

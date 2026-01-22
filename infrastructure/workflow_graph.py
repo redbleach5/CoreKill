@@ -12,7 +12,16 @@ from infrastructure.workflow_nodes import (
     debugger_node,
     fixer_node,
     reflection_node,
-    critic_node
+    critic_node,
+    _is_streaming_enabled,
+    _get_streaming_node_adapter,
+    stream_planner_node,
+    stream_generator_node,
+    stream_coder_node,
+    stream_debugger_node,
+    stream_fixer_node,
+    stream_reflection_node,
+    stream_critic_node
 )
 from infrastructure.workflow_edges import (
     should_skip_greeting,
@@ -42,23 +51,77 @@ def create_workflow_graph() -> Any:
     reflection_node → critic_node
     critic_node → END
     
+    Если включён use_streaming_agents в config.toml, используются стриминговые узлы
+    через адаптеры, которые собирают SSE события в state.
+    
     Returns:
         Скомпилированный граф LangGraph
     """
+    # Проверяем, включён ли стриминг
+    use_streaming = _is_streaming_enabled()
+    
+    if use_streaming:
+        logger.info("🧠 Используются стриминговые узлы в графе LangGraph")
+    
     # Создаём граф
     workflow = StateGraph(AgentState)
     
-    # Добавляем узлы (type: ignore для совместимости с LangGraph типами)
+    # Выбираем узлы в зависимости от флага стриминга
+    # Intent и researcher всегда обычные (не имеют стриминговых версий)
     workflow.add_node("intent", intent_node)  # type: ignore[call-overload]
-    workflow.add_node("planner", planner_node)  # type: ignore[call-overload]
     workflow.add_node("researcher", researcher_node)  # type: ignore[call-overload]
-    workflow.add_node("test_generator", generator_node)  # type: ignore[call-overload]
-    workflow.add_node("coder", coder_node)  # type: ignore[call-overload]
+    
+    # Planner
+    if use_streaming:
+        planner_adapter = _get_streaming_node_adapter(stream_planner_node, "planning", "plan", "")
+        workflow.add_node("planner", planner_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("planner", planner_node)  # type: ignore[call-overload]
+    
+    # Test Generator
+    if use_streaming:
+        generator_adapter = _get_streaming_node_adapter(stream_generator_node, "testing", "tests", "")
+        workflow.add_node("test_generator", generator_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("test_generator", generator_node)  # type: ignore[call-overload]
+    
+    # Coder
+    if use_streaming:
+        coder_adapter = _get_streaming_node_adapter(stream_coder_node, "coding", "code", "")
+        workflow.add_node("coder", coder_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("coder", coder_node)  # type: ignore[call-overload]
+    
+    # Validator всегда обычный
     workflow.add_node("validator", validator_node)  # type: ignore[call-overload]
-    workflow.add_node("debugger", debugger_node)  # type: ignore[call-overload]
-    workflow.add_node("fixer", fixer_node)  # type: ignore[call-overload]
-    workflow.add_node("reflection", reflection_node)  # type: ignore[call-overload]
-    workflow.add_node("critic", critic_node)  # type: ignore[call-overload]
+    
+    # Debugger
+    if use_streaming:
+        debugger_adapter = _get_streaming_node_adapter(stream_debugger_node, "debug", "debug_result", None)
+        workflow.add_node("debugger", debugger_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("debugger", debugger_node)  # type: ignore[call-overload]
+    
+    # Fixer
+    if use_streaming:
+        fixer_adapter = _get_streaming_node_adapter(stream_fixer_node, "fixing", "code", "")
+        workflow.add_node("fixer", fixer_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("fixer", fixer_node)  # type: ignore[call-overload]
+    
+    # Reflection
+    if use_streaming:
+        reflection_adapter = _get_streaming_node_adapter(stream_reflection_node, "reflection", "reflection_result", None)
+        workflow.add_node("reflection", reflection_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("reflection", reflection_node)  # type: ignore[call-overload]
+    
+    # Critic
+    if use_streaming:
+        critic_adapter = _get_streaming_node_adapter(stream_critic_node, "critic", "critic_report", None)
+        workflow.add_node("critic", critic_adapter)  # type: ignore[call-overload]
+    else:
+        workflow.add_node("critic", critic_node)  # type: ignore[call-overload]
     
     # Добавляем рёбра (переходы)
     # START → intent

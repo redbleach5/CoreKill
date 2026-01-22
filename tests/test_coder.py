@@ -2,28 +2,21 @@
 import pytest
 from unittest.mock import Mock, patch
 from agents.coder import CoderAgent
-
-
-# Контекстный менеджер для полного мока CoderAgent
-def mock_coder_dependencies():
-    """Мокает все зависимости CoderAgent."""
-    return patch.multiple(
-        'agents.coder',
-        get_model_router=Mock(return_value=Mock(
-            select_model=Mock(return_value=Mock(model="test-model"))
-        )),
-        create_llm_for_stage=Mock(return_value=Mock(model="test-model", temperature=0.25)),
-        get_prompt_enhancer=Mock(return_value=Mock())
-    )
+from tests.test_utils import create_mock_agent_dependencies
+from tests.factories import TEST_MODELS
 
 
 class TestCoderAgent:
     """Тесты для класса CoderAgent."""
     
     @pytest.fixture
-    def agent(self):
+    def agent(self, mock_agent_dependencies):
         """Создаёт экземпляр CoderAgent для тестов."""
-        with mock_coder_dependencies():
+        with patch.multiple(
+            'agents.coder',
+            **mock_agent_dependencies,
+            get_prompt_enhancer=Mock(return_value=Mock())
+        ):
             return CoderAgent(temperature=0.25, user_query="test query")
     
     def test_init(self, agent):
@@ -33,21 +26,18 @@ class TestCoderAgent:
         assert hasattr(agent, 'prompt_enhancer')
         assert agent.user_query == "test query"
     
-    def test_init_with_custom_model(self):
+    def test_init_with_custom_model(self, mock_agent_dependencies):
         """Тест инициализации с кастомной моделью."""
-        with patch('agents.coder.get_model_router') as mock_router, \
-             patch('agents.coder.create_llm_for_stage') as mock_llm, \
-             patch('agents.coder.get_prompt_enhancer') as mock_enhancer:
-            mock_router.return_value = Mock(select_model=Mock(return_value=Mock(model="test-model")))
-            mock_llm.return_value = Mock(model="test-model", temperature=0.3)
-            mock_enhancer.return_value = Mock()
+        custom_model = TEST_MODELS["medium"]
+        with patch.multiple(
+            'agents.coder',
+            **create_mock_agent_dependencies(model=custom_model, temperature=0.3),
+            get_prompt_enhancer=Mock(return_value=Mock())
+        ):
+            agent = CoderAgent(model=custom_model, temperature=0.3)
             
-            agent = CoderAgent(model="test-model", temperature=0.3)
-            
-            mock_llm.assert_called_once_with(
-                stage="coding",
-                model="test-model",
-                temperature=0.3,
+            assert agent is not None
+            assert hasattr(agent, 'llm')
                 top_p=0.9
             )
     

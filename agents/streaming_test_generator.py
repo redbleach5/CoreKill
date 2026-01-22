@@ -10,6 +10,7 @@ from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from infrastructure.reasoning_stream import get_reasoning_stream_manager
 from infrastructure.reasoning_utils import extract_code_from_reasoning, is_reasoning_response
+from agents.base import BaseAgent
 from utils.logger import get_logger
 from utils.config import get_config
 from infrastructure.model_router import get_model_router
@@ -17,7 +18,7 @@ from infrastructure.model_router import get_model_router
 logger = get_logger()
 
 
-class StreamingTestGeneratorAgent:
+class StreamingTestGeneratorAgent(BaseAgent):
     """Агент для генерации pytest тестов с real-time стримингом.
     
     Расширяет функциональность TestGeneratorAgent:
@@ -37,22 +38,11 @@ class StreamingTestGeneratorAgent:
             model: Модель (если None, выбирается автоматически)
             temperature: Температура (0.15-0.2 для точности)
         """
-        if model is None:
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="testing",
-                preferred_model=None,
-                context={"agent": "streaming_test_generator"}
-            )
-            model = model_selection.model
-        
-        self.model = model
-        self.temperature = temperature
-        self.llm = create_llm_for_stage(
-            stage="testing",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="testing"
         )
         self.prompt_enhancer = get_prompt_enhancer()
         self.reasoning_manager = get_reasoning_stream_manager()
@@ -199,17 +189,9 @@ class StreamingTestGeneratorAgent:
         max_cases: int
     ) -> str:
         """Строит промпт для генерации тестов."""
-        intent_descriptions = {
-            "create": "создание новой функции/класса/модуля",
-            "modify": "изменение существующего кода",
-            "debug": "исправление ошибок",
-            "optimize": "оптимизация производительности",
-            "explain": "объяснение кода (тесты на документацию)",
-            "test": "написание тестов",
-            "refactor": "рефакторинг кода"
-        }
-        
-        intent_desc = intent_descriptions.get(intent_type, "выполнение задачи")
+        # Используем унифицированную функцию для получения описания intent
+        from utils.intent_helpers import get_intent_description
+        intent_desc = get_intent_description(intent_type, format="planning") or "выполнение задачи"
         
         context_section = ""
         if context.strip():

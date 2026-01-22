@@ -4,6 +4,16 @@
 
 Cursor Killer — локальная многоагентная система для генерации кода с гибридным UX, встроенной IDE и умным выбором моделей. Использует LangGraph для workflow и Ollama для LLM.
 
+**Последние изменения:**
+- ✅ **2026-01-21: Унификация workflow** — все режимы теперь используют единый граф LangGraph
+- ✅ **2026-01-21: Адаптеры для стриминга** — стриминговые узлы интегрированы в граф через адаптеры
+- ✅ **2026-01-21: Упрощение кода** — удалено дублирование логики между обычными и стриминговыми путями
+- ✅ **2026-01-21: Улучшения инфраструктуры** — потокобезопасность, оптимизация, интеграция модулей
+- ✅ **2026-01-21: Потокобезопасный кэш стриминговых агентов** — исправлена race condition при параллельных запросах
+- ✅ **2026-01-21: Централизованная конфигурация** — WorkflowConfig для единого доступа к настройкам
+- ✅ **2026-01-21: Декоратор @streaming_node** — унифицированная обработка стриминговых событий
+- ✅ **2026-01-21: Улучшения IntentAgent** — кэширование, калибровка confidence, определение языка
+
 ## Ключевые принципы
 
 - **Dependency Inversion** — зависимости инжектируются через `backend/dependencies.py`
@@ -60,15 +70,22 @@ cursor-killer/
 │       └── constants/
 │           └── sse.ts       # SSE константы
 ├── infrastructure/         # Инфраструктура
-│   ├── local_llm.py        # Интеграция с Ollama
-│   ├── model_router.py     # SmartModelRouter — выбор модели по сложности
+│   ├── local_llm.py        # Интеграция с Ollama (sync/async, JSON парсинг, ThreadPoolExecutor)
+│   ├── connection_pool.py  # Асинхронный пул соединений Ollama (HTTP/2, connection pooling)
+│   ├── model_router.py     # SmartModelRouter — выбор модели по сложности (кэш, fallback)
 │   ├── rag.py              # RAG с ChromaDB
 │   ├── web_search.py       # Веб-поиск
 │   ├── task_checkpointer.py # Сохранение прогресса задач
 │   ├── workflow_state.py   # State схема LangGraph
 │   ├── workflow_nodes.py   # Узлы графа
 │   ├── workflow_edges.py   # Условные переходы
-│   └── workflow_graph.py   # Граф LangGraph
+│   ├── workflow_graph.py   # Граф LangGraph
+│   ├── workflow_config.py  # Централизованная конфигурация workflow
+│   ├── workflow_decorators.py # Декораторы @workflow_node и @streaming_node
+│   ├── workflow_types.py   # Protocol интерфейсы для типизации
+│   ├── streaming_agents_cache.py # Потокобезопасный кэш стриминговых агентов
+│   ├── event_store.py      # Хранилище событий для стриминга
+│   └── circuit_breaker.py   # Circuit Breaker для защиты от каскадных сбоев
 ├── utils/
 │   ├── config.py           # Конфигурация из config.toml
 │   ├── model_checker.py    # Сканирование моделей Ollama
@@ -158,6 +175,13 @@ MEDIUM  → баланс качества и скорости                →
 COMPLEX → максимальное качество                     → 13B+, 30B+, 70B+
 ```
 
+**Улучшения (2026-01-21):**
+- ✅ **Конфигурируемые пороги качества** — `min_quality_simple/medium/complex` в `config.toml`
+- ✅ **Автоматический fallback** — переключение на запасную модель при ошибке
+- ✅ **Кэширование выбора** — кэш на 128 записей для оптимизации
+- ✅ **Динамическая проверка памяти** — учёт доступной RAM при фильтрации моделей
+- ✅ **Валидация конфигурации** — проверка корректности порогов при инициализации
+
 ## История диалогов
 
 ### Backend (ConversationMemory)
@@ -171,6 +195,32 @@ ConversationMemory:
   - _summarize_conversation()  # Автосуммаризация при превышении лимита
   - Сохранение в output/conversations/{id}.json
 ```
+
+### Автоматическая суммаризация диалогов
+
+Система автоматически суммаризирует старые сообщения в диалоге через LLM при превышении лимита (по умолчанию 20 сообщений).
+
+**Как это работает:**
+
+1. **Триггер**: Когда количество несуммаризированных сообщений превышает `max_messages` (20)
+2. **Процесс**: 
+   - Берутся все сообщения кроме последних `max_messages // 2` (10)
+   - Формируется промпт с предыдущей суммаризацией (если есть)
+   - LLM генерирует краткую сводку (2-4 предложения)
+3. **Результат**: 
+   - Старые сообщения заменяются суммаризацией
+   - В контекст попадают: суммаризация + последние 10 сообщений
+
+**Улучшенный промпт суммаризации (2026-01-21):**
+
+Промпт теперь явно просит сохранять:
+- Основную тему/задачу обсуждения
+- Принятые решения и их причины
+- **Важные технические детали** (имена функций, классов, файлов)
+- Проблемы, которые были решены
+- Планы на будущее
+
+Это позволяет системе сохранять контекст даже в длинных диалогах без потери важной информации.
 
 ### Frontend (ChatHistory)
 
@@ -206,29 +256,184 @@ ConversationMemory:
 
 ## Workflow Code режима
 
+### Унифицированный граф LangGraph
+
+Workflow полностью унифицирован через граф LangGraph. Система автоматически выбирает между обычными и стриминговыми узлами на основе конфигурации `use_streaming_agents` в `config.toml`.
+
+**Архитектура:**
+
 ```
 Пользовательский запрос
     ↓
-[Intent Agent] → greeting/help? → END (быстрый ответ)
-    ↓
-[Planner Agent] → план выполнения
-    ↓
-[Researcher Agent] → Codebase Index → RAG → Web Search
-    ↓
-[Test Generator] → pytest тесты (TDD)
-    ↓
-[Coder Agent] → генерация кода
-    ↓
-[Validator] → pytest, mypy, bandit
-    ↓ (ошибки?)
-[Debugger] ← [Fixer] ← [Validator] (до 5 итераций)
-    ↓
-[Reflection Agent] → оценка + сохранение в память
-    ↓
-[Critic Agent] → критический анализ
-    ↓
-Результат
+[LangGraph Workflow]
+    ├── [Intent Agent] → greeting/help? → END (быстрый ответ)
+    │
+    ├── [Planner Agent] → план выполнения
+    │   ├── Обычный: planner_node
+    │   └── Стриминговый: stream_planner_node (через адаптер)
+    │
+    ├── [Researcher Agent] → Codebase Index → RAG → Web Search
+    │
+    ├── [Test Generator] → pytest тесты (TDD)
+    │   ├── Обычный: generator_node
+    │   └── Стриминговый: stream_generator_node (через адаптер)
+    │
+    ├── [Coder Agent] → генерация кода
+    │   ├── Обычный: coder_node
+    │   └── Стриминговый: stream_coder_node (через адаптер)
+    │       └── Инкрементальная генерация для COMPLEX задач
+    │
+    ├── [Validator] → pytest, mypy, bandit
+    │
+    ├── [Debugger] ← [Fixer] ← [Validator] (до 5 итераций)
+    │   ├── Обычные: debugger_node, fixer_node
+    │   └── Стриминговые: stream_debugger_node, stream_fixer_node (через адаптеры)
+    │
+    ├── [Reflection Agent] → оценка + сохранение в память
+    │   ├── Обычный: reflection_node
+    │   └── Стриминговый: stream_reflection_node (через адаптер)
+    │
+    └── [Critic Agent] → критический анализ
+        ├── Обычный: critic_node
+        └── Стриминговый: stream_critic_node (через адаптер)
 ```
+
+### Адаптеры для стриминговых узлов
+
+Стриминговые узлы (например, `stream_planner_node`) возвращают `AsyncGenerator[tuple[str, Any], None]`, что несовместимо с LangGraph, который ожидает функции `AgentState -> AgentState`.
+
+**Решение:** Функция `_get_streaming_node_adapter()` создаёт адаптер, который:
+1. Вызывает стриминговый узел и собирает все SSE события
+2. Сохраняет события в `EventStore` (вне state для оптимизации памяти)
+3. Сохраняет только ссылки на события в `state["event_references"]`
+4. Возвращает финальный `AgentState` для LangGraph
+
+**Пример использования:**
+
+```python
+# В workflow_graph.py
+if use_streaming:
+    planner_adapter = _get_streaming_node_adapter(
+        stream_planner_node, 
+        stage_name="planning",
+        fallback_key="plan",
+        fallback_value=""
+    )
+    workflow.add_node("planner", planner_adapter)
+else:
+    workflow.add_node("planner", planner_node)
+```
+
+### Потокобезопасный кэш стриминговых агентов
+
+**Проблема:** Глобальные переменные `_streaming_*` создавали race condition при параллельных запросах с разными моделями.
+
+**Решение:** `StreamingAgentsCache` с `threading.Lock` для потокобезопасного кэширования:
+
+```python
+from infrastructure.streaming_agents_cache import get_streaming_agent
+
+# Ленивое получение агента с потокобезопасным кэшированием
+agent = get_streaming_agent(
+    agent_type="coder",
+    model="qwen2.5-coder:7b",
+    temperature=0.25,
+    factory=StreamingCoderAgent
+)
+```
+
+**Особенности:**
+- Кэш по ключу `(agent_type, model, temperature, ...)`
+- Потокобезопасность через `threading.Lock`
+- Автоматическая очистка при необходимости
+- Статистика использования кэша
+
+### Централизованная конфигурация (WorkflowConfig)
+
+**Проблема:** Конфигурация workflow была разбросана по коду.
+
+**Решение:** `WorkflowConfig` для единого доступа к настройкам:
+
+```python
+from infrastructure.workflow_config import get_workflow_config
+
+config = get_workflow_config()
+
+# Проверка стриминга
+if config.streaming_enabled:
+    # ...
+
+# Проверка инкрементального кодирования
+if config.should_use_incremental(complexity):
+    # ...
+
+# Получение таймаутов
+timeout = config.get_stage_timeout("coding")
+```
+
+**Методы:**
+- `streaming_enabled` — включён ли стриминг
+- `should_use_incremental(complexity)` — использовать ли инкрементальное кодирование
+- `get_stage_timeout(stage)` — таймаут для этапа
+- `get_temperature(stage)` — температура для этапа
+
+### Декоратор @streaming_node
+
+Унифицированная обработка стриминговых событий:
+
+```python
+from infrastructure.workflow_decorators import streaming_node
+
+@streaming_node(stage="planning", fallback_key="plan", fallback_value="")
+async def stream_planner_node(state: AgentState) -> AsyncGenerator[tuple[str, Any], None]:
+    async for event_type, data in agent.create_plan_stream(...):
+        yield (event_type, data)
+```
+
+**Автоматически:**
+- Сохраняет события в `EventStore`
+- Обрабатывает ошибки с fallback
+- Добавляет `event_references` в state
+
+### Передача SSE событий
+
+SSE события сохраняются в `EventStore` (вне state для оптимизации памяти), а в state хранятся только ссылки:
+
+```python
+# В workflow_nodes.py (через адаптер)
+event_id = await event_store.save_event(event_type, data)
+state["event_references"].append(event_id)
+
+# В backend/routers/agent.py
+async for event in graph.astream(initial_state):
+    for node_name, node_state in event.items():
+        event_references = node_state.get("event_references", [])
+        if event_references:
+            # Загружаем события из EventStore
+            events = await event_store.get_events(event_references)
+            for event in events:
+                yield create_sse_event(event.event_type, event.data)
+```
+
+**Преимущества:**
+- State не раздувается при длительных задачах
+- События изолированы по session_id
+- Автоматическая очистка старых событий (TTL)
+
+### Конфигурация
+
+В `config.toml`:
+
+```toml
+[streaming]
+use_streaming_agents = true  # Использовать стриминговые узлы
+```
+
+**Преимущества унификации:**
+- ✅ Один путь выполнения для всех режимов
+- ✅ Нет дублирования логики
+- ✅ Консистентное поведение
+- ✅ Упрощённая поддержка и тестирование
 
 ## Codebase Indexing (Context Engine)
 
@@ -248,15 +453,49 @@ project_path указан?
 Релевантный контекст кодовой базы → Researcher
 ```
 
+### Умная обрезка чанков (2026-01-21)
+
+При превышении лимита токенов `ContextComposer` использует **умную обрезку**:
+
+- **Сохраняет начало** (60% места): сигнатура, docstring, первые строки
+- **Сохраняет конец** (40% места): return, yield, raise, важные завершающие части
+- **Пропускает середину** с маркером `# ... (middle part truncated) ...`
+
+**Улучшенная логика выбора:**
+- Порог для частичных чанков: 70% лимита (было 50%)
+- Минимальный размер частичного чанка: 150 токенов (было 100)
+- Это позволяет включать больше релевантных чанков
+
+**Подробнее:** [infrastructure/context_engine.md](infrastructure/context_engine.md)
+
 ## SSE Events
+
+### Типы событий
 
 ```typescript
 // Frontend получает события:
-event: stage_start  → { stage: "intent", message: "..." }
-event: stage_end    → { stage: "intent", result: {...} }
-event: complete     → { results: {...}, metrics: {...} }
-event: error        → { error_message: "..." }
+event: stage_start    → { stage: "intent", message: "..." }
+event: stage_end      → { stage: "intent", result: {...} }
+event: thinking       → { content: "..." }  // <think> блоки reasoning моделей
+event: plan_chunk     → { chunk: "..." }    // Части плана
+event: test_chunk     → { chunk: "..." }    // Части тестов
+event: code_chunk     → { chunk: "..." }    // Части кода
+event: complete       → { results: {...}, metrics: {...} }
+event: error          → { error_message: "..." }
 ```
+
+### Механизм передачи
+
+1. **Стриминговые узлы** генерируют события через `yield (event_type, data)`
+2. **Декоратор @streaming_node** сохраняет события в `EventStore` (вне state)
+3. **Адаптеры** сохраняют только ссылки на события в `state["event_references"]`
+4. **run_workflow_stream()** загружает события из `EventStore` по ссылкам и отправляет клиенту
+5. **Frontend** получает события через SSE и обновляет UI в реальном времени
+
+**Преимущества EventStore:**
+- State не раздувается при длительных задачах
+- События изолированы по session_id
+- Автоматическая очистка старых событий (TTL = 1 час)
 
 ## API Endpoints
 
@@ -270,6 +509,189 @@ event: error        → { error_message: "..." }
 | `/api/conversations/{id}` | DELETE | Удалить диалог |
 | `/api/index` | POST | Индексировать проект |
 
+## IntentAgent — улучшения (2026-01-21)
+
+### Кэширование результатов
+
+IntentAgent теперь кэширует результаты для повторяющихся запросов:
+
+```python
+agent = IntentAgent(lazy_llm=True)
+result1 = agent.determine_intent("напиши функцию")  # LLM вызов
+result2 = agent.determine_intent("напиши функцию")  # Из кэша
+```
+
+**Особенности:**
+- In-memory кэш до 1000 записей
+- Ключ кэша: нормализованный запрос (lowercase, strip)
+- Автоматическое кэширование всех результатов
+
+### Калибровка confidence
+
+Автоматическая калибровка уверенности на основе длины запроса:
+
+```python
+# Короткие запросы (< 20 символов) — снижаем уверенность на 0.1
+# Длинные запросы (> 100 символов) — повышаем уверенность на 0.05
+# Нормализация в диапазон [MIN_CONFIDENCE, MAX_CONFIDENCE]
+```
+
+**Константы:**
+- `MIN_CONFIDENCE = 0.3` — минимальная уверенность
+- `MAX_CONFIDENCE = 0.95` — максимальная уверенность
+
+### Определение языка
+
+Автоматическое определение языка запроса для адаптации промптов:
+
+```python
+# Простая эвристика: проверка наличия кириллицы
+language = agent._detect_language("напиши код")  # "ru"
+language = agent._detect_language("write code")   # "en"
+```
+
+**Использование:**
+- Structured промпты всегда на английском (лучшая совместимость)
+- Legacy промпты адаптируются под язык пользователя
+
+### Унифицированные промпты
+
+Единый метод `_get_prompt()` для создания промптов:
+
+```python
+# Автоматически определяет язык и выбирает подходящий промпт
+prompt = agent._get_prompt(query, is_structured=True)
+```
+
+**Преимущества:**
+- Нет дублирования между structured/legacy
+- Консистентность результатов
+- Поддержка мультиязычности
+
+## Dependency Injection
+
+### DependencyContainer (`backend/dependencies.py`)
+
+Централизованный контейнер для управления зависимостями приложения.
+
+**Особенности (2026-01-21):**
+- ✅ **Потокобезопасность** — использование `threading.Lock` с double-checked locking
+- ✅ **Параметризация RAGSystem** — поддержка разных коллекций с проверкой при повторных вызовах
+- ✅ **Конфигурация из config** — использование `config.rag_persist_directory` и `config.rag_code_collection`
+- ✅ **Graceful shutdown** — метод `shutdown()` для корректного завершения работы
+
+**Использование:**
+```python
+from backend.dependencies import get_memory_agent, get_rag_system, shutdown_dependencies
+
+# Получение singleton зависимостей
+memory = get_memory_agent()
+rag = get_rag_system(collection_name="task_memory")  # Поддержка разных коллекций
+
+# При shutdown
+shutdown_dependencies()
+```
+
+## Connection Pool
+
+### OllamaConnectionPool (`infrastructure/connection_pool.py`)
+
+Асинхронный пул соединений для работы с Ollama API через httpx.
+
+**Особенности (2026-01-21):**
+- ✅ **Потокобезопасность** — глобальный пул с `threading.Lock`
+- ✅ **HTTP/2 и connection pooling** — оптимизация для production
+- ✅ **Инициализация при старте** — предварительная инициализация в FastAPI lifespan
+- ✅ **Улучшенная обработка ошибок** — детальные сообщения для разных типов ошибок
+- ✅ **Streaming поддержка** — метод `generate_stream()` для streaming генерации
+
+**Использование:**
+```python
+from infrastructure.connection_pool import get_ollama_pool
+
+pool = await get_ollama_pool()
+result = await pool.generate(model="qwen2.5-coder:7b", prompt="...")
+
+# Streaming
+async for chunk in pool.generate_stream(model="...", prompt="..."):
+    if chunk.get("done"):
+        break
+    content = chunk.get("response", "")
+```
+
+## LocalLLM
+
+### Улучшения (2026-01-21)
+
+**JSON парсинг:**
+- ✅ Корректная обработка вложенных JSON структур через стек
+- ✅ Учёт строк в JSON (скобки внутри строк игнорируются)
+- ✅ Обработка escape-последовательностей
+
+**ThreadPoolExecutor:**
+- ✅ Общий классовый executor вместо создания нового для каждого запроса
+- ✅ Максимум 10 одновременных запросов (настраивается)
+- ✅ Корректное завершение при shutdown
+
+## IntentAgent — улучшения (2026-01-21)
+
+### Кэширование результатов
+
+IntentAgent теперь кэширует результаты для повторяющихся запросов:
+
+```python
+agent = IntentAgent(lazy_llm=True)
+result1 = agent.determine_intent("напиши функцию")  # LLM вызов
+result2 = agent.determine_intent("напиши функцию")  # Из кэша
+```
+
+**Особенности:**
+- In-memory кэш до 1000 записей
+- Ключ кэша: нормализованный запрос (lowercase, strip)
+- Автоматическое кэширование всех результатов
+
+### Калибровка confidence
+
+Автоматическая калибровка уверенности на основе длины запроса:
+
+```python
+# Короткие запросы (< 20 символов) — снижаем уверенность на 0.1
+# Длинные запросы (> 100 символов) — повышаем уверенность на 0.05
+# Нормализация в диапазон [MIN_CONFIDENCE, MAX_CONFIDENCE]
+```
+
+**Константы:**
+- `MIN_CONFIDENCE = 0.3` — минимальная уверенность
+- `MAX_CONFIDENCE = 0.95` — максимальная уверенность
+
+### Определение языка
+
+Автоматическое определение языка запроса для адаптации промптов:
+
+```python
+# Простая эвристика: проверка наличия кириллицы
+language = agent._detect_language("напиши код")  # "ru"
+language = agent._detect_language("write code")   # "en"
+```
+
+**Использование:**
+- Structured промпты всегда на английском (лучшая совместимость)
+- Legacy промпты адаптируются под язык пользователя
+
+### Унифицированные промпты
+
+Единый метод `_get_prompt()` для создания промптов:
+
+```python
+# Автоматически определяет язык и выбирает подходящий промпт
+prompt = agent._get_prompt(query, is_structured=True)
+```
+
+**Преимущества:**
+- Нет дублирования между structured/legacy
+- Консистентность результатов
+- Поддержка мультиязычности
+
 ## Конфигурация
 
 ### config.toml секции
@@ -280,11 +702,16 @@ event: error        → { error_message: "..." }
 | `[llm]` | Настройки LLM (токены) |
 | `[interaction]` | Режимы (default_mode, chat_model) |
 | `[hardware]` | Лимиты (VRAM, heavy/ultra модели) |
-| `[quality]` | Метрики качества |
+| `[quality]` | Метрики качества + пороги для ModelRouter (`min_quality_simple/medium/complex`) |
 | `[web_search]` | Веб-поиск |
-| `[rag]` | ChromaDB настройки |
+| `[rag]` | ChromaDB настройки (`persist_directory`, `code_collection`, `memory_collection`) |
 | `[persistence]` | Сохранение задач |
 | `[context_engine]` | Индексация кодовой базы |
+| `[streaming]` | Стриминговые узлы в workflow (`use_streaming_agents`) |
+| `[incremental_coding]` | Инкрементальная генерация (`enabled`, `min_complexity`) |
+| `[timeouts]` | Таймауты для этапов workflow |
+| `[circuit_breaker]` | Настройки Circuit Breaker (`failure_threshold`, `recovery_timeout`) |
+| `[ollama]` | Настройки Ollama (`host`, `connection_pool_size`, `timeout`) |
 
 ## Масштабирование
 

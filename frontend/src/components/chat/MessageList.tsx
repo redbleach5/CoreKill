@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { ChatMessage } from '../../types/chat'
 import { StageStatus } from '../../hooks/useAgentStream'
+import { api } from '../../services/apiClient'
 import { ThinkingBlock } from '../ThinkingBlock'
 
 interface MessageListProps {
@@ -189,14 +190,11 @@ async function fetchStageDurations(): Promise<Record<string, number>> {
   }
   
   try {
-    const response = await fetch('/api/metrics/stages')
-    if (response.ok) {
-      const data = await response.json()
-      if (data.estimates) {
-        cachedStageDurations = data.estimates as Record<string, number>
-        lastFetchTime = now
-        return cachedStageDurations
-      }
+    const data = await api.metrics.getStages()
+    if (data.estimates) {
+      cachedStageDurations = data.estimates as Record<string, number>
+      lastFetchTime = now
+      return cachedStageDurations
     }
   } catch {
     // Игнорируем ошибки — используем fallback

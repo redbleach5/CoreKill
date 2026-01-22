@@ -29,21 +29,11 @@ class TestGeneratorAgent:
             model: Модель для генерации тестов (если None, выбирается из config)
             temperature: Температура генерации (0.15-0.2 по правилам, низкая для точности)
         """
-        if model is None:
-            # Используем ModelRouter для выбора модели (поддерживает будущее расширение роя моделей)
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="testing",
-                preferred_model=None,
-                context={"agent": "test_generator"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="testing",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="testing"
         )
         self.prompt_enhancer = get_prompt_enhancer()
 
@@ -116,17 +106,9 @@ class TestGeneratorAgent:
     ) -> str:
         """Строит промпт для генерации тестов."""
         
-        intent_descriptions = {
-            "create": "создание новой функции/класса/модуля",
-            "modify": "изменение существующего кода",
-            "debug": "исправление ошибок",
-            "optimize": "оптимизация производительности",
-            "explain": "объяснение кода (тесты на документацию)",
-            "test": "написание тестов",
-            "refactor": "рефакторинг кода"
-        }
-        
-        intent_desc = intent_descriptions.get(intent_type, "выполнение задачи")
+        # Используем унифицированную функцию для получения описания intent
+        from utils.intent_helpers import get_intent_description
+        intent_desc = get_intent_description(intent_type, format="planning") or "выполнение задачи"
         
         context_section = ""
         if context.strip():

@@ -9,6 +9,10 @@ import {
   File, Folder, PanelLeftClose, PanelLeft
 } from 'lucide-react'
 import { CodeEditor } from './CodeEditor'
+import { IndexProjectResponse, ProjectFilesResponse, FileContentResponse, BrowseFolderResponse } from '../types/api'
+import { extractErrorMessage } from '../utils/apiErrorHandler'
+import { api } from '../services/apiClient'
+import { useLocalStorage, useLocalStorageString } from '../hooks/useLocalStorage'
 
 // ============================================================================
 // Types
@@ -232,31 +236,48 @@ export function IDEPanel({
   useEffect(() => { setTempPath(projectPath) }, [projectPath])
   useEffect(() => { setTempExtensions(fileExtensions) }, [fileExtensions])
 
-  // Load from localStorage
+  // Load from localStorage using hooks
+  const [savedProjectPath, setSavedProjectPath] = useLocalStorageString('projectPath', '')
+  const [savedFileExtensions, setSavedFileExtensions] = useLocalStorageString('fileExtensions', '')
+  const [savedSidebarOpen, setSavedSidebarOpen] = useLocalStorage<boolean>('ideSidebarOpen', true)
+  const [savedSidebarWidth, setSavedSidebarWidth] = useLocalStorage<number>('ideSidebarWidth', DEFAULT_SIDEBAR_WIDTH)
+  
+  // Sync with props and localStorage
   useEffect(() => {
-    const savedPath = localStorage.getItem('projectPath')
-    const savedExt = localStorage.getItem('fileExtensions')
-    const savedSidebarOpen = localStorage.getItem('ideSidebarOpen')
-    const savedSidebarWidth = localStorage.getItem('ideSidebarWidth')
-    
-    if (savedPath && !projectPath && onProjectPathChange) {
-      onProjectPathChange(savedPath)
-      setTempPath(savedPath)
+    if (savedProjectPath && !projectPath && onProjectPathChange) {
+      onProjectPathChange(savedProjectPath)
+      setTempPath(savedProjectPath)
     }
-    if (savedExt && !fileExtensions && onFileExtensionsChange) {
-      onFileExtensionsChange(savedExt)
-      setTempExtensions(savedExt)
+    if (savedFileExtensions && !fileExtensions && onFileExtensionsChange) {
+      onFileExtensionsChange(savedFileExtensions)
+      setTempExtensions(savedFileExtensions)
     }
-    if (savedSidebarOpen !== null) {
-      setSidebarOpen(savedSidebarOpen === 'true')
+    setSidebarOpen(savedSidebarOpen)
+    if (savedSidebarWidth >= MIN_SIDEBAR_WIDTH && savedSidebarWidth <= MAX_SIDEBAR_WIDTH) {
+      setSidebarWidth(savedSidebarWidth)
     }
-    if (savedSidebarWidth !== null) {
-      const width = parseInt(savedSidebarWidth, 10)
-      if (!isNaN(width) && width >= MIN_SIDEBAR_WIDTH && width <= MAX_SIDEBAR_WIDTH) {
-        setSidebarWidth(width)
-      }
+  }, [savedProjectPath, savedFileExtensions, savedSidebarOpen, savedSidebarWidth, projectPath, fileExtensions, onProjectPathChange, onFileExtensionsChange])
+  
+  // Save to localStorage when changed
+  useEffect(() => {
+    if (projectPath) {
+      setSavedProjectPath(projectPath)
     }
-  }, [])
+  }, [projectPath, setSavedProjectPath])
+  
+  useEffect(() => {
+    if (fileExtensions) {
+      setSavedFileExtensions(fileExtensions)
+    }
+  }, [fileExtensions, setSavedFileExtensions])
+  
+  useEffect(() => {
+    setSavedSidebarOpen(sidebarOpen)
+  }, [sidebarOpen, setSavedSidebarOpen])
+  
+  useEffect(() => {
+    setSavedSidebarWidth(sidebarWidth)
+  }, [sidebarWidth, setSavedSidebarWidth])
 
   // Resize handlers
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -278,7 +299,7 @@ export function IDEPanel({
   const handleResizeEnd = useCallback(() => {
     if (isResizing) {
       setIsResizing(false)
-      localStorage.setItem('ideSidebarWidth', String(sidebarWidth))
+      // Сохранение происходит автоматически через хук useLocalStorage
     }
   }, [isResizing, sidebarWidth])
 
@@ -309,24 +330,18 @@ export function IDEPanel({
     
     setIsLoadingTree(true)
     try {
-      const params = new URLSearchParams({ path })
-      if (extensions) params.append('extensions', extensions)
-      
-      const response = await fetch(`/api/project-files?${params}`)
-      if (response.ok) {
-        const data: ProjectFilesResponse = await response.json()
-        if (data.error) {
-          console.error('Ошибка загрузки файлов:', data.error)
-          setFileTree(null)
-        } else {
-          setFileTree(data.tree)
-          setFileTreeStats(data.stats)
-          // Expand root by default
-          setExpandedDirs(new Set([data.tree.path]))
-        }
+      const data = await api.projects.getFiles(path, extensions)
+      if (data.error) {
+        console.error('Ошибка загрузки файлов:', data.error)
+        setFileTree(null)
+      } else {
+        setFileTree(data.tree)
+        setFileTreeStats(data.stats)
+        // Expand root by default
+        setExpandedDirs(new Set([data.tree.path]))
       }
     } catch (error) {
-      console.error('Ошибка загрузки дерева файлов:', error)
+      console.error('Ошибка загрузки дерева файлов:', extractErrorMessage(error))
       setFileTree(null)
     } finally {
       setIsLoadingTree(false)
@@ -355,7 +370,7 @@ export function IDEPanel({
   const toggleSidebar = () => {
     const newValue = !sidebarOpen
     setSidebarOpen(newValue)
-    localStorage.setItem('ideSidebarOpen', String(newValue))
+    // Сохранение происходит автоматически через хук useLocalStorage
   }
 
   const handleFileClick = async (node: FileTreeNode) => {
@@ -373,27 +388,24 @@ export function IDEPanel({
     // Load file content
     setIsLoadingFile(true)
     try {
-      const response = await fetch(`/api/file-content?path=${encodeURIComponent(node.path)}`)
-      if (response.ok) {
-        const data = await response.json()
-        if (data.error) {
-          console.error('Ошибка чтения файла:', data.error)
-          return
-        }
-        
-        const lang = getLanguageFromExtension(node.extension || '')
-        const newFile: CodeFile = {
-          id: Date.now().toString(),
-          name: node.name,
-          path: node.path,
-          language: lang,
-          content: data.content,
-        }
-        setFiles(prev => [...prev, newFile])
-        setActiveFileId(newFile.id)
+      const data = await api.projects.getFileContent(node.path)
+      if (data.error) {
+        console.error('Ошибка чтения файла:', data.error)
+        return
       }
+      
+      const lang = getLanguageFromExtension(node.extension || '')
+      const newFile: CodeFile = {
+        id: Date.now().toString(),
+        name: node.name,
+        path: node.path,
+        language: lang,
+        content: data.content,
+      }
+      setFiles(prev => [...prev, newFile])
+      setActiveFileId(newFile.id)
     } catch (error) {
-      console.error('Ошибка загрузки файла:', error)
+      console.error('Ошибка загрузки файла:', extractErrorMessage(error))
     } finally {
       setIsLoadingFile(false)
     }
@@ -429,16 +441,12 @@ export function IDEPanel({
     setIndexStatus('idle')
 
     try {
-      const response = await fetch('/api/index', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_path: projectPath,
-          file_extensions: fileExtensions.split(',').map(e => e.trim())
-        })
+      const result = await api.projects.index({
+        project_path: projectPath,
+        file_extensions: fileExtensions.split(',').map(e => e.trim()).filter(e => e)
       })
-
-      if (response.ok) {
+      
+      if (result.status === 'success') {
         setIndexStatus('success')
         // Refresh file tree after indexing
         loadFileTree(projectPath, fileExtensions)
@@ -446,7 +454,7 @@ export function IDEPanel({
         setIndexStatus('error')
       }
     } catch (error) {
-      console.error('Ошибка индексации:', error)
+      console.error('Ошибка индексации:', extractErrorMessage(error))
       setIndexStatus('error')
     } finally {
       setIsIndexing(false)
@@ -458,8 +466,8 @@ export function IDEPanel({
     onProjectPathChange?.(tempPath)
     onFileExtensionsChange?.(tempExtensions)
     setShowProjectModal(false)
-    localStorage.setItem('projectPath', tempPath)
-    localStorage.setItem('fileExtensions', tempExtensions)
+    setSavedProjectPath(tempPath)
+    setSavedFileExtensions(tempExtensions)
     // Load tree for new project
     loadFileTree(tempPath, tempExtensions)
   }
@@ -467,20 +475,13 @@ export function IDEPanel({
   const handleBrowseFolder = async () => {
     setIsBrowsing(true)
     try {
-      const url = tempPath 
-        ? `/api/browse-folder?start_path=${encodeURIComponent(tempPath)}`
-        : '/api/browse-folder'
-      
-      const response = await fetch(url)
-      if (response.ok) {
-        const data = await response.json()
-        if (data.path) {
-          setTempPath(data.path)
-          localStorage.setItem('projectPath', data.path)
-        }
+      const data = await api.projects.browseFolder(tempPath)
+      if (data.path && data.exists) {
+        setTempPath(data.path)
+        setSavedProjectPath(data.path)
       }
     } catch (error) {
-      console.error('Ошибка выбора папки:', error)
+      console.error('Ошибка выбора папки:', extractErrorMessage(error))
     } finally {
       setIsBrowsing(false)
     }

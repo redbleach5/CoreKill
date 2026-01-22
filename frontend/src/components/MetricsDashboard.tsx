@@ -15,6 +15,11 @@ import {
   TestTube2,
   FileSearch
 } from 'lucide-react'
+import { useApi } from '../hooks/useApi'
+import { api } from '../services/apiClient'
+import { LoadingState } from './ui/LoadingState'
+import { ErrorState } from './ui/ErrorState'
+import { EmptyState } from './ui/EmptyState'
 
 interface GenerationMetrics {
   total_generations: number
@@ -152,71 +157,38 @@ function StageBar({ stage, avgTime, calls, errors, maxTime }: StageBarProps) {
 }
 
 export function MetricsDashboard() {
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { data, loading, error, refetch } = useApi(() => api.metrics.get(), {
+    immediate: true,
+    cache: true,
+    cacheTTL: 30000 // 30 секунд
+  })
   const [autoRefresh, setAutoRefresh] = useState(true)
 
-  const fetchMetrics = async () => {
-    try {
-      const isDev = typeof window !== 'undefined' && window.location.port === '5173'
-      const apiUrl = isDev ? 'http://localhost:8000/api/metrics' : '/api/metrics'
-      
-      const response = await fetch(apiUrl)
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`)
-      }
-      
-      const result = await response.json()
-      setData(result)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ошибка загрузки')
-    } finally {
-      setLoading(false)
-    }
-  }
-
+  // Автообновление каждые 30 секунд
   useEffect(() => {
-    fetchMetrics()
-    
     if (autoRefresh) {
-      const interval = setInterval(fetchMetrics, 30000) // Обновление каждые 30 сек
+      const interval = setInterval(() => refetch(), 30000)
       return () => clearInterval(interval)
     }
-  }, [autoRefresh])
+  }, [autoRefresh, refetch])
 
   if (loading) {
-    return (
-      <div className="p-6 flex items-center justify-center">
-        <RefreshCw className="w-6 h-6 text-purple-400 animate-spin" />
-        <span className="ml-2 text-gray-400">Загрузка метрик...</span>
-      </div>
-    )
+    return <LoadingState message="Загрузка метрик..." />
   }
 
   if (error) {
     return (
-      <div className="p-6 text-center">
-        <AlertTriangle className="w-8 h-8 text-yellow-400 mx-auto mb-2" />
-        <p className="text-gray-400">Не удалось загрузить метрики</p>
-        <p className="text-sm text-gray-500 mt-1">{error}</p>
-        <button 
-          onClick={fetchMetrics}
-          className="mt-4 px-4 py-2 bg-purple-500/20 text-purple-300 rounded-lg hover:bg-purple-500/30 transition-colors"
-        >
-          Повторить
-        </button>
-      </div>
+      <ErrorState
+        title="Не удалось загрузить метрики"
+        message={error}
+        onRetry={refetch}
+        retryLabel="Повторить"
+      />
     )
   }
 
   if (!data) {
-    return (
-      <div className="p-6 text-center text-gray-400">
-        Нет данных
-      </div>
-    )
+    return <EmptyState message="Нет данных" />
   }
 
   const gen = data.generation

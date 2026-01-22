@@ -6,7 +6,7 @@
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class InteractionMode(str, Enum):
@@ -37,7 +37,7 @@ class Message(BaseModel):
     id: str = Field(..., description="Уникальный ID сообщения")
     role: MessageRole = Field(..., description="Роль отправителя")
     content: str = Field(..., description="Текст сообщения")
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Время отправки")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Время отправки")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Дополнительные данные")
     
     class Config:
@@ -117,3 +117,28 @@ class IntentClassification(BaseModel):
     
     class Config:
         use_enum_values = True
+
+
+class StreamQueryParams(BaseModel):
+    """Валидация query параметров для /api/stream endpoint.
+    
+    Обеспечивает типизацию и валидацию всех параметров SSE стриминга.
+    """
+    task: str = Field(..., min_length=1, description="Текст задачи")
+    mode: InteractionMode = Field(default=InteractionMode.AUTO, description="Режим взаимодействия")
+    model: str = Field(default="", description="Модель Ollama (пусто = авто-выбор)")
+    temperature: float = Field(default=0.25, ge=0.1, le=0.7, description="Температура генерации")
+    disable_web_search: bool = Field(default=False, description="Отключить веб-поиск")
+    max_iterations: int = Field(default=3, ge=1, le=5, description="Максимальное количество итераций")
+    conversation_id: Optional[str] = Field(default=None, description="ID диалога для сохранения контекста")
+    project_path: Optional[str] = Field(default=None, description="Путь к проекту для индексации")
+    file_extensions: Optional[str] = Field(default=None, description="Расширения файлов через запятую (например: .py,.js)")
+    
+    class Config:
+        use_enum_values = True
+
+
+class IndexProjectRequest(BaseModel):
+    """Запрос на индексацию проекта."""
+    project_path: str = Field(..., min_length=1, description="Путь к корневой папке проекта")
+    file_extensions: List[str] = Field(default_factory=lambda: [".py"], description="Список расширений файлов для индексации")

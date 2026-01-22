@@ -1,5 +1,7 @@
 # Метрики качества
 
+**Цель:** Поддерживать высокое качество кода через автоматизированные проверки и тестирование.
+
 ## Целевые показатели
 
 | Метрика | Цель |
@@ -38,8 +40,10 @@ tests/
 
 1. **Моки агентов:**
    - Патчить `create_llm_for_stage` (не `LocalLLM`)
-   - Патчить `get_model_router`
+   - Патчить `get_model_router` для авто-выбора моделей
    - Патчить `get_prompt_enhancer` для Coder/TestGenerator
+   - Патчить `get_workflow_config()` если нужно переопределить конфигурацию
+   - Патчить `_get_streaming_agent_for_state()` для стриминговых узлов
 
 2. **Async тесты:**
    - Декоратор `@pytest.mark.asyncio`
@@ -47,5 +51,6 @@ tests/
    - `await` для async функций
 
 3. **Workflow тесты:**
-   - Мокать `_initialize_agents`, `_save_checkpoint`
+   - Мокать `_get_streaming_agent_for_state()` вместо `_initialize_agents` (устарело)
+   - Мокать `_save_checkpoint` и `_record_stage_duration`
    - Использовать `create_test_state()` helper

@@ -20,6 +20,7 @@ dmypy.json
 
 # ChromaDB / Vector DB
 .chromadb/
+.chromadb_test/
 
 # Output & Artifacts
 output/

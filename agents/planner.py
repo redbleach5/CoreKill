@@ -2,6 +2,7 @@
 from typing import Optional, List
 from infrastructure.local_llm import create_llm_for_stage
 from agents.memory import MemoryAgent
+from agents.base import BaseAgent
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -16,7 +17,7 @@ from infrastructure.model_router import get_model_router
 logger = get_logger()
 
 
-class PlannerAgent:
+class PlannerAgent(BaseAgent):
     """Агент для создания плана выполнения задачи и альтернативных подходов.
     
     Использует память для извлечения уроков из прошлых похожих задач.
@@ -35,21 +36,11 @@ class PlannerAgent:
             temperature: Температура генерации
             memory_agent: Опциональный экземпляр MemoryAgent для получения рекомендаций
         """
-        if model is None:
-            # Используем ModelRouter для выбора модели (поддерживает будущее расширение роя моделей)
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="planning",
-                preferred_model=None,
-                context={"agent": "planner"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="planning",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="planning"
         )
         self.memory = memory_agent
 
@@ -133,62 +124,14 @@ class PlannerAgent:
         alternatives_count: int
     ) -> str:
         """Строит промпт для генерации плана."""
-        
-        intent_descriptions = {
-            "create": "создание нового кода/функции/класса/модуля",
-            "modify": "изменение существующего кода",
-            "debug": "поиск и исправление ошибок",
-            "optimize": "оптимизация производительности или качества",
-            "explain": "объяснение кода",
-            "test": "написание тестов",
-            "refactor": "рефакторинг кода без изменения функциональности"
-        }
-        
-        intent_desc = intent_descriptions.get(intent_type, "выполнение задачи")
-        
-        context_section = ""
-        if context.strip():
-            context_section = f"""
-Контекст:
-{context}
-"""
-        
-        memory_section = ""
-        if memory_recommendations:
-            memory_section = f"""
-Рекомендации из памяти прошлых задач:
-{memory_recommendations}
-"""
-        
-        prompt = f"""Ты - эксперт по планированию разработки. Создай детальный план для следующей задачи.
-
-Задача: {task}
-Тип: {intent_desc}
-{context_section}{memory_section}
-Требования к плану:
-1. Основной план должен быть детальным и пошаговым (минимум 4-5 шагов)
-2. Предложи {alternatives_count} альтернативных подхода (если основной не сработает)
-3. План должен быть конкретным и выполнимым
-4. Учитывай лучшие практики Python и рекомендации из контекста/памяти
-
-Формат ответа:
-
-ОСНОВНОЙ ПЛАН:
-1. [Шаг 1]
-2. [Шаг 2]
-...
-
-АЛЬТЕРНАТИВНЫЙ ПОДХОД 1:
-1. [Шаг 1]
-...
-
-АЛЬТЕРНАТИВНЫЙ ПОДХОД 2:
-1. [Шаг 1]
-...
-
-План:
-"""
-        return prompt
+        from infrastructure.prompt_templates import build_planning_prompt
+        return build_planning_prompt(
+            task=task,
+            intent_type=intent_type,
+            context=context,
+            memory_recommendations=memory_recommendations,
+            alternatives_count=alternatives_count
+        )
 
     def _clean_plan(self, raw_plan: str) -> str:
         """Очищает сгенерированный план от лишних элементов.

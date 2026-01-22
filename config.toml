@@ -7,10 +7,20 @@
 [ollama]
 # Хост Ollama API (по умолчанию локальный)
 # Для удалённого сервера: "http://192.168.1.100:11434" или Tailscale "http://100.x.x.x:11434"
+# Переменные окружения OLLAMA_BASE_URL или OLLAMA_HOST переопределяют это значение
 host = "http://localhost:11434"
 
 # Таймаут подключения к Ollama в секундах
+# Переменная окружения OLLAMA_TIMEOUT переопределяет это значение
 connect_timeout = 10
+
+# Таймаут для запросов к Ollama (в секундах, для connection pool)
+# Переменная окружения OLLAMA_TIMEOUT переопределяет это значение
+timeout = 300
+
+# Размер пула соединений для Ollama
+# Переменная окружения CONNECTION_POOL_SIZE переопределяет это значение
+connection_pool_size = 10
 
 # Использовать удалённый Ollama (если true, игнорирует локальный)
 # Полезно для переключения между локальным и удалённым без смены host
@@ -193,6 +203,23 @@ tokens_debug = 2048
 # Максимум токенов для критического анализа
 tokens_critic = 512
 
+# === Prompt Length Limits ===
+# Лимиты длины для обрезки контента в промптах (символов)
+# Предотвращает переполнение контекста и дублирование кода
+
+[prompt_limits]
+# Максимальная длина тестов в промпте генерации кода
+max_tests_length = 2000
+
+# Максимальная длина тестов в промпте исправления кода
+max_tests_length_fix = 1000
+
+# Максимальная длина контекста в промпте
+max_context_length = 1000
+
+# Максимальная длина ошибок валидации в промпте
+max_validation_errors_length = 300
+
 # === Quality Thresholds ===
 # Пороги качества для оценки результатов
 
@@ -205,6 +232,14 @@ confidence_threshold = 0.75
 
 # Порог для повторного запуска (если качество ниже, should_retry = true)
 retry_threshold = 0.5
+
+# Минимальное качество модели для каждой сложности задачи (для ModelRouter)
+# SIMPLE: любая модель от 1.5B
+min_quality_simple = 0.3
+# MEDIUM: минимум 7B или хорошая coder
+min_quality_medium = 0.55
+# COMPLEX: минимум 7B coder или 13B+
+min_quality_complex = 0.7
 
 # === Web Search ===
 # Настройки веб-поиска (Tavily, DuckDuckGo, Google)
@@ -355,6 +390,76 @@ max_checkpoint_age_hours = 24
 # Автоматически помечать задачи как paused при потере соединения
 auto_pause_on_disconnect = true
 
+
+# === Agent Resource Management ===
+# Контроль ресурсов для предотвращения перегрузки системы
+
+[agent_resources]
+# Максимальное количество одновременных агентов
+# Ограничивает количество параллельных вызовов агентов для предотвращения
+# перегрузки системы и исчерпания ресурсов
+max_concurrent_agents = 5
+
+# === Code Security ===
+# Проверка безопасности сгенерированного кода
+
+[code_security]
+# Включить проверку безопасности
+enabled = true
+
+# Строгий режим (блокирует код с опасными операциями)
+# Если false, только предупреждает, но не блокирует
+strict_mode = false
+
+# Блокировать опасные импорты (os, subprocess, etc.)
+block_dangerous_imports = true
+
+# Блокировать опасные функции (eval, exec, etc.)
+block_dangerous_functions = true
+
+# Блокировать системные вызовы (os.system, subprocess.run, etc.)
+block_system_calls = true
+
+# === Code Style Configuration ===
+# Настройки стиля генерируемого кода
+
+[code_style]
+# Стиль docstrings: google, numpy, sphinx, russian (по умолчанию)
+docstring_style = "russian"
+
+# Язык docstrings: ru, en
+docstring_language = "ru"
+
+# Стиль именования: snake_case, camelCase, PascalCase
+naming_style = "snake_case"
+
+# Требовать type hints
+require_type_hints = true
+
+# Требовать docstrings для публичного API
+require_docstrings = true
+
+# Следовать PEP8
+follow_pep8 = true
+
+# Максимальная длина строки (символов)
+max_line_length = 88
+
+# === Circuit Breaker ===
+# Защита от каскадных сбоев при повторяющихся ошибках агентов
+
+[circuit_breaker]
+# Порог ошибок для открытия circuit breaker
+# После этого количества ошибок circuit временно отключает вызовы
+failure_threshold = 5
+
+# Время ожидания перед попыткой восстановления (секунды)
+# После этого времени circuit переходит в HALF_OPEN для тестирования
+recovery_timeout = 30.0
+
+# Количество успешных вызовов для закрытия circuit (в HALF_OPEN)
+# После этого количества успешных вызовов circuit закрывается
+success_threshold = 2
 
 # === Debug / Under The Hood ===
 # Phase 7: Визуализация работы системы

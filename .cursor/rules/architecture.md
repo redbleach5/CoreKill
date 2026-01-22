@@ -1,5 +1,7 @@
 # Архитектура проекта
 
+**Принцип:** Модульная архитектура через LangGraph с автоматическим выбором моделей и конфигурируемыми компонентами.
+
 ## Workflow (LangGraph)
 
 ```
@@ -14,6 +16,11 @@ reflection_node → critic_node → END
 - `infrastructure/workflow_nodes.py` — узлы (async + streaming)
 - `infrastructure/workflow_edges.py` — условные переходы
 - `infrastructure/workflow_state.py` — AgentState
+- `infrastructure/workflow_config.py` — централизованная конфигурация
+- `infrastructure/workflow_decorators.py` — декораторы @workflow_node и @streaming_node
+- `infrastructure/workflow_types.py` — Protocol интерфейсы для типизации
+- `infrastructure/streaming_agents_cache.py` — потокобезопасный кэш стриминговых агентов
+- `infrastructure/event_store.py` — хранилище событий для стриминговых узлов
 
 **Стриминговые узлы:**
 - `stream_planner_node()` — планирование с thinking
@@ -32,7 +39,7 @@ reflection_node → critic_node → END
 
 | Агент | Файл | Назначение |
 |-------|------|------------|
-| Intent | `agents/intent.py` | Определение типа задачи |
+| Intent | `agents/intent.py` | Определение типа задачи (кэширование, калибровка confidence, определение языка, унифицированные промпты) |
 | Planner | `agents/planner.py` | Создание плана |
 | Researcher | `agents/researcher.py` | Сбор контекста (RAG + web) |
 | TestGenerator | `agents/test_generator.py` | Генерация pytest тестов |
@@ -64,25 +71,41 @@ reflection_node → critic_node → END
 ## Dependency Injection
 
 ```python
-from backend.dependencies import get_memory_agent, get_rag_system
+from backend.dependencies import get_memory_agent, get_rag_system, shutdown_dependencies
 from infrastructure.local_llm import create_llm_for_stage
 
-# Singleton агенты
+# Singleton агенты (потокобезопасные)
 memory = get_memory_agent()
-rag = get_rag_system()
+rag = get_rag_system(collection_name="task_memory")  # Поддержка разных коллекций
 
-# LLM с правильным таймаутом
-llm = create_llm_for_stage(stage="coding", model="qwen2.5-coder:7b")
+# LLM с правильным таймаутом (модель выбирается автоматически)
+llm = create_llm_for_stage(stage="coding", model=None)
+
+# Graceful shutdown
+shutdown_dependencies()
 ```
+
+**Особенности:**
+- Потокобезопасность через `threading.Lock`
+- Параметризация RAGSystem (разные коллекции)
+- Конфигурация из `config.toml`
+- Корректное завершение работы
 
 ## Ключевые модули
 
 | Модуль | Назначение |
 |--------|------------|
-| `infrastructure/local_llm.py` | Работа с Ollama (sync/async) |
-| `infrastructure/model_router.py` | Выбор модели по задаче |
+| `infrastructure/local_llm.py` | Работа с Ollama (sync/async, JSON парсинг, ThreadPoolExecutor) |
+| `infrastructure/connection_pool.py` | Асинхронный пул соединений Ollama (HTTP/2, connection pooling) |
+| `infrastructure/model_router.py` | Выбор модели по задаче (кэш, fallback, динамическая проверка памяти) |
 | `infrastructure/performance_metrics.py` | Метрики производительности |
 | `infrastructure/task_checkpointer.py` | Сохранение состояния задач |
+| `infrastructure/workflow_config.py` | Централизованная конфигурация workflow (стриминг, инкрементальное кодирование) |
+| `infrastructure/streaming_agents_cache.py` | Потокобезопасный кэш стриминговых агентов |
+| `infrastructure/workflow_decorators.py` | Декораторы @workflow_node и @streaming_node |
+| `infrastructure/event_store.py` | Хранилище событий для стриминговых узлов |
+| `infrastructure/circuit_breaker.py` | Circuit Breaker для защиты от каскадных сбоев |
+| `backend/dependencies.py` | Dependency Injection (потокобезопасный, с graceful shutdown) |
 | `backend/sse_manager.py` | Server-Sent Events |
 | `utils/config.py` | Конфигурация из config.toml |
 
@@ -94,7 +117,7 @@ llm = create_llm_for_stage(stage="coding", model="qwen2.5-coder:7b")
 
 | Технология | Описание | Ключевые файлы |
 |------------|----------|----------------|
-| Reasoning Models | DeepSeek-R1/QwQ + стриминг thinking | `reasoning_stream.py`, `streaming_*.py` |
+| Reasoning Models | Reasoning модели с chain-of-thought + стриминг thinking | `reasoning_stream.py`, `streaming_*.py` |
 | Structured Output | Pydantic для Intent/Debugger/Reflection | `structured_helpers.py`, `agent_responses.py` |
 | Compiler-in-the-Loop | Инкрементальная генерация | `incremental_coder.py`, `validate_code_quick()` |
 | Code Retrieval | Few-shot примеры из кода | `code_retrieval.py` |
@@ -136,7 +159,13 @@ infrastructure/
 ├── code_retrieval.py        # Few-shot примеры (Phase 4)
 ├── debate.py                # Multi-Agent Debate (Phase 5)
 ├── ast_analyzer.py          # AST Analysis (Phase 6)
-└── workflow_nodes.py        # Интеграция всех фаз
+├── workflow_nodes.py        # Интеграция всех фаз
+├── workflow_config.py       # Централизованная конфигурация
+├── workflow_decorators.py   # Декораторы для узлов
+├── workflow_types.py        # Protocol интерфейсы
+├── streaming_agents_cache.py # Потокобезопасный кэш агентов
+├── event_store.py           # Хранилище событий
+└── circuit_breaker.py       # Circuit Breaker
 
 agents/
 ├── streaming_*.py           # 6 стриминговых агентов
@@ -144,7 +173,7 @@ agents/
 ├── specialized_reviewers.py # Security/Performance/Correctness
 ├── chat.py                  # + AST анализ проекта
 ├── coder.py                 # + интеграция CodeRetriever
-└── intent.py, debugger.py   # Structured output
+└── intent.py                # Structured output + кэширование + калибровка
 
 utils/
 ├── structured_helpers.py    # generate_with_fallback()

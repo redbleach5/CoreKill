@@ -11,14 +11,14 @@ import asyncio
 import re
 import uuid
 from typing import Dict, Any, Optional, AsyncGenerator, List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel, Field
 
 from agents.intent import IntentAgent, IntentResult
 from agents.chat import ChatAgent, get_chat_agent
 from agents.conversation import get_conversation_memory, ConversationMemory
 from agents.reflection import ReflectionResult
-from backend.types import InteractionMode, TaskRequest, SessionSettings
+from backend.types import InteractionMode, TaskRequest, SessionSettings, StreamQueryParams, IndexProjectRequest
 from utils.artifact_saver import ArtifactSaver
 from utils.config import get_config
 from utils.model_checker import (
@@ -443,7 +443,10 @@ async def run_workflow_stream_with_thinking(
     project_path: Optional[str] = None,
     file_extensions: Optional[List[str]] = None
 ) -> AsyncGenerator[str, None]:
-    """Запускает workflow с real-time стримингом <think> блоков.
+    """DEPRECATED: Запускает workflow с real-time стримингом <think> блоков.
+    
+    ⚠️ УСТАРЕЛО: Теперь используется унифицированный workflow через граф LangGraph.
+    Функция оставлена для обратной совместимости, но теперь просто вызывает run_workflow_stream().
     
     Использует стриминговые узлы для real-time вывода рассуждений
     reasoning моделей (DeepSeek-R1, QwQ).
@@ -462,395 +465,19 @@ async def run_workflow_stream_with_thinking(
     Yields:
         SSE события включая thinking_* для <think> блоков
     """
-    task_id = str(uuid.uuid4())
-    config = get_config()
-    max_iterations = min(max_iterations, config.max_iterations, 5)
-    
-    # Выбор модели (аналогично run_workflow_stream)
-    model_to_use = (model.strip() if model and isinstance(model, str) and model.strip() else None)
-    
-    intent_agent = IntentAgent(lazy_llm=True)
-    task_complexity = intent_agent._estimate_complexity_heuristic(task)
-    
-    router_obj = get_model_router()
-    try:
-        # Для стриминга с thinking принудительно используем reasoning модель если доступна
-        # Это гарантирует наличие <think> блоков для отображения
-        from utils.model_checker import get_reasoning_model, _is_reasoning_model, scan_available_models
-        reasoning_model = get_reasoning_model(min_quality=0.7)
-        
-        # Проверяем, указал ли пользователь reasoning модель явно
-        user_specified_reasoning = (
-            model_to_use and 
-            check_model_available(model_to_use) and 
-            _is_reasoning_model(model_to_use)
-        )
-        
-        if user_specified_reasoning:
-            # Пользователь явно указал reasoning модель - используем её
-            # Но проверяем, не выбрали ли мы более мощную автоматически
-            if reasoning_model and reasoning_model != model_to_use and model_to_use:
-                # Сравниваем качество указанной и автоматически выбранной
-                models_info = scan_available_models()
-                user_model_info = models_info.get(model_to_use)
-                auto_model_info = models_info.get(reasoning_model)
-                
-                if user_model_info and auto_model_info:
-                    # Сравниваем по качеству и размеру
-                    import re
-                    def _get_model_priority(m: ModelInfo) -> tuple[float, float]:
-                        param_match = re.search(r'(\d+\.?\d*)', m.parameter_size)
-                        param_value = float(param_match.group(1)) if param_match else 0.0
-                        return (m.estimated_quality, param_value)
-                    
-                    user_priority = _get_model_priority(user_model_info)
-                    auto_priority = _get_model_priority(auto_model_info)
-                    
-                    if auto_priority > user_priority:
-                        user_model_name = model_to_use  # Сохраняем для логирования
-                        logger.info(
-                            f"🧠 Автоматически выбранная reasoning модель {reasoning_model} "
-                            f"мощнее указанной {user_model_name}, используем её"
-                        )
-                        model_to_use = reasoning_model
-                        model_selection = ModelSelection(
-                            model=reasoning_model,
-                            confidence=0.95,
-                            reason=f"Более мощная reasoning модель для стриминга (вместо {user_model_name})",
-                            is_reasoning=True
-                        )
-                    else:
-                        logger.info(f"🧠 Используем указанную reasoning модель: {model_to_use}")
-                        model_selection = router_obj.select_model_for_complexity(
-                            complexity=task_complexity,
-                            task_type="coding",
-                            preferred_model=model_to_use
-                        )
-                else:
-                    # Не удалось сравнить - используем указанную
-                    logger.info(f"🧠 Используем указанную reasoning модель: {model_to_use}")
-                    model_selection = router_obj.select_model_for_complexity(
-                        complexity=task_complexity,
-                        task_type="coding",
-                        preferred_model=model_to_use
-                    )
-            else:
-                logger.info(f"🧠 Используем указанную reasoning модель: {model_to_use}")
-                model_selection = router_obj.select_model_for_complexity(
-                    complexity=task_complexity,
-                    task_type="coding",
-                    preferred_model=model_to_use
-                )
-        elif model_to_use and check_model_available(model_to_use):
-            # Пользователь явно указал модель — уважаем его выбор
-            # Не переключаемся на reasoning даже если доступна
-            logger.info(f"🤖 Используем указанную модель: {model_to_use} (reasoning: {_is_reasoning_model(model_to_use)})")
-            model_selection = router_obj.select_model_for_complexity(
-                complexity=task_complexity,
-                task_type="coding",
-                preferred_model=model_to_use
-            )
-        elif reasoning_model and check_model_available(reasoning_model):
-            # Автоматически выбираем лучшую доступную reasoning модель
-            logger.info(f"🧠 Автоматически выбрана reasoning модель для стриминга thinking: {reasoning_model}")
-            model_to_use = reasoning_model
-            model_selection = ModelSelection(
-                model=reasoning_model,
-                confidence=0.95,
-                reason="Лучшая доступная reasoning модель для стриминга <think> блоков",
-                is_reasoning=True
-            )
-        else:
-            # Автоматический выбор: предпочитаем reasoning для стриминга
-            if reasoning_model:
-                logger.info(f"🧠 Автоматически выбрана reasoning модель для стриминга: {reasoning_model}")
-                model_to_use = reasoning_model
-                model_selection = ModelSelection(
-                    model=reasoning_model,
-                    confidence=0.9,
-                    reason="Reasoning модель для стриминга <think> блоков",
-                    is_reasoning=True
-                )
-            else:
-                # Fallback: используем обычный выбор, но повышаем сложность до COMPLEX
-                # чтобы увеличить шанс выбрать качественную модель
-                logger.warning("⚠️ Reasoning модель не найдена, используем обычный выбор (thinking блоков может не быть)")
-                model_selection = router_obj.select_model_for_complexity(
-                    complexity=TaskComplexity.COMPLEX,  # Повышаем сложность для лучшей модели
-                    task_type="coding"
-                )
-                model_to_use = model_selection.model
-        
-        logger.info(f"🤖 {model_selection.reason}: {model_to_use} (is_reasoning: {model_selection.is_reasoning})")
-    except RuntimeError as e:
-        logger.error(f"❌ {e}")
-        yield await SSEManager.stream_error(stage="initialization", error_message=str(e))
-        return
-    
-    # Создаём начальный state
-    state: AgentState = {
-        "task": task,
-        "max_iterations": max_iterations,
-        "disable_web_search": disable_web_search,
-        "model": model_to_use,
-        "temperature": temperature,
-        "interaction_mode": "code",
-        "conversation_id": None,
-        "conversation_history": None,
-        "chat_response": None,
-        "project_path": project_path,
-        "file_extensions": file_extensions,
-        "intent_result": None,
-        "plan": "",
-        "context": "",
-        "tests": "",
-        "code": "",
-        "validation_results": {},
-        "debug_result": None,
-        "reflection_result": None,
-        "critic_report": None,
-        "iteration": 0,
-        "task_id": task_id,
-        "enable_sse": True,
-        "file_path": None,
-        "file_context": None
-    }
-    
-    try:
-        # === INTENT (синхронный, быстрый) ===
-        yield await SSEManager.stream_stage_start(stage="intent", message="Определяю намерение...")
-        state = await intent_node(state)
-        
-        intent_result = state.get("intent_result")
-        if intent_result:
-            yield await SSEManager.stream_stage_end(
-                stage="intent",
-                message=f"Намерение: {intent_result.type}",
-                result={"type": intent_result.type, "confidence": intent_result.confidence}
-            )
-            
-            # Greeting → быстрый выход
-            if intent_result.type == "greeting":
-                yield await SSEManager.stream_stage_end(
-                    stage="greeting",
-                    message=GREETING_MESSAGE,
-                    result={"type": "greeting", "message": GREETING_MESSAGE}
-                )
-                yield await SSEManager.stream_final_result(
-                    task_id=task_id,
-                    results={"task": task, "intent": {"type": "greeting"}, "greeting_message": GREETING_MESSAGE},
-                    metrics={"planning": 0, "research": 0, "testing": 0, "coding": 0, "overall": 0}
-                )
-                return
-        
-        # === PLANNER (стриминг) ===
-        yield await SSEManager.stream_stage_start(stage="planning", message="Создаю план...")
-        logger.info("🧠 Начинаю стриминг planner с thinking...")
-        event_count = 0
-        async for event_type, data in stream_planner_node(state):
-            event_count += 1
-            logger.info(f"📤 Planner event #{event_count}: {event_type}, data_len={len(str(data)) if data else 0}")
-            if event_type == "thinking":
-                logger.info(f"🧠 Yielding thinking event для planning (длина: {len(data) if isinstance(data, str) else 'N/A'})")
-                yield data  # SSE событие thinking_*
-            elif event_type == "plan_chunk":
-                pass  # Можно добавить стриминг плана в UI
-            elif event_type == "done":
-                state = data
-        logger.info(f"✅ Planner стриминг завершён ({event_count} событий)")
-        
-        yield await SSEManager.stream_stage_end(
-            stage="planning",
-            message="План создан",
-            result={"plan_length": len(state.get("plan", ""))}
-        )
-        
-        # === RESEARCHER (синхронный, без LLM) ===
-        yield await SSEManager.stream_stage_start(stage="research", message="Собираю контекст...")
-        state = await researcher_node(state)
-        yield await SSEManager.stream_stage_end(
-            stage="research",
-            message="Контекст собран",
-            result={"context_length": len(state.get("context", ""))}
-        )
-        
-        # === TEST GENERATOR (стриминг) ===
-        yield await SSEManager.stream_stage_start(stage="testing", message="Генерирую тесты...")
-        logger.info("🧠 Начинаю стриминг test generator с thinking...")
-        event_count = 0
-        async for event_type, data in stream_generator_node(state):
-            event_count += 1
-            if event_type == "thinking":
-                logger.info(f"🧠 Yielding thinking event для testing (длина: {len(data) if isinstance(data, str) else 'N/A'})")
-                yield data
-            elif event_type == "done":
-                state = data
-        logger.info(f"✅ Test generator стриминг завершён ({event_count} событий)")
-        
-        yield await SSEManager.stream_stage_end(
-            stage="testing",
-            message="Тесты сгенерированы",
-            result={"tests_length": len(state.get("tests", ""))}
-        )
-        
-        # === CODER (стриминг) ===
-        yield await SSEManager.stream_stage_start(stage="coding", message="Генерирую код...")
-        logger.info(f"🧠 Начинаю стриминг coder с thinking (модель: {state.get('model')})...")
-        event_count = 0
-        async for event_type, data in stream_coder_node(state):
-            event_count += 1
-            if event_type == "thinking":
-                logger.info(f"🧠 Yielding thinking event для coding (длина: {len(data) if isinstance(data, str) else 'N/A'})")
-                yield data
-            elif event_type == "code_chunk":
-                yield await SSEManager.stream_code_chunk(chunk=data, is_final=False, metadata={"stage": "coding"})
-            elif event_type == "done":
-                state = data
-        logger.info(f"✅ Coder стриминг завершён ({event_count} событий)")
-        
-        if state.get("code"):
-            yield await SSEManager.stream_code_chunk(chunk=state["code"], is_final=True, metadata={"stage": "coding"})
-        
-        yield await SSEManager.stream_stage_end(
-            stage="coding",
-            message="Код сгенерирован",
-            result={"code_length": len(state.get("code", "")), "code": state.get("code", "")}
-        )
-        
-        # === VALIDATION (синхронный) ===
-        yield await SSEManager.stream_stage_start(stage="validation", message="Валидирую код...")
-        state = await validator_node(state)
-        yield await SSEManager.stream_stage_end(
-            stage="validation",
-            message="Валидация завершена",
-            result=state.get("validation_results", {})
-        )
-        
-        # === SELF-HEALING LOOP ===
-        validation = state.get("validation_results", {})
-        while not validation.get("all_passed", False) and state.get("iteration", 0) < max_iterations:
-            # DEBUGGER (стриминг)
-            yield await SSEManager.stream_stage_start(stage="debug", message=f"Анализирую ошибки (итерация {state.get('iteration', 0) + 1})...")
-            async for event_type, data in stream_debugger_node(state):
-                if event_type == "thinking":
-                    yield data
-                elif event_type == "done":
-                    state = data
-            
-            debug_result = state.get("debug_result")
-            if debug_result:
-                yield await SSEManager.stream_stage_end(
-                    stage="debug",
-                    message=f"Анализ: {debug_result.error_summary}",
-                    result={"error_type": debug_result.error_type}
-                )
-            
-            # FIXER (стриминг)
-            yield await SSEManager.stream_stage_start(stage="fixing", message=f"Исправляю код...")
-            async for event_type, data in stream_fixer_node(state):
-                if event_type == "thinking":
-                    yield data
-                elif event_type == "code_chunk":
-                    yield await SSEManager.stream_code_chunk(chunk=data, is_final=False, metadata={"stage": "fixing"})
-                elif event_type == "done":
-                    state = data
-            
-            if state.get("code"):
-                yield await SSEManager.stream_code_chunk(chunk=state["code"], is_final=True, metadata={"stage": "fixing"})
-            
-            yield await SSEManager.stream_stage_end(
-                stage="fixing",
-                message="Код исправлен",
-                result={"code_length": len(state.get("code", "")), "code": state.get("code", "")}
-            )
-            
-            # Re-validate
-            yield await SSEManager.stream_stage_start(stage="validation", message="Повторная валидация...")
-            state = await validator_node(state)
-            validation = state.get("validation_results", {})
-            yield await SSEManager.stream_stage_end(stage="validation", message="Валидация завершена", result=validation)
-        
-        # === REFLECTION (стриминг) ===
-        yield await SSEManager.stream_stage_start(stage="reflection", message="Анализирую результаты...")
-        async for event_type, data in stream_reflection_node(state):
-            if event_type == "thinking":
-                yield data
-            elif event_type == "done":
-                state = data
-        
-        reflection_result = state.get("reflection_result")
-        if reflection_result:
-            yield await SSEManager.stream_stage_end(
-                stage="reflection",
-                message="Рефлексия завершена",
-                result={"overall_score": reflection_result.overall_score}
-            )
-        
-        # === CRITIC (стриминг) ===
-        yield await SSEManager.stream_stage_start(stage="critic", message="Критический анализ...")
-        async for event_type, data in stream_critic_node(state):
-            if event_type == "thinking":
-                yield data
-            elif event_type == "static_analysis":
-                pass  # Результаты статического анализа
-            elif event_type == "done":
-                state = data
-        
-        critic_report = state.get("critic_report")
-        if critic_report:
-            yield await SSEManager.stream_stage_end(
-                stage="critic",
-                message=critic_report.summary,
-                result={
-                    "overall_score": critic_report.overall_score,
-                    "issues_count": len(critic_report.issues)
-                }
-            )
-        
-        # === FINAL RESULT ===
-        reflection_score = reflection_result.overall_score if reflection_result else 0.0
-        critic_score = critic_report.overall_score if critic_report else 0.0
-        
-        yield await SSEManager.stream_final_result(
-            task_id=task_id,
-            results={
-                "task": task,
-                "intent": {
-                    "type": intent_result.type if intent_result else "unknown",
-                    "confidence": intent_result.confidence if intent_result else 0.0
-                },
-                "plan": state.get("plan", ""),
-                "context": state.get("context", ""),
-                "tests": state.get("tests", ""),
-                "code": state.get("code", ""),
-                "validation": state.get("validation_results", {}),
-                "reflection": {
-                    "overall_score": reflection_score,
-                    "analysis": reflection_result.analysis if reflection_result else ""
-                },
-                "critic": {
-                    "score": critic_score,
-                    "summary": critic_report.summary if critic_report else ""
-                }
-            },
-            metrics={
-                "planning": reflection_result.planning_score if reflection_result else 0.0,
-                "research": reflection_result.research_score if reflection_result else 0.0,
-                "testing": reflection_result.testing_score if reflection_result else 0.0,
-                "coding": reflection_result.coding_score if reflection_result else 0.0,
-                "critic": critic_score,
-                "overall": (reflection_score + critic_score) / 2
-            }
-        )
-        
-        logger.info(f"✅ Workflow с thinking завершён")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка workflow с thinking: {e}", error=e)
-        yield await SSEManager.stream_error(
-            stage="workflow",
-            error_message=f"Ошибка: {str(e)}"
-        )
+    # Теперь используем унифицированный workflow через граф
+    # Граф сам выберет стриминговые узлы на основе флага use_streaming_agents
+    logger.info("⚠️ run_workflow_stream_with_thinking() устарела, используем унифицированный workflow")
+    async for event in run_workflow_stream(
+        task=task,
+        model=model,
+        temperature=temperature,
+        disable_web_search=disable_web_search,
+        max_iterations=max_iterations,
+        project_path=project_path,
+        file_extensions=file_extensions
+    ):
+        yield event
 
 
 async def run_workflow_stream(
@@ -876,7 +503,68 @@ async def run_workflow_stream(
     Yields:
         SSE события в формате text/event-stream
     """
+    # Импорты для EventStore (вынесены наверх для избежания проблем с областью видимости)
+    # SSEManager уже импортирован глобально на строке 35
+    from infrastructure.event_store import get_event_store, EventStore
+    
     task_id = str(uuid.uuid4())
+    
+    # Создаём очередь событий для реального времени
+    event_queue = EventStore.get_event_queue(task_id)
+    
+    # Очередь для SSE событий от фоновой задачи
+    sse_queue: asyncio.Queue = asyncio.Queue()
+    
+    # Флаг для остановки фоновой задачи
+    stop_realtime_streaming = asyncio.Event()
+    
+    # Фоновая задача для отправки событий в реальном времени
+    async def stream_events_realtime():
+        """Отправляет события из очереди в SSE поток в реальном времени."""
+        try:
+            while not stop_realtime_streaming.is_set():
+                try:
+                    # Ждём событие с таймаутом
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    
+                    # Преобразуем событие в SSE формат
+                    if event.event_type.startswith("thinking_"):
+                        # thinking события уже в формате SSE строки от ReasoningStreamManager
+                        sse_event = event.data if isinstance(event.data, str) else await SSEManager.send_event(event.event_type, {"content": event.data})
+                    elif event.event_type in ("plan_chunk", "test_chunk", "code_chunk"):
+                        sse_event = await SSEManager.send_event(event.event_type, {"chunk": event.data})
+                    else:
+                        sse_event = await SSEManager.send_event(event.event_type, {"data": event.data})
+                    
+                    # Сохраняем SSE событие в очередь для основного генератора
+                    await sse_queue.put(sse_event)
+                    logger.debug(f"📤 Событие готово к отправке: {event.event_type}")
+                    
+                except asyncio.TimeoutError:
+                    # Таймаут - продолжаем проверку
+                    continue
+                except Exception as e:
+                    logger.error(f"❌ Ошибка в stream_events_realtime: {e}", error=e)
+                    break
+        except asyncio.CancelledError:
+            logger.debug("🛑 stream_events_realtime отменён")
+        finally:
+            # Гарантируем что очередь будет очищена даже при ошибке
+            logger.debug("🧹 stream_events_realtime завершён, очищаем очередь")
+            # Очищаем оставшиеся события из очереди
+            while not sse_queue.empty():
+                try:
+                    sse_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+    
+    # Запускаем фоновую задачу
+    realtime_task: Optional[asyncio.Task] = None
+    try:
+        realtime_task = asyncio.create_task(stream_events_realtime())
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания фоновой задачи: {e}", error=e)
+        realtime_task = None
     
     # БЫСТРАЯ ПРОВЕРКА ПРИВЕТСТВИЯ БЕЗ ИНИЦИАЛИЗАЦИИ WORKFLOW
     from agents.intent import IntentAgent
@@ -943,6 +631,90 @@ async def run_workflow_stream(
     # Ограничиваем max_iterations
     config = get_config()
     max_iterations = min(max_iterations, config.max_iterations, 5)
+    
+    # ПРОВЕРКА ПАМЯТИ: ищем идентичную/очень похожую задачу
+    from backend.dependencies import get_memory_agent
+    memory_agent = get_memory_agent()
+    
+    # Ищем очень похожую задачу (схожесть >= 0.85, успех >= 0.8)
+    # Не фильтруем по intent на этом этапе - проверяем по тексту задачи
+    similar_task = await asyncio.to_thread(
+        memory_agent.find_exact_or_very_similar_task,
+        query=task,
+        intent_type=None,  # Не фильтруем по intent - проверяем по схожести текста
+        min_success=0.8,
+        similarity_threshold=0.85
+    )
+    
+    if similar_task:
+        similarity = similar_task.get("similarity", 0.0)
+        success = similar_task.get("success", 0.0)
+        has_code = similar_task.get("has_code", False)
+        
+        logger.info(
+            f"🎯 Найдена очень похожая задача в памяти "
+            f"(схожесть: {similarity:.2f}, успех: {success:.2f}, код: {'есть' if has_code else 'нет'})"
+        )
+        
+        # Если схожесть очень высокая (>= 0.9) и успех высокий, предлагаем использовать готовое решение
+        if similarity >= 0.9 and success >= 0.85 and has_code:
+            logger.info("✅ Задача уже решалась успешно - используем готовое решение из памяти")
+            
+            # Отправляем события о найденном решении
+            yield await SSEManager.stream_stage_start(
+                stage="memory_check",
+                message="Проверяю память..."
+            )
+            await asyncio.sleep(0.02)
+            
+            yield await SSEManager.stream_stage_end(
+                stage="memory_check",
+                message=f"Найдено готовое решение (схожесть: {similarity:.1%})",
+                result={"similarity": similarity, "success": success}
+            )
+            await asyncio.sleep(0.02)
+            
+            # Извлекаем код и план из памяти
+            code_preview = similar_task.get("code_preview", similar_task.get("code", ""))
+            plan_preview = similar_task.get("plan_preview", similar_task.get("plan", ""))
+            
+            # Формируем сообщение для пользователя
+            memory_message = (
+                f"🎯 Найдено готовое решение для похожей задачи!\n\n"
+                f"**Исходная задача:** {similar_task.get('task', '')[:200]}...\n"
+                f"**Успешность:** {success:.1%}\n"
+                f"**Схожесть:** {similarity:.1%}\n\n"
+            )
+            
+            if plan_preview:
+                memory_message += f"**План из памяти:**\n{plan_preview[:500]}...\n\n"
+            
+            if code_preview:
+                memory_message += f"**Код из памяти:**\n```\n{code_preview[:1000]}...\n```\n\n"
+            
+            memory_message += (
+                "💡 Система может использовать это решение или создать новое. "
+                "Продолжаю с полным циклом для адаптации под текущую задачу."
+            )
+            
+            yield await SSEManager.stream_stage_end(
+                stage="memory_reuse",
+                message=memory_message,
+                result={
+                    "similarity": similarity,
+                    "success": success,
+                    "has_code": has_code,
+                    "code_preview": code_preview[:500] if code_preview else "",
+                    "plan_preview": plan_preview[:300] if plan_preview else ""
+                }
+            )
+            await asyncio.sleep(0.02)
+            
+            # ПРОДОЛЖАЕМ с workflow, но добавим информацию из памяти в контекст
+            # Это позволит системе использовать готовое решение как основу
+            logger.info("🔄 Продолжаю workflow с контекстом из памяти")
+        else:
+            logger.info(f"ℹ️ Найдена похожая задача, но схожесть недостаточна для пропуска workflow (схожесть: {similarity:.2f})")
     
     # УМНЫЙ ВЫБОР МОДЕЛИ:
     # 1. Сначала определяем сложность задачи через Intent (быстрая эвристика)
@@ -1023,6 +795,8 @@ async def run_workflow_stream(
         "iteration": 0,
         "task_id": task_id,
         "enable_sse": True,  # Флаг для SSE стриминга
+        "sse_events": None,  # DEPRECATED: Используйте event_references
+        "event_references": None,  # Ссылки на события в EventStore
         "file_path": None,
         "file_context": None
     }
@@ -1033,10 +807,58 @@ async def run_workflow_stream(
     try:
         # Запускаем граф с стримингом
         async for event in graph.astream(initial_state):
+            # Сначала проверяем очередь SSE событий из фоновой задачи (real-time стриминг)
+            # Проверяем несколько раз для более быстрой отправки
+            for _ in range(10):  # Проверяем до 10 событий за итерацию
+                if sse_queue.empty():
+                    break
+                try:
+                    sse_event = sse_queue.get_nowait()
+                    yield sse_event
+                    await asyncio.sleep(0.001)  # Небольшая задержка для плавности
+                except asyncio.QueueEmpty:
+                    break
+                except Exception as e:
+                    logger.warning(f"⚠️ Ошибка отправки realtime SSE события: {e}")
+            
             # Обрабатываем события графа
             # event - это словарь с ключами узлов и их обновлениями state
             for node_name, node_state in event.items():
-                # Отправляем SSE события на основе узла
+                # Если узел использовал стриминговый адаптер, получаем события из EventStore
+                event_references = node_state.get("event_references", [])
+                if event_references:
+                    # Получаем события из EventStore по ссылкам
+                    # get_event_store уже импортирован в начале функции
+                    session_id = initial_state.get("task_id") or initial_state.get("session_id") or "default"
+                    event_store = await get_event_store(session_id)
+                    
+                    # Получаем только новые события (последние N ссылок)
+                    existing_refs = initial_state.get("event_references", [])
+                    new_refs = [ref for ref in event_references if ref not in existing_refs]
+                    
+                    if new_refs:
+                        stored_events = await event_store.get_events(new_refs)
+                        logger.info(f"📤 Отправляю {len(stored_events)} SSE событий из узла {node_name}")
+                        
+                        # Преобразуем события в SSE формат и отправляем
+                        # SSEManager уже импортирован в начале файла
+                        for stored_event in stored_events:
+                            # thinking события уже в формате SSE строки от ReasoningStreamManager
+                            if stored_event.event_type == "thinking":
+                                # data уже содержит готовую SSE строку
+                                sse_event = stored_event.data if isinstance(stored_event.data, str) else await SSEManager.send_event("thinking", {"content": stored_event.data})
+                            elif stored_event.event_type in ("plan_chunk", "test_chunk", "code_chunk"):
+                                sse_event = await SSEManager.send_event(stored_event.event_type, {"chunk": stored_event.data})
+                            else:
+                                sse_event = await SSEManager.send_event(stored_event.event_type, {"data": stored_event.data})
+                            yield sse_event
+                        
+                        # Сохраняем ссылки в общем state для отслеживания
+                        if "event_references" not in initial_state:
+                            initial_state["event_references"] = []
+                        initial_state["event_references"].extend(new_refs)
+                
+                # Отправляем SSE события на основе узла (для обычных узлов)
                 if node_name == "intent":
                     intent_result = node_state.get("intent_result")
                     if intent_result:
@@ -1322,9 +1144,28 @@ async def run_workflow_stream(
                     critic_score = critic_report.overall_score if critic_report else 0.0
                     reflection_score = reflection_result.overall_score if reflection_result else 0.0
                     
+                    # Отправляем оставшиеся события из очереди перед финальным результатом
+                    while not sse_queue.empty():
+                        try:
+                            sse_event = sse_queue.get_nowait()
+                            yield sse_event
+                        except asyncio.QueueEmpty:
+                            break
+                    
+                    # Останавливаем фоновую задачу
+                    stop_realtime_streaming.set()
+                    realtime_task.cancel()
+                    try:
+                        await realtime_task
+                    except asyncio.CancelledError:
+                        pass
+                    
+                    # Очищаем очередь событий
+                    EventStore.remove_event_queue(task_id)
+                    
                     yield await SSEManager.stream_final_result(
-                        task_id=task_id,
-                        results={
+                task_id=task_id,
+                results={
                             "task": task,
                             "intent": {
                                 "type": node_state.get("intent_result").type if node_state.get("intent_result") else "unknown",
@@ -1380,6 +1221,26 @@ async def run_workflow_stream(
             error_message=f"Ошибка выполнения workflow: {str(e)}",
             error_details={"exception_type": type(e).__name__}
         )
+    finally:
+        # Останавливаем фоновую задачу и очищаем ресурсы
+        stop_realtime_streaming.set()
+        if realtime_task and not realtime_task.done():
+            realtime_task.cancel()
+            try:
+                await asyncio.wait_for(realtime_task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при отмене фоновой задачи: {e}")
+        
+        # Очищаем сессию из EventStore
+        try:
+            await EventStore.cleanup_session(task_id)
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка при очистке сессии EventStore: {e}")
+        
+        # Удаляем очередь событий
+        EventStore.remove_event_queue(task_id)
 
 
 @router.post("/tasks")
@@ -1743,6 +1604,78 @@ async def get_file_content(path: str) -> Dict[str, Any]:
         return {"error": str(e), "path": path}
 
 
+@router.post("/index")
+async def index_project(request: IndexProjectRequest) -> Dict[str, Any]:
+    """Индексирует кодовую базу проекта для последующего поиска.
+    
+    Используется для индексации проекта перед анализом или генерацией кода.
+    
+    Args:
+        request: Запрос с путём к проекту и расширениями файлов
+    
+    Returns:
+        Статус индексации с количеством проиндексированных файлов
+    """
+    from infrastructure.context_engine import ContextEngine
+    from pathlib import Path
+    import asyncio
+    
+    project_path = request.project_path.strip()
+    file_extensions = request.file_extensions or [".py"]
+    
+    project_path_obj = Path(project_path)
+    if not project_path_obj.exists() or not project_path_obj.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail=f"Проект не найден или не является директорией: {project_path}"
+        )
+    
+    # Нормализуем расширения (добавляем точку если отсутствует)
+    normalized_extensions = []
+    for ext in file_extensions:
+        ext = ext.strip()
+        if not ext.startswith('.'):
+            ext = f'.{ext}'
+        normalized_extensions.append(ext)
+    
+    try:
+        # Создаём ContextEngine и индексируем проект
+        context_engine = ContextEngine()
+        
+        # Индексация выполняется синхронно, запускаем в отдельном потоке
+        index_result = await asyncio.to_thread(
+            context_engine.index_project,
+            project_path=project_path,
+            extensions=normalized_extensions if normalized_extensions else None
+        )
+        
+        # Подсчитываем количество файлов и чанков
+        total_files = len(index_result)
+        total_chunks = sum(len(chunks) for chunks in index_result.values())
+        
+        logger.info(f"✅ Проиндексирован проект {project_path}: {total_files} файлов, {total_chunks} чанков")
+        
+        return {
+            "status": "success",
+            "project_path": project_path,
+            "indexed_files": total_files,
+            "total_chunks": total_chunks,
+            "extensions": normalized_extensions
+        }
+    except ValueError as e:
+        logger.error(f"❌ Ошибка валидации при индексации: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка индексации проекта: {e}", error=e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка индексации проекта: {str(e)}"
+        )
+
+
 @router.get("/metrics/stages")
 async def get_stage_metrics() -> Dict[str, Any]:
     """Возвращает метрики производительности по этапам workflow.
@@ -1785,17 +1718,47 @@ async def run_benchmark(model: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+def get_stream_params(
+    task: str = Query(..., min_length=1, description="Текст задачи"),
+    mode: str = Query(default="auto", description="Режим взаимодействия (auto, chat, code)"),
+    model: str = Query(default="", description="Модель Ollama (пусто = авто-выбор)"),
+    temperature: float = Query(default=0.25, ge=0.1, le=0.7, description="Температура генерации"),
+    disable_web_search: bool = Query(default=False, description="Отключить веб-поиск"),
+    max_iterations: int = Query(default=3, ge=1, le=5, description="Максимальное количество итераций"),
+    conversation_id: Optional[str] = Query(default=None, description="ID диалога для сохранения контекста"),
+    project_path: Optional[str] = Query(default=None, description="Путь к проекту для индексации кодовой базы"),
+    file_extensions: Optional[str] = Query(default=None, description="Расширения файлов через запятую (например: .py,.js)")
+) -> StreamQueryParams:
+    """Зависимость для валидации query параметров /api/stream.
+    
+    Преобразует query параметры в валидированную Pydantic модель.
+    """
+    # Валидация mode
+    try:
+        mode_enum = InteractionMode(mode.lower())
+        mode_value = mode_enum.value
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимый режим: {mode}. Допустимые значения: auto, chat, code, plan, analyze"
+        )
+    
+    return StreamQueryParams(
+        task=task,
+        mode=mode_value,
+        model=model,
+        temperature=temperature,
+        disable_web_search=disable_web_search,
+        max_iterations=max_iterations,
+        conversation_id=conversation_id,
+        project_path=project_path,
+        file_extensions=file_extensions
+    )
+
+
 @router.get("/stream")
 async def stream_task_results(
-    task: str,
-    mode: str = "auto",
-    model: str = "",
-    temperature: float = 0.25,
-    disable_web_search: bool = False,
-    max_iterations: int = 3,
-    conversation_id: Optional[str] = None,
-    project_path: Optional[str] = None,
-    file_extensions: Optional[str] = None
+    params: StreamQueryParams = Depends(get_stream_params)
 ):
     """SSE endpoint для стриминга результатов выполнения задачи.
     
@@ -1819,6 +1782,17 @@ async def stream_task_results(
         StreamingResponse с SSE событиями
     """
     from fastapi.responses import StreamingResponse
+    
+    # Извлекаем параметры из валидированной модели
+    task = params.task
+    mode = params.mode.value if isinstance(params.mode, InteractionMode) else params.mode
+    model = params.model
+    temperature = params.temperature
+    disable_web_search = params.disable_web_search
+    max_iterations = params.max_iterations
+    conversation_id = params.conversation_id
+    project_path = params.project_path
+    file_extensions = params.file_extensions
     
     # Парсим file_extensions из строки в список
     parsed_extensions: Optional[List[str]] = None
@@ -1961,30 +1935,18 @@ async def stream_task_results(
                     conversation_id=conversation_id
                 )
             else:  # code или другой режим с workflow
-                # Выбираем версию workflow:
-                # - С thinking стримингом если включено в config.toml
-                # - Обычную версию иначе
-                if _is_streaming_enabled():
-                    logger.info("🧠 Используем workflow с thinking стримингом")
-                    stream_func = run_workflow_stream_with_thinking(
-                        task=task,
-                        model=model,
-                        temperature=temperature,
-                        disable_web_search=disable_web_search,
-                        max_iterations=max_iterations,
-                        project_path=project_path,
-                        file_extensions=parsed_extensions
-                    )
-                else:
-                    stream_func = run_workflow_stream(
-                        task=task,
-                        model=model,
-                        temperature=temperature,
-                        disable_web_search=disable_web_search,
-                        max_iterations=max_iterations,
-                        project_path=project_path,
-                        file_extensions=parsed_extensions
-                    )
+                # Теперь workflow граф сам выбирает стриминговые узлы на основе флага
+                # Поэтому всегда используем run_workflow_stream (граф сам решит)
+                logger.info("🔄 Используем унифицированный workflow граф (стриминг определяется автоматически)")
+                stream_func = run_workflow_stream(
+                    task=task,
+                    model=model,
+                    temperature=temperature,
+                    disable_web_search=disable_web_search,
+                    max_iterations=max_iterations,
+                    project_path=project_path,
+                    file_extensions=parsed_extensions
+                )
             
             async for event in stream_func:
                 event_count += 1
@@ -2058,7 +2020,9 @@ async def save_feedback(request: FeedbackRequest) -> Dict[str, str]:
         task=request.task,
         intent_type="unknown",  # Не знаем intent для feedback
         reflection_result=fake_reflection,
-        feedback=request.feedback
+        feedback=request.feedback,
+        code="",  # Нет кода для feedback
+        plan=""  # Нет плана для feedback
     )
     
     return {

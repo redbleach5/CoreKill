@@ -25,6 +25,7 @@ import os
 import ollama
 from typing import Optional, Dict, Any, Type, TypeVar
 import time
+import threading
 import concurrent.futures
 
 from pydantic import BaseModel, ValidationError
@@ -107,6 +108,12 @@ class LocalLLM:
     BASE_RETRY_DELAY = 1.0
     # Максимальная задержка между retry
     MAX_RETRY_DELAY = 30.0
+    
+    # Общий ThreadPoolExecutor для всех экземпляров класса
+    # Используется для выполнения синхронных ollama вызовов с таймаутом
+    _executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
+    _executor_lock = threading.Lock()
+    _executor_max_workers = 10  # Максимум одновременных запросов
 
     def __init__(
         self,
@@ -130,6 +137,39 @@ class LocalLLM:
         self.top_p = top_p
         self.timeout = timeout
         self.max_retries = max_retries
+    
+    @classmethod
+    def _get_executor(cls) -> concurrent.futures.ThreadPoolExecutor:
+        """Возвращает общий ThreadPoolExecutor для класса.
+        
+        Создаёт executor при первом использовании (ленивая инициализация).
+        Потокобезопасен.
+        
+        Returns:
+            ThreadPoolExecutor для выполнения запросов
+        """
+        if cls._executor is None:
+            with cls._executor_lock:
+                # Двойная проверка для потокобезопасности
+                if cls._executor is None:
+                    cls._executor = concurrent.futures.ThreadPoolExecutor(
+                        max_workers=cls._executor_max_workers,
+                        thread_name_prefix="LocalLLM"
+                    )
+                    logger.debug(f"✅ ThreadPoolExecutor создан ({cls._executor_max_workers} workers)")
+        return cls._executor
+    
+    @classmethod
+    def shutdown_executor(cls) -> None:
+        """Закрывает общий ThreadPoolExecutor.
+        
+        Вызывается при graceful shutdown приложения.
+        """
+        with cls._executor_lock:
+            if cls._executor is not None:
+                cls._executor.shutdown(wait=True)
+                cls._executor = None
+                logger.info("✅ ThreadPoolExecutor остановлен")
     
     def _calculate_backoff(self, attempt: int) -> float:
         """Вычисляет задержку для exponential backoff.
@@ -211,19 +251,19 @@ class LocalLLM:
                     if k not in ("options", "format"):
                         generate_kwargs[k] = v
                 
-                # Вызов с timeout через ThreadPoolExecutor (работает в любом потоке)
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        ollama.generate,  # type: ignore[arg-type]
-                        **generate_kwargs
-                    )
-                    
-                    try:
-                        response = future.result(timeout=self.timeout)
-                    except concurrent.futures.TimeoutError:
-                        elapsed = time.time() - start_time
-                        logger.warning(f"⏱️ Таймаут LLM запроса после {elapsed:.1f}с")
-                        raise LLMTimeoutError(f"Таймаут {self.timeout}с")
+                # Вызов с timeout через общий ThreadPoolExecutor (работает в любом потоке)
+                executor = self._get_executor()
+                future = executor.submit(
+                    ollama.generate,  # type: ignore[arg-type]
+                    **generate_kwargs
+                )
+                
+                try:
+                    response = future.result(timeout=self.timeout)
+                except concurrent.futures.TimeoutError:
+                    elapsed = time.time() - start_time
+                    logger.warning(f"⏱️ Таймаут LLM запроса после {elapsed:.1f}с")
+                    raise LLMTimeoutError(f"Таймаут {self.timeout}с")
                 
                 elapsed = time.time() - start_time
                 result = response.get("response", "").strip()
@@ -290,22 +330,22 @@ class LocalLLM:
             try:
                 start_time = time.time()
                 
-                # Вызов с timeout через ThreadPoolExecutor
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        ollama.chat,  # type: ignore[arg-type]
-                        model=self.model,
-                        messages=messages,
-                        options=options,
-                        **{k: v for k, v in kwargs.items() if k != "options"}
-                    )
-                    
-                    try:
-                        response = future.result(timeout=self.timeout)
-                    except concurrent.futures.TimeoutError:
-                        elapsed = time.time() - start_time
-                        logger.warning(f"⏱️ Таймаут chat запроса после {elapsed:.1f}с")
-                        raise LLMTimeoutError(f"Таймаут {self.timeout}с")
+                # Вызов с timeout через общий ThreadPoolExecutor
+                executor = self._get_executor()
+                future = executor.submit(
+                    ollama.chat,  # type: ignore[arg-type]
+                    model=self.model,
+                    messages=messages,
+                    options=options,
+                    **{k: v for k, v in kwargs.items() if k != "options"}
+                )
+                
+                try:
+                    response = future.result(timeout=self.timeout)
+                except concurrent.futures.TimeoutError:
+                    elapsed = time.time() - start_time
+                    logger.warning(f"⏱️ Таймаут chat запроса после {elapsed:.1f}с")
+                    raise LLMTimeoutError(f"Таймаут {self.timeout}с")
                 
                 result = response.get("message", {}).get("content", "").strip()
                 if result:
@@ -434,6 +474,7 @@ JSON:"""
         """Извлекает JSON из текста ответа.
         
         Обрабатывает случаи когда модель добавляет текст до/после JSON.
+        Корректно обрабатывает вложенные структуры используя стек.
         
         Args:
             text: Текст с JSON
@@ -452,22 +493,74 @@ JSON:"""
             text = text[:-3]
         text = text.strip()
         
-        # Ищем JSON объект
+        # Ищем JSON объект или массив
         start = text.find('{')
+        is_array = False
         if start == -1:
-            # Может быть массив
             start = text.find('[')
+            is_array = True
         
         if start == -1:
             return text  # Возвращаем как есть, пусть JSON парсер разберётся
         
-        # Находим соответствующую закрывающую скобку
-        end = text.rfind('}')
-        if start >= 0 and text[start] == '[':
-            end = text.rfind(']')
+        # Находим соответствующую закрывающую скобку используя стек
+        # для корректной обработки вложенных структур
+        def find_matching_brace(text: str, start_pos: int, open_char: str, close_char: str) -> int:
+            """Находит позицию соответствующей закрывающей скобки.
+            
+            Args:
+                text: Текст для поиска
+                start_pos: Позиция открывающей скобки
+                open_char: Символ открывающей скобки ('{' или '[')
+                close_char: Символ закрывающей скобки ('}' или ']')
+                
+            Returns:
+                Позиция закрывающей скобки или -1 если не найдена
+            """
+            stack = []
+            in_string = False
+            escape_next = False
+            
+            for i in range(start_pos, len(text)):
+                char = text[i]
+                
+                # Обработка escape-последовательностей в строках
+                if escape_next:
+                    escape_next = False
+                    continue
+                
+                if char == '\\':
+                    escape_next = True
+                    continue
+                
+                # Отслеживаем строки (JSON может содержать скобки внутри строк)
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                
+                # Игнорируем скобки внутри строк
+                if in_string:
+                    continue
+                
+                # Отслеживаем скобки
+                if char == open_char:
+                    stack.append(open_char)
+                elif char == close_char:
+                    if stack:
+                        stack.pop()
+                        if not stack:
+                            return i
+            
+            return -1
+        
+        # Находим закрывающую скобку
+        open_char = '[' if is_array else '{'
+        close_char = ']' if is_array else '}'
+        end = find_matching_brace(text, start, open_char, close_char)
         
         if end == -1 or end < start:
-            return text[start:]  # Возвращаем от начала JSON до конца
+            # Если не нашли закрывающую скобку, возвращаем от начала до конца
+            return text[start:]
         
         return text[start:end + 1]
     
@@ -583,7 +676,29 @@ JSON:"""
             wait_count = 0
             last_log_time = asyncio.get_event_loop().time()
             
+            stream_start_time = time.time()
+            max_stream_time = self.timeout * 2  # Максимум 2x timeout для стриминга
+            
             while True:
+                # Проверяем общий timeout стриминга
+                elapsed_stream = time.time() - stream_start_time
+                if elapsed_stream > max_stream_time:
+                    logger.error(
+                        f"❌ Превышен общий timeout стриминга: {elapsed_stream:.1f}с "
+                        f"(максимум: {max_stream_time}с)"
+                    )
+                    # Добавляем ошибку в список (если список пуст, создаём его)
+                    if not error_holder:
+                        error_holder.append(LLMTimeoutError(
+                            f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
+                        ))
+                    else:
+                        error_holder[0] = LLMTimeoutError(
+                            f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
+                        )
+                    chunk_queue.put(None)  # Сигнал завершения
+                    break
+                
                 try:
                     # Неблокирующее ожидание с таймаутом
                     chunk = await asyncio.get_event_loop().run_in_executor(
@@ -596,14 +711,22 @@ JSON:"""
                     # Логируем каждые 10 секунд ожидания
                     current_time = asyncio.get_event_loop().time()
                     if current_time - last_log_time > 10:
-                        logger.info(f"⏳ Ожидаю ответ от LLM... ({wait_count * 0.5:.0f}с)")
+                        elapsed_total = time.time() - stream_start_time
+                        logger.info(
+                            f"⏳ Ожидаю ответ от LLM... "
+                            f"(ожидание: {wait_count * 0.5:.0f}с, всего: {elapsed_total:.0f}с)"
+                        )
                         last_log_time = current_time
                     continue
                 
                 if chunk is None:
                     # Стриминг завершён
-                    if error_holder:
-                        logger.error(f"❌ Ошибка стриминга: {error_holder[0]}")
+                    if error_holder and error_holder[0]:
+                        elapsed_total = time.time() - stream_start_time
+                        logger.error(
+                            f"❌ Ошибка стриминга после {elapsed_total:.1f}с: {error_holder[0]}"
+                        )
+                        raise error_holder[0]
                     break
                 
                 content = chunk.get("response", "")

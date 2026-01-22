@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react'
+import { useEffect } from 'react'
 import { Zap } from 'lucide-react'
 import { TaskOptions } from '../hooks/useAgentStream'
 import { formatModelName, isReasoningModelSync } from '../utils/modelUtils'
+import { useModels } from '../hooks/useModels'
 
 export type { TaskOptions }
 
@@ -11,38 +12,17 @@ interface SidebarOptionsProps {
 }
 
 export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
-  const [availableModels, setAvailableModels] = useState<string[]>([])
-  const [modelsLoading, setModelsLoading] = useState(true)
+  const { models: availableModels, loading: modelsLoading } = useModels()
 
+  // Если текущая модель пуста или не в списке доступных, выбираем первую доступную
   useEffect(() => {
-    const fetchModels = async () => {
-      try {
-        const response = await fetch('/api/models')
-        if (response.ok) {
-          const data = await response.json()
-          const models = data.models || []
-          setAvailableModels(models)
-          
-          // Если текущая модель пуста или не в списке доступных, выбираем первую доступную
-          if (models.length > 0) {
-            if (!options.model || !models.includes(options.model)) {
-              onChange({ ...options, model: models[0] })
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Ошибка загрузки моделей:', error)
-        // Если не удалось загрузить модели, оставляем пустой список
-        // Пользователь увидит текущую модель в селекте
-        setAvailableModels([])
-      } finally {
-        setModelsLoading(false)
+    if (availableModels.length > 0) {
+      if (!options.model || !availableModels.includes(options.model)) {
+        onChange({ ...options, model: availableModels[0] })
       }
     }
-
-    fetchModels()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [availableModels])
 
   const handleModelChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onChange({ ...options, model: e.target.value })

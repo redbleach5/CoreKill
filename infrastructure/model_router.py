@@ -7,8 +7,10 @@
 - Роевое использование моделей (будущее расширение)
 """
 from abc import ABC, abstractmethod
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
+from functools import lru_cache
+import hashlib
 from utils.model_checker import (
     check_model_available,
     get_any_available_model,
@@ -134,13 +136,6 @@ class SmartModelRouter(ModelRouter):
     - Приоритет скорости для простых задач
     """
     
-    # Минимальное качество модели для каждой сложности
-    MIN_QUALITY_THRESHOLDS = {
-        TaskComplexity.SIMPLE: 0.3,   # Любая модель от 1.5B
-        TaskComplexity.MEDIUM: 0.55,  # Минимум 7B или хорошая coder
-        TaskComplexity.COMPLEX: 0.7,  # Минимум 7B coder или 13B+
-    }
-    
     def __init__(self, enable_roster: bool = False, prefer_reasoning: bool = True) -> None:
         """Инициализация умного роутера.
         
@@ -151,8 +146,23 @@ class SmartModelRouter(ModelRouter):
         self.enable_roster = enable_roster
         self.prefer_reasoning = prefer_reasoning
         self.config = get_config()
+        
+        # Загружаем пороги качества из конфига
+        self.MIN_QUALITY_THRESHOLDS = {
+            TaskComplexity.SIMPLE: self.config.quality_min_simple,
+            TaskComplexity.MEDIUM: self.config.quality_min_medium,
+            TaskComplexity.COMPLEX: self.config.quality_min_complex,
+        }
+        
+        # Валидация конфигурации
+        self._validate_config()
+        
         # Сканируем модели при инициализации
         self._models = scan_available_models(force_refresh=True)
+        
+        # Кэш для результатов выбора (по хешу параметров)
+        self._selection_cache: Dict[str, ModelSelection] = {}
+        self._cache_max_size = 128
         
         # Проверяем наличие reasoning моделей
         reasoning_models = get_all_reasoning_models()
@@ -161,8 +171,43 @@ class SmartModelRouter(ModelRouter):
         logger.info(
             f"🔍 SmartModelRouter инициализирован: "
             f"{len(self._models)} моделей, "
-            f"{reasoning_count} reasoning"
+            f"{reasoning_count} reasoning, "
+            f"пороги качества: SIMPLE={self.MIN_QUALITY_THRESHOLDS[TaskComplexity.SIMPLE]}, "
+            f"MEDIUM={self.MIN_QUALITY_THRESHOLDS[TaskComplexity.MEDIUM]}, "
+            f"COMPLEX={self.MIN_QUALITY_THRESHOLDS[TaskComplexity.COMPLEX]}"
         )
+    
+    def _validate_config(self) -> None:
+        """Проверяет корректность конфигурационных параметров.
+        
+        Raises:
+            ValueError: Если конфигурация некорректна
+        """
+        # Проверяем что пороги качества возрастают с сложностью
+        simple = self.MIN_QUALITY_THRESHOLDS[TaskComplexity.SIMPLE]
+        medium = self.MIN_QUALITY_THRESHOLDS[TaskComplexity.MEDIUM]
+        complex = self.MIN_QUALITY_THRESHOLDS[TaskComplexity.COMPLEX]
+        
+        if not (simple <= medium <= complex):
+            raise ValueError(
+                f"Пороги качества должны возрастать с сложностью: "
+                f"SIMPLE={simple} <= MEDIUM={medium} <= COMPLEX={complex}"
+            )
+        
+        # Проверяем диапазоны
+        for complexity, threshold in self.MIN_QUALITY_THRESHOLDS.items():
+            if not (0.0 <= threshold <= 1.0):
+                raise ValueError(
+                    f"Порог качества для {complexity.value} должен быть в диапазоне [0.0, 1.0], "
+                    f"получено {threshold}"
+                )
+        
+        # Предупреждение о низком лимите VRAM
+        if self.config.max_model_vram_gb > 0 and self.config.max_model_vram_gb < 2:
+            logger.warning(
+                f"⚠️ Очень низкий лимит VRAM ({self.config.max_model_vram_gb}GB) "
+                f"может исключить все модели"
+            )
     
     def refresh_models(self) -> List[ModelInfo]:
         """Принудительно обновляет список доступных моделей."""
@@ -171,71 +216,210 @@ class SmartModelRouter(ModelRouter):
         logger.info(f"🔄 Модели обновлены, найдено {len(self._models)} моделей")
         return list(self._models.values())
     
+    def get_fallback_model(
+        self,
+        failed_model: str,
+        task_type: str,
+        complexity: Optional[TaskComplexity] = None
+    ) -> Optional[ModelSelection]:
+        """Получает запасную модель при ошибке основной.
+        
+        Args:
+            failed_model: Модель которая не сработала
+            task_type: Тип задачи
+            complexity: Сложность задачи (если известна)
+            
+        Returns:
+            ModelSelection с запасной моделью или None
+        """
+        logger.warning(f"⚠️ Модель {failed_model} недоступна, ищу запасную...")
+        
+        # Обновляем список моделей
+        self._models = scan_available_models()
+        available_models = self._filter_by_hardware_limits(self._models)
+        
+        # Исключаем failed модель
+        available_models = {
+            name: info for name, info in available_models.items()
+            if name != failed_model
+        }
+        
+        if not available_models:
+            logger.error("❌ Нет доступных запасных моделей")
+            return None
+        
+        # Если известна сложность, выбираем по ней
+        if complexity:
+            return self.select_model_for_complexity(
+                complexity=complexity,
+                task_type=task_type,
+                preferred_model=None
+            )
+        
+        # Иначе выбираем по типу задачи
+        if task_type in ["intent", "planning"]:
+            model = get_light_model()
+            if model and model != failed_model:
+                return ModelSelection(
+                    model=model,
+                    confidence=0.8,
+                    reason=f"Запасная лёгкая модель (основная {failed_model} недоступна)"
+                )
+        
+        # Fallback: любая доступная модель
+        fallback_model = get_any_available_model()
+        if fallback_model and fallback_model != failed_model:
+            return ModelSelection(
+                model=fallback_model,
+                confidence=0.7,
+                reason=f"Запасная модель (основная {failed_model} недоступна)"
+            )
+        
+        return None
+    
+    def _get_cache_key(
+        self,
+        task_type: str,
+        preferred_model: Optional[str],
+        context: Optional[Dict[str, Any]]
+    ) -> str:
+        """Генерирует ключ кэша для выбора модели."""
+        # Создаём стабильный хеш из параметров
+        key_parts = [
+            task_type,
+            preferred_model or "",
+            str(sorted(context.items())) if context else ""
+        ]
+        key_str = "|".join(key_parts)
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
     def select_model(
         self,
         task_type: str,
         preferred_model: Optional[str] = None,
-        context: Optional[Dict[str, Any]] = None
+        context: Optional[Dict[str, Any]] = None,
+        fallback_on_error: bool = True,
+        use_cache: bool = True
     ) -> ModelSelection:
         """Выбирает модель для задачи с учётом контекста.
         
         Если в context передана complexity, использует её для умного выбора.
+        
+        Args:
+            task_type: Тип задачи
+            preferred_model: Предпочтительная модель
+            context: Дополнительный контекст
+            fallback_on_error: Автоматически переключаться на запасную модель при ошибке
+            
+        Returns:
+            ModelSelection с выбранной моделью
         """
         context = context or {}
         
         # Если указана предпочтительная модель и она доступна, используем её
         if preferred_model and check_model_available(preferred_model):
-            return ModelSelection(
+            selection = ModelSelection(
                 model=preferred_model, 
                 confidence=1.0,
                 reason="Указана пользователем"
             )
+            # Если включён fallback, помечаем что это предпочтительная модель
+            if fallback_on_error:
+                selection.metadata = selection.metadata or {}
+                selection.metadata["is_preferred"] = True
+                selection.metadata["fallback_available"] = True
+            
+            # Сохраняем в кэш
+            if use_cache:
+                cache_key = self._get_cache_key(task_type, preferred_model, context)
+                self._selection_cache[cache_key] = selection
+                if len(self._selection_cache) > self._cache_max_size:
+                    oldest_key = next(iter(self._selection_cache))
+                    del self._selection_cache[oldest_key]
+            
+            return selection
         
         # Если передана сложность в контексте, используем умный выбор
         complexity = context.get("complexity")
         if complexity and isinstance(complexity, TaskComplexity):
-            return self.select_model_for_complexity(
+            selection = self.select_model_for_complexity(
                 complexity=complexity,
                 task_type=task_type,
                 preferred_model=preferred_model
             )
+            # Сохраняем в кэш
+            if use_cache:
+                cache_key = self._get_cache_key(task_type, preferred_model, context)
+                self._selection_cache[cache_key] = selection
+                if len(self._selection_cache) > self._cache_max_size:
+                    oldest_key = next(iter(self._selection_cache))
+                    del self._selection_cache[oldest_key]
+            return selection
         
         # Для intent и planning используем лёгкие модели (скорость важнее)
         if task_type in ["intent", "planning"]:
             model = get_light_model()
             if model:
-                return ModelSelection(
+                selection = ModelSelection(
                     model=model, 
                     confidence=0.9,
                     reason="Лёгкая модель для быстрых операций"
                 )
+                if use_cache:
+                    cache_key = self._get_cache_key(task_type, preferred_model, context)
+                    self._selection_cache[cache_key] = selection
+                    if len(self._selection_cache) > self._cache_max_size:
+                        oldest_key = next(iter(self._selection_cache))
+                        del self._selection_cache[oldest_key]
+                return selection
         
         # Для генерации кода выбираем модель по сложности
         if task_type == "coding":
             # Для coding — medium сложность (может использовать reasoning)
-            return self.select_model_for_complexity(
+            selection = self.select_model_for_complexity(
                 complexity=TaskComplexity.MEDIUM,
                 task_type=task_type,
                 preferred_model=preferred_model
             )
+            if use_cache:
+                cache_key = self._get_cache_key(task_type, preferred_model, context)
+                self._selection_cache[cache_key] = selection
+                if len(self._selection_cache) > self._cache_max_size:
+                    oldest_key = next(iter(self._selection_cache))
+                    del self._selection_cache[oldest_key]
+            return selection
         
         if task_type in ["testing", "reflection", "debug"]:
             # Для testing/reflection/debug — SIMPLE, быстрая модель
             # Reasoning модели слишком медленные для этих задач
-            return self.select_model_for_complexity(
+            selection = self.select_model_for_complexity(
                 complexity=TaskComplexity.SIMPLE,
                 task_type=task_type,
                 preferred_model=preferred_model
             )
+            if use_cache:
+                cache_key = self._get_cache_key(task_type, preferred_model, context)
+                self._selection_cache[cache_key] = selection
+                if len(self._selection_cache) > self._cache_max_size:
+                    oldest_key = next(iter(self._selection_cache))
+                    del self._selection_cache[oldest_key]
+            return selection
         
         # Fallback: любая доступная модель
         model = get_any_available_model()
         if model:
-            return ModelSelection(
+            selection = ModelSelection(
                 model=model, 
                 confidence=0.7,
                 reason="Fallback: любая доступная модель"
             )
+            if use_cache:
+                cache_key = self._get_cache_key(task_type, preferred_model, context)
+                self._selection_cache[cache_key] = selection
+                if len(self._selection_cache) > self._cache_max_size:
+                    oldest_key = next(iter(self._selection_cache))
+                    del self._selection_cache[oldest_key]
+            return selection
         
         # Если ничего не найдено
         available = get_all_available_models()
@@ -245,11 +429,18 @@ class SmartModelRouter(ModelRouter):
                 "Установите хотя бы одну модель через: ollama pull <model_name>"
             )
         
-        return ModelSelection(
+        selection = ModelSelection(
             model=available[0], 
             confidence=0.3,
             reason="Крайний fallback"
         )
+        if use_cache:
+            cache_key = self._get_cache_key(task_type, preferred_model, context)
+            self._selection_cache[cache_key] = selection
+            if len(self._selection_cache) > self._cache_max_size:
+                oldest_key = next(iter(self._selection_cache))
+                del self._selection_cache[oldest_key]
+        return selection
     
     def select_model_for_complexity(
         self,
@@ -412,6 +603,8 @@ class SmartModelRouter(ModelRouter):
     ) -> Dict[str, ModelInfo]:
         """Фильтрует модели по hardware лимитам из конфига.
         
+        Улучшенная версия с динамической проверкой доступной памяти.
+        
         Args:
             models: Словарь моделей
             
@@ -422,15 +615,44 @@ class SmartModelRouter(ModelRouter):
         allow_heavy = self.config.allow_heavy_models
         allow_ultra = self.config.allow_ultra_models
         
+        # Динамическая проверка доступной памяти
+        available_memory_gb = None
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        except ImportError:
+            logger.debug("psutil не доступен, используем только конфиг лимиты")
+        except Exception as e:
+            logger.debug(f"Ошибка проверки памяти: {e}")
+        
+        # Резервируем память для системы
+        system_reserve_gb = 2.0
+        effective_max_vram = max_vram
+        
+        if available_memory_gb and max_vram > 0:
+            # Используем минимум из конфига и доступной памяти
+            effective_max_vram = min(
+                max_vram,
+                max(0, available_memory_gb - system_reserve_gb)
+            )
+            if effective_max_vram < max_vram:
+                logger.debug(
+                    f"📊 Динамический лимит VRAM: {effective_max_vram:.1f}GB "
+                    f"(доступно {available_memory_gb:.1f}GB, резерв {system_reserve_gb}GB)"
+                )
+        
         filtered = {}
         for name, info in models.items():
             # Пропускаем embed модели
             if 'embed' in name.lower():
                 continue
             
-            # Проверяем VRAM лимит
-            if max_vram > 0 and info.estimated_vram_gb > max_vram:
-                logger.debug(f"⏭️ Модель {name} пропущена: VRAM {info.estimated_vram_gb}GB > лимит {max_vram}GB")
+            # Проверяем VRAM лимит (статический или динамический)
+            if effective_max_vram > 0 and info.estimated_vram_gb > effective_max_vram:
+                logger.debug(
+                    f"⏭️ Модель {name} пропущена: VRAM {info.estimated_vram_gb}GB > "
+                    f"лимит {effective_max_vram:.1f}GB"
+                )
                 continue
             
             # Проверяем tier лимиты

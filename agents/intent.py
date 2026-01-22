@@ -9,7 +9,7 @@
     enabled_agents = ["intent"]
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 from infrastructure.local_llm import LocalLLM
 from utils.logger import get_logger
 from utils.model_checker import (
@@ -86,6 +86,10 @@ class IntentResult:
 class IntentAgent:
     """Агент для классификации намерения пользователя."""
     
+    # Минимальные и максимальные пороги confidence
+    MIN_CONFIDENCE = 0.3
+    MAX_CONFIDENCE = 0.95
+    
     # Доступные типы намерений с описаниями для LLM
     INTENT_TYPES = {
         "greeting": "Приветствие, знакомство (привет, здравствуйте, hello)",
@@ -100,7 +104,7 @@ class IntentAgent:
         "analyze": "Анализ проекта, кодовой базы, структуры, архитектуры, обзор кода"
     }
     
-    # Единый список приветствий (используется в is_greeting_fast и _is_greeting)
+    # Единый список приветствий
     GREETINGS = frozenset([
         # Русские
         "привет", "здравствуй", "здравствуйте", "добрый день", "добрый вечер",
@@ -108,12 +112,6 @@ class IntentAgent:
         # Английские
         "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
         "good evening", "good night", "howdy", "sup"
-    ])
-    
-    # Короткие приветствия для быстрой проверки без LLM
-    SIMPLE_GREETINGS = frozenset([
-        "привет", "здравствуй", "здравствуйте", "хай", "хей", "салют",
-        "hello", "hi", "hey", "howdy", "sup"
     ])
     
     @staticmethod
@@ -135,11 +133,19 @@ class IntentAgent:
         query_lower = query.strip().lower()
         words = query_lower.split()
         
-        # Только для очень коротких запросов (1-2 слова)
+        # Только для очень коротких запросов (1-3 слова)
         if len(words) > 3:
             return False
         
-        return query_lower in IntentAgent.SIMPLE_GREETINGS or words[0] in IntentAgent.SIMPLE_GREETINGS
+        # Проверяем точное совпадение или начало фразы
+        if query_lower in IntentAgent.GREETINGS:
+            return True
+        
+        # Проверяем первое слово
+        if words and words[0] in IntentAgent.GREETINGS:
+            return True
+        
+        return False
     
     def __init__(self, model: Optional[str] = None, temperature: float = 0.2, lazy_llm: bool = False) -> None:
         """Инициализация агента определения намерения.
@@ -153,6 +159,7 @@ class IntentAgent:
         self.temperature = temperature
         self.lazy_llm = lazy_llm
         self._llm: Optional[LocalLLM] = None
+        self._cache: dict[str, IntentResult] = {}  # Простой кэш для повторяющихся запросов
     
     @property
     def llm(self) -> LocalLLM:
@@ -182,10 +189,161 @@ class IntentAgent:
             )
         return self._llm
     
+    def _calibrate_confidence(self, raw_confidence: float, query_length: int) -> float:
+        """Калибрует уверенность на основе длины запроса.
+        
+        Короткие запросы обычно имеют более низкую уверенность,
+        длинные запросы — более высокую.
+        
+        Args:
+            raw_confidence: Исходная уверенность от LLM
+            query_length: Длина запроса в символах
+            
+        Returns:
+            Откалиброванная уверенность в диапазоне [MIN_CONFIDENCE, MAX_CONFIDENCE]
+        """
+        # Нормализуем confidence в допустимый диапазон
+        confidence = max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, raw_confidence))
+        
+        # Короткие запросы (< 20 символов) — немного снижаем уверенность
+        if query_length < 20:
+            confidence = max(self.MIN_CONFIDENCE, confidence - 0.1)
+        # Длинные запросы (> 100 символов) — немного повышаем уверенность
+        elif query_length > 100:
+            confidence = min(self.MAX_CONFIDENCE, confidence + 0.05)
+        
+        return confidence
+    
+    def _detect_language(self, query: str) -> str:
+        """Определяет язык запроса.
+        
+        Args:
+            query: Запрос пользователя
+            
+        Returns:
+            Код языка ('ru' или 'en')
+        """
+        # Проверяем наличие кириллических символов
+        has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in query)
+        
+        # Если есть кириллица - русский, иначе английский
+        return "ru" if has_cyrillic else "en"
+    
+    def _get_prompt(self, query: str, is_structured: bool = True) -> str:
+        """Создаёт промпт для классификации намерения.
+        
+        Унифицированный метод для structured и legacy режимов,
+        с адаптацией под язык запроса.
+        
+        Args:
+            query: Запрос пользователя
+            is_structured: Использовать ли structured output формат
+            
+        Returns:
+            Промпт для LLM
+        """
+        language = self._detect_language(query)
+        
+        # Формируем описание типов
+        types_description = "\n".join(
+            f"  - {intent}: {desc}" 
+            for intent, desc in self.INTENT_TYPES.items()
+        )
+        
+        # Базовый промпт (английский для structured, адаптируется для legacy)
+        if is_structured:
+            # Structured промпт всегда на английском (для лучшей совместимости с моделями)
+            base_prompt = f"""Classify this user request for a CODE GENERATION system.
+
+REQUEST: "{query}"
+
+INTENT TYPES:
+{types_description}
+
+COMPLEXITY:
+- simple: single function, <100 lines
+- medium: class/module, 100-500 lines
+- complex: multi-file project, 500+ lines
+
+RULES:
+- "greeting" = ONLY if request is JUST a greeting with NO task
+- "help" = meta-questions about system, NOT code tasks
+- "create" = ANY code generation task: "print X", "def X", "напиши X", "создай Y"
+
+EXAMPLES:
+- "print hello" -> create (code task to print something)
+- "print hi" -> create (code task)
+- "def add(a,b)" -> create (function definition)
+- "привет" -> greeting (just greeting)
+- "hello world program" -> create (code task)
+
+Respond with intent, confidence (0-1), complexity, and brief reasoning."""
+        else:
+            # Legacy промпт адаптируется под язык
+            if language == "ru":
+                base_prompt = f"""Классифицируй этот запрос пользователя для системы ГЕНЕРАЦИИ КОДА.
+
+ЗАПРОС: "{query}"
+
+ТИПЫ:
+{types_description}
+
+УРОВНИ СЛОЖНОСТИ:
+- "simple" = одна функция, утилита, небольшой скрипт (1 файл, <100 строк)
+- "medium" = класс, модуль с несколькими функциями, API endpoint (1-2 файла, 100-500 строк)
+- "complex" = игра, система, многофайловый проект, архитектура (3+ файла, 500+ строк)
+
+ПРАВИЛА:
+- "help" = мета-вопросы: "что умеешь", "can you help", вопросы БЕЗ конкретной задачи
+- "greeting" = только простые приветствия типа "привет", "hello"
+- "create" = конкретная задача на генерацию кода: "напиши X", "создай Y", "make Z"
+- "debug" = исправить КОНКРЕТНЫЙ код с ошибками
+- "analyze" = обзор/анализ проекта, кодовой базы, архитектуры
+
+ПРИМЕРЫ:
+- "напиши функцию сортировки" -> intent: create, complexity: simple
+- "создай класс для работы с БД" -> intent: create, complexity: medium
+- "напиши игру змейка" -> intent: create, complexity: complex
+- "проанализируй мой проект" -> intent: analyze, complexity: complex
+
+JSON ответ: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
+JSON:"""
+            else:
+                base_prompt = f"""Classify this user request for a CODE GENERATION system.
+
+REQUEST: "{query}"
+
+TYPES:
+{types_description}
+
+COMPLEXITY LEVELS:
+- "simple" = single function, utility, small script (1 file, <100 lines)
+- "medium" = class, module with multiple functions, API endpoint (1-2 files, 100-500 lines)
+- "complex" = game, system, multi-file project, architecture (3+ files, 500+ lines)
+
+RULES:
+- "help" = meta-questions: "what can you do", "can you help", questions WITHOUT specific task
+- "greeting" = only simple greetings like "hello", "hi"
+- "create" = specific task to generate code: "write X", "create Y", "make Z"
+- "debug" = fix SPECIFIC code with errors
+- "analyze" = review/analyze project, codebase, architecture
+
+EXAMPLES:
+- "write a sorting function" -> intent: create, complexity: simple
+- "create a database class" -> intent: create, complexity: medium
+- "make a snake game" -> intent: create, complexity: complex
+- "analyze my project" -> intent: analyze, complexity: complex
+
+JSON response: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
+JSON:"""
+        
+        return base_prompt
+    
     def determine_intent(self, user_query: str) -> IntentResult:
         """Определяет намерение пользователя через LLM.
         
         Использует лёгкую модель для умной классификации вместо хардкода паттернов.
+        Поддерживает кэширование для повторяющихся запросов.
         
         Args:
             user_query: Текст запроса пользователя
@@ -200,18 +358,37 @@ class IntentAgent:
                 description="Пустой запрос"
             )
         
-        # Только для очень простых приветствий (1-2 слова) пропускаем LLM
-        if self._is_greeting(user_query) and len(user_query.split()) <= 2:
-            return IntentResult(
+        # Проверяем кэш
+        query_key = user_query.strip().lower()
+        if query_key in self._cache:
+            logger.debug(f"♻️ Использую кэшированный результат для: {user_query[:60]}...")
+            return self._cache[query_key]
+        
+        # Только для очень простых приветствий (1-3 слова) пропускаем LLM
+        if self._is_greeting(user_query) and len(user_query.split()) <= 3:
+            result = IntentResult(
                 type="greeting",
                 confidence=0.95,
                 description="Приветствие пользователя"
             )
+            # Кэшируем результат
+            self._cache[query_key] = result
+            return result
         
         logger.info(f"🔍 Определяю намерение для запроса: {user_query[:60]}...")
         
         # Полноценная LLM классификация
         intent_result = self._classify_with_llm(user_query)
+        
+        # Калибруем confidence
+        intent_result.confidence = self._calibrate_confidence(
+            intent_result.confidence,
+            len(user_query)
+        )
+        
+        # Кэшируем результат (ограничиваем размер кэша)
+        if len(self._cache) < 1000:
+            self._cache[query_key] = intent_result
         
         logger.info(
             f"✅ Намерение определено: {intent_result.type} "
@@ -249,41 +426,7 @@ class IntentAgent:
         Returns:
             IntentResult с типом, уверенностью и сложностью
         """
-        prompt = f"""Classify this user request for a CODE GENERATION system.
-
-REQUEST: "{query}"
-
-INTENT TYPES:
-- greeting: ONLY simple greetings without any task (привет, hello, hi)
-- help: Questions about system capabilities (что ты умеешь?, help me)
-- create: Create new code, function, class, module, script
-- modify: Modify existing code
-- debug: Find and fix bugs in SPECIFIC code
-- optimize: Improve performance
-- explain: Explain how code works
-- test: Write tests
-- refactor: Restructure code
-- analyze: Analyze project, codebase, architecture
-
-COMPLEXITY:
-- simple: single function, <100 lines
-- medium: class/module, 100-500 lines
-- complex: multi-file project, 500+ lines
-
-RULES:
-- "greeting" = ONLY if request is JUST a greeting with NO task
-- "help" = meta-questions about system, NOT code tasks
-- "create" = ANY code generation task: "print X", "def X", "напиши X", "создай Y"
-
-EXAMPLES:
-- "print hello" -> create (code task to print something)
-- "print hi" -> create (code task)
-- "def add(a,b)" -> create (function definition)
-- "привет" -> greeting (just greeting)
-- "hello world program" -> create (code task)
-
-Respond with intent, confidence (0-1), complexity, and brief reasoning."""
-
+        prompt = self._get_prompt(query, is_structured=True)
         config = get_config()
         
         # Используем generate_with_fallback для автоматического fallback
@@ -291,10 +434,27 @@ Respond with intent, confidence (0-1), complexity, and brief reasoning."""
             llm=self.llm,
             prompt=prompt,
             response_model=IntentResponse,
-            fallback_fn=lambda: self._classify_legacy_response(query),
+            fallback_fn=lambda: self._response_to_result(self._classify_legacy(query)),
             agent_name="intent",
             num_predict=config.llm_tokens_intent
         )
+        
+        # Конвертируем IntentResponse -> IntentResult
+        return self._response_to_result(response)
+    
+    def _response_to_result(self, response: Union[IntentResponse, IntentResult]) -> IntentResult:
+        """Конвертирует IntentResponse или IntentResult в IntentResult.
+        
+        Унифицированный метод для преобразования ответов.
+        
+        Args:
+            response: IntentResponse или IntentResult
+            
+        Returns:
+            IntentResult
+        """
+        if isinstance(response, IntentResult):
+            return response
         
         # Маппинг строковых значений complexity в enum
         complexity_map = {
@@ -323,24 +483,9 @@ Respond with intent, confidence (0-1), complexity, and brief reasoning."""
         
         return IntentResult(
             type=intent_type,
-            confidence=response.confidence,
+            confidence=max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, response.confidence)),
             description=response.reasoning or descriptions.get(intent_type, "Выполнение задачи"),
             complexity=complexity
-        )
-    
-    def _classify_legacy_response(self, query: str) -> IntentResponse:
-        """Legacy классификация, возвращает IntentResponse для совместимости.
-        
-        Используется как fallback для generate_with_fallback.
-        """
-        result = self._classify_legacy(query)
-        
-        # Конвертируем IntentResult -> IntentResponse
-        return IntentResponse(
-            intent=IntentType(result.type),
-            confidence=result.confidence,
-            complexity=result.complexity.value,
-            reasoning=result.description
         )
     
     def _classify_legacy(self, query: str) -> IntentResult:
@@ -352,46 +497,7 @@ Respond with intent, confidence (0-1), complexity, and brief reasoning."""
         Returns:
             IntentResult с типом, уверенностью и сложностью
         """
-        # Формируем описание типов для промпта
-        types_description = "\n".join(
-            f"  - {intent}: {desc}" 
-            for intent, desc in self.INTENT_TYPES.items()
-        )
-        
-        prompt = f"""Classify this user request for a CODE GENERATION system.
-
-REQUEST: "{query}"
-
-TYPES:
-{types_description}
-
-COMPLEXITY LEVELS:
-- "simple" = single function, utility, small script (1 file, <100 lines)
-- "medium" = class, module with multiple functions, API endpoint (1-2 files, 100-500 lines)
-- "complex" = game, system, multi-file project, architecture (3+ files, 500+ lines)
-
-RULES:
-- "help" = meta-questions: "что умеешь", "can you help", questions WITHOUT specific task
-- "greeting" = only simple greetings like "привет", "hello"  
-- "create" = specific task to generate code: "напиши X", "создай Y", "make Z"
-- "debug" = fix SPECIFIC code with errors
-- "analyze" = review/analyze project, codebase, architecture: "проанализируй проект", "review my code", "дай обзор кодовой базы", "покажи структуру проекта"
-
-EXAMPLES:
-- "напиши функцию сортировки" -> intent: create, complexity: simple
-- "создай класс для работы с БД" -> intent: create, complexity: medium  
-- "напиши игру змейка" -> intent: create, complexity: complex
-- "напиши игру тетрис" -> intent: create, complexity: complex
-- "создай веб-сервер" -> intent: create, complexity: medium
-- "сделай парсер JSON" -> intent: create, complexity: simple
-- "проанализируй мой проект" -> intent: analyze, complexity: complex
-- "проанализируй проект" -> intent: analyze, complexity: complex
-- "дай обзор кодовой базы" -> intent: analyze, complexity: complex
-- "review this project" -> intent: analyze, complexity: complex
-
-JSON response: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
-JSON:"""
-
+        prompt = self._get_prompt(query, is_structured=False)
         config = get_config()
         response = self.llm.generate(prompt, num_predict=config.llm_tokens_intent)
         
@@ -460,7 +566,7 @@ JSON:"""
                 
                 return IntentResult(
                     type=intent,
-                    confidence=min(max(confidence, 0.0), 1.0),
+                    confidence=max(self.MIN_CONFIDENCE, min(self.MAX_CONFIDENCE, confidence)),
                     description=descriptions.get(intent, reason or "Выполнение задачи"),
                     complexity=complexity
                 )
@@ -555,12 +661,18 @@ JSON:"""
     def _is_greeting(self, query: str) -> bool:
         """Проверяет, является ли запрос приветствием.
         
+        Использует единую логику с is_greeting_fast, но с дополнительной проверкой
+        на ключевые слова кода для более длинных запросов.
+        
         Args:
             query: Запрос пользователя
             
         Returns:
             True если это приветствие, False иначе
         """
+        if not query:
+            return False
+        
         query_lower = query.strip().lower()
         words = query_lower.split()
         
@@ -569,15 +681,13 @@ JSON:"""
             if word in self.CODE_KEYWORDS:
                 return False
         
-        # Проверяем точное совпадение или начало фразы
-        for greeting in self.GREETINGS:
-            if query_lower == greeting or query_lower.startswith(greeting + " "):
-                return True
+        # Для коротких запросов используем быструю проверку
+        if len(words) <= 3:
+            return self.is_greeting_fast(query)
         
-        # Проверяем короткие запросы (1-2 слова), которые могут быть приветствиями
-        if len(words) <= 2:
-            for greeting in self.GREETINGS:
-                if greeting in words:
-                    return True
+        # Для длинных запросов проверяем начало фразы
+        for greeting in self.GREETINGS:
+            if query_lower.startswith(greeting + " "):
+                return True
         
         return False

@@ -2,6 +2,9 @@
  * Hook для выполнения кода через backend API
  */
 import { useState, useCallback } from 'react'
+import { CodeExecutionResponse, CodeValidationResponse } from '../types/api'
+import { extractErrorMessage } from '../utils/apiErrorHandler'
+import { api } from '../services/apiClient'
 
 interface ExecutionResult {
   output: string
@@ -29,24 +32,11 @@ export function useCodeExecution(): UseCodeExecutionReturn {
       setOutput(null)
 
       try {
-        const response = await fetch('/api/code/execute', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            code,
-            language: 'python',
-            timeout
-          })
+        const result = await api.code.execute({
+          code,
+          language: 'python',
+          timeout
         })
-
-        if (!response.ok) {
-          const errorData = await response.json()
-          throw new Error(errorData.detail || 'Ошибка при выполнении кода')
-        }
-
-        const result = await response.json()
 
         if (result.error) {
           setError(result.error)
@@ -63,7 +53,7 @@ export function useCodeExecution(): UseCodeExecutionReturn {
           executionTime: result.execution_time
         }
       } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка'
+        const errorMessage = extractErrorMessage(err)
         setError(errorMessage)
         return {
           output: '',
@@ -94,41 +84,22 @@ export function useCodeExecution(): UseCodeExecutionReturn {
 /**
  * Hook для валидации синтаксиса кода
  */
-interface ValidationResult {
-  valid: boolean
-  error?: string
-  line?: number
-  offset?: number
-}
-
 export function useCodeValidation() {
   const [isValidating, setIsValidating] = useState(false)
 
   const validateCode = useCallback(
-    async (code: string): Promise<ValidationResult> => {
+    async (code: string): Promise<CodeValidationResponse> => {
       setIsValidating(true)
 
       try {
-        const response = await fetch('/api/code/validate', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            code,
-            language: 'python'
-          })
+        return await api.code.validate({
+          code,
+          language: 'python'
         })
-
-        if (!response.ok) {
-          throw new Error('Ошибка при валидации кода')
-        }
-
-        return await response.json()
       } catch (err) {
         return {
           valid: false,
-          error: err instanceof Error ? err.message : 'Неизвестная ошибка'
+          error: extractErrorMessage(err)
         }
       } finally {
         setIsValidating(false)

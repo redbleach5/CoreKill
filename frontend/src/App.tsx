@@ -20,6 +20,10 @@ import { IDEPanel } from './components/IDEPanel'
 import { MetricsDashboard } from './components/MetricsDashboard'
 import { UnderTheHoodPanel } from './components/debug'
 import { ChatMessage, InteractionMode } from './types/chat'
+import { ModelsResponse, ConversationResponse } from './types/api'
+import { extractErrorMessage } from './utils/apiErrorHandler'
+import { api } from './services/apiClient'
+import { useModels } from './hooks/useModels'
 
 function App() {
   const { stages, results, metrics, isRunning, error, logs, toolCalls, clearLogs, startTask, stopTask, reset } = useAgentStream()
@@ -59,25 +63,11 @@ function App() {
   const [showUnderTheHood, setShowUnderTheHood] = useState(false)
 
   // Загрузка доступных моделей
+  const { models: availableModelsList } = useModels()
+  
   useEffect(() => {
-    const fetchModels = async () => {
-      try {
-        const response = await fetch('/api/models')
-        if (response.ok) {
-          const data = await response.json()
-          const models = data.models || []
-          setAvailableModels(models)
-          // Загружаем информацию о reasoning моделях для кэша
-          const { loadModelsInfo } = await import('./utils/modelUtils')
-          await loadModelsInfo()
-          // Не устанавливаем модель автоматически — по умолчанию "Авто" (пустая строка)
-        }
-      } catch {
-        // Игнорируем ошибки загрузки моделей
-      }
-    }
-    fetchModels()
-  }, [])
+    setAvailableModels(availableModelsList)
+  }, [availableModelsList])
 
   // Автоскролл к последнему сообщению
   useEffect(() => {
@@ -167,10 +157,7 @@ function App() {
   // Загрузка диалога с сервера
   const loadConversation = useCallback(async (convId: string) => {
     try {
-      const response = await fetch(`/api/conversations/${convId}`)
-      if (!response.ok) return
-      
-      const data = await response.json()
+      const data = await api.conversations.get(convId)
       
       // Преобразуем сообщения в формат ChatMessage
       const loadedMessages: ChatMessage[] = data.messages.map((msg: {
@@ -287,21 +274,30 @@ function App() {
   const handleAdvancedSettingsSave = (settings: {
     model: string
     temperature: number
+    topP: number
     maxIterations: number
-    enableWebSearch: boolean
-    enableRAG: boolean
     maxTokens: number
-    projectPath: string
-    fileExtensions: string
+    enableWebSearch: boolean
+    webSearchMaxResults: number
+    enableRAG: boolean
+    ragSimilarityThreshold: number
+    qualityThreshold: number
   }) => {
     setOptions(prev => ({
       ...prev,
       model: settings.model || prev.model,
       temperature: settings.temperature,
       maxIterations: settings.maxIterations,
-      disableWebSearch: !settings.enableWebSearch,
-      projectPath: settings.projectPath,
-      fileExtensions: settings.fileExtensions
+      disableWebSearch: !settings.enableWebSearch
+    }))
+    // Сохраняем дополнительные настройки в localStorage для будущего использования
+    localStorage.setItem('advancedSettings', JSON.stringify({
+      topP: settings.topP,
+      maxTokens: settings.maxTokens,
+      webSearchMaxResults: settings.webSearchMaxResults,
+      enableRAG: settings.enableRAG,
+      ragSimilarityThreshold: settings.ragSimilarityThreshold,
+      qualityThreshold: settings.qualityThreshold
     }))
   }
 

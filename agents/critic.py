@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, field
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.model_router import get_model_router
+from agents.base import BaseAgent
 from utils.logger import get_logger
 import ast
 import re
@@ -37,7 +38,7 @@ class CriticReport:
     tests_analyzed: bool = False
 
 
-class CriticAgent:
+class CriticAgent(BaseAgent):
     """Агент-критик для объективного анализа кода.
     
     Принципы работы:
@@ -63,20 +64,11 @@ class CriticAgent:
             model: Модель для анализа (если None, используется лёгкая модель)
             temperature: Низкая температура для точного анализа
         """
-        if model is None:
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="intent",  # Используем лёгкую модель
-                preferred_model=None,
-                context={"agent": "critic"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="critic",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="critic"
         )
     
     def analyze(

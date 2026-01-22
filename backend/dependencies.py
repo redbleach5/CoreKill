@@ -4,13 +4,22 @@
 Следует принципу Dependency Inversion — все модули используют этот контейнер
 вместо создания собственных экземпляров.
 """
-from typing import Optional, TYPE_CHECKING
-from functools import lru_cache
+import threading
+from typing import Optional, TYPE_CHECKING, Dict, Any
 from utils.logger import get_logger
+from utils.config import get_config
 
 if TYPE_CHECKING:
     from agents.memory import MemoryAgent
     from infrastructure.rag import RAGSystem
+    from agents.intent import IntentAgent
+    from agents.planner import PlannerAgent
+    from agents.researcher import ResearcherAgent
+    from agents.test_generator import TestGeneratorAgent
+    from agents.coder import CoderAgent
+    from agents.debugger import DebuggerAgent
+    from agents.reflection import ReflectionAgent
+    from agents.critic import CriticAgent
 
 logger = get_logger()
 
@@ -22,6 +31,8 @@ class DependencyContainer:
     критических компонентов. Все агенты и модули должны использовать
     этот контейнер для получения shared-зависимостей.
     
+    Потокобезопасен для использования в многопоточных окружениях (FastAPI).
+    
     Использование:
         from backend.dependencies import get_memory_agent
         
@@ -29,13 +40,25 @@ class DependencyContainer:
     """
     
     _instance: Optional['DependencyContainer'] = None
+    _lock = threading.Lock()
     _memory_agent: Optional['MemoryAgent'] = None
     _rag_system: Optional['RAGSystem'] = None
     
+    # Кэш агентов (thread-safe)
+    _agents_cache: Dict[str, Any] = {}
+    _agents_lock = threading.Lock()
+    
+    # Кэш стриминговых агентов (thread-safe)
+    _streaming_agents_cache: Dict[str, Any] = {}
+    _streaming_agents_lock = threading.Lock()
+    
     def __new__(cls) -> 'DependencyContainer':
-        """Реализация паттерна Singleton."""
+        """Реализация паттерна Singleton с потокобезопасностью."""
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                # Двойная проверка для потокобезопасности
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
     
     @classmethod
@@ -46,36 +69,470 @@ class DependencyContainer:
             Экземпляр MemoryAgent (Singleton)
         """
         if cls._memory_agent is None:
-            from agents.memory import MemoryAgent
-            cls._memory_agent = MemoryAgent()
-            logger.info("✅ MemoryAgent инициализирован (Singleton)")
+            with cls._lock:
+                # Двойная проверка для потокобезопасности
+                if cls._memory_agent is None:
+                    from agents.memory import MemoryAgent
+                    cls._memory_agent = MemoryAgent()
+                    logger.info("✅ MemoryAgent инициализирован (Singleton)")
         return cls._memory_agent
     
     @classmethod
-    def get_rag_system(cls, collection_name: str = "code_knowledge") -> 'RAGSystem':
+    def get_rag_system(cls, collection_name: Optional[str] = None) -> 'RAGSystem':
         """Возвращает глобальный RAGSystem, создавая его при необходимости.
         
         Args:
-            collection_name: Название коллекции ChromaDB
+            collection_name: Название коллекции ChromaDB. Если None, используется
+                           значение из конфигурации. Если указано и отличается
+                           от текущего, создаётся новый экземпляр.
             
         Returns:
-            Экземпляр RAGSystem (Singleton)
+            Экземпляр RAGSystem (Singleton для конкретной коллекции)
         """
-        if cls._rag_system is None:
-            from infrastructure.rag import RAGSystem
-            cls._rag_system = RAGSystem(
-                collection_name=collection_name,
-                persist_directory=".chromadb"
-            )
-            logger.info("✅ RAGSystem инициализирован (Singleton)")
+        config = get_config()
+        collection_name = collection_name or config.rag_code_collection
+        
+        # Проверяем, нужно ли пересоздать RAGSystem для другой коллекции
+        if cls._rag_system is None or cls._rag_system.collection_name != collection_name:
+            with cls._lock:
+                # Двойная проверка для потокобезопасности
+                if cls._rag_system is None or cls._rag_system.collection_name != collection_name:
+                    from infrastructure.rag import RAGSystem
+                    cls._rag_system = RAGSystem(
+                        collection_name=collection_name,
+                        persist_directory=config.rag_persist_directory
+                    )
+                    logger.info(f"✅ RAGSystem инициализирован для коллекции {collection_name}")
         return cls._rag_system
     
     @classmethod
     def reset(cls) -> None:
         """Сбрасывает все зависимости (для тестирования)."""
-        cls._memory_agent = None
-        cls._rag_system = None
+        with cls._lock:
+            cls._memory_agent = None
+            cls._rag_system = None
+        with cls._agents_lock:
+            cls._agents_cache.clear()
         logger.info("🔄 DependencyContainer сброшен")
+    
+    @classmethod
+    def _get_agent(
+        cls,
+        agent_type: str,
+        agent_class: type,
+        cache_key: str,
+        **init_kwargs: Any
+    ) -> Any:
+        """Универсальный метод для получения агента с кэшированием.
+        
+        Args:
+            agent_type: Тип агента (для логирования)
+            agent_class: Класс агента для создания
+            cache_key: Ключ кэша
+            **init_kwargs: Параметры для инициализации агента
+            
+        Returns:
+            Экземпляр агента
+        """
+        if cache_key not in cls._agents_cache:
+            with cls._agents_lock:
+                if cache_key not in cls._agents_cache:
+                    cls._agents_cache[cache_key] = agent_class(**init_kwargs)
+                    logger.debug(f"✅ {agent_type} инициализирован (cache_key: {cache_key})")
+        return cls._agents_cache[cache_key]
+    
+    @classmethod
+    def get_intent_agent(cls, model: Optional[str] = None, temperature: float = 0.2) -> 'IntentAgent':
+        """Возвращает IntentAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента (None = используется из конфига)
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр IntentAgent
+        """
+        from agents.intent import IntentAgent
+        cache_key = f"intent_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="IntentAgent",
+            agent_class=IntentAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_planner_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25,
+        memory_agent: Optional['MemoryAgent'] = None
+    ) -> 'PlannerAgent':
+        """Возвращает PlannerAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            memory_agent: MemoryAgent (если None, получается автоматически)
+            
+        Returns:
+            Экземпляр PlannerAgent
+        """
+        if memory_agent is None:
+            memory_agent = cls.get_memory_agent()
+        from agents.planner import PlannerAgent
+        cache_key = f"planner_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="PlannerAgent",
+            agent_class=PlannerAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature,
+            memory_agent=memory_agent
+        )
+    
+    @classmethod
+    def get_researcher_agent(cls, memory_agent: Optional['MemoryAgent'] = None) -> 'ResearcherAgent':
+        """Возвращает ResearcherAgent, создавая его при необходимости.
+        
+        Args:
+            memory_agent: MemoryAgent (если None, получается автоматически)
+            
+        Returns:
+            Экземпляр ResearcherAgent
+        """
+        if memory_agent is None:
+            memory_agent = cls.get_memory_agent()
+        from agents.researcher import ResearcherAgent
+        cache_key = "researcher"
+        return cls._get_agent(
+            agent_type="ResearcherAgent",
+            agent_class=ResearcherAgent,
+            cache_key=cache_key,
+            memory_agent=memory_agent
+        )
+    
+    @classmethod
+    def get_test_generator_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.18
+    ) -> 'TestGeneratorAgent':
+        """Возвращает TestGeneratorAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр TestGeneratorAgent
+        """
+        from agents.test_generator import TestGeneratorAgent
+        cache_key = f"test_generator_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="TestGeneratorAgent",
+            agent_class=TestGeneratorAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_coder_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25
+    ) -> 'CoderAgent':
+        """Возвращает CoderAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр CoderAgent
+        """
+        from agents.coder import CoderAgent
+        cache_key = f"coder_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="CoderAgent",
+            agent_class=CoderAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_debugger_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.2
+    ) -> 'DebuggerAgent':
+        """Возвращает DebuggerAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр DebuggerAgent
+        """
+        from agents.debugger import DebuggerAgent
+        cache_key = f"debugger_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="DebuggerAgent",
+            agent_class=DebuggerAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_reflection_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25
+    ) -> 'ReflectionAgent':
+        """Возвращает ReflectionAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр ReflectionAgent
+        """
+        from agents.reflection import ReflectionAgent
+        cache_key = f"reflection_{model}_{temperature}"
+        return cls._get_agent(
+            agent_type="ReflectionAgent",
+            agent_class=ReflectionAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_critic_agent(cls) -> 'CriticAgent':
+        """Возвращает CriticAgent, создавая его при необходимости.
+        
+        Returns:
+            Экземпляр CriticAgent
+        """
+        from agents.critic import get_critic_agent as create_critic
+        cache_key = "critic"
+        if cache_key not in cls._agents_cache:
+            with cls._agents_lock:
+                if cache_key not in cls._agents_cache:
+                    cls._agents_cache[cache_key] = create_critic()
+                    logger.debug("✅ CriticAgent инициализирован")
+        return cls._agents_cache[cache_key]
+    
+    # === Стриминговые агенты ===
+    
+    @classmethod
+    def _get_streaming_agent(
+        cls,
+        agent_type: str,
+        agent_class: type,
+        cache_key: str,
+        **init_kwargs: Any
+    ) -> Any:
+        """Универсальный метод для получения стримингового агента с кэшированием.
+        
+        Args:
+            agent_type: Тип агента (для логирования)
+            agent_class: Класс стримингового агента для создания
+            cache_key: Ключ кэша
+            **init_kwargs: Параметры для инициализации агента
+            
+        Returns:
+            Экземпляр стримингового агента
+        """
+        if cache_key not in cls._streaming_agents_cache:
+            with cls._streaming_agents_lock:
+                if cache_key not in cls._streaming_agents_cache:
+                    cls._streaming_agents_cache[cache_key] = agent_class(**init_kwargs)
+                    logger.debug(f"✅ {agent_type} (streaming) инициализирован (cache_key: {cache_key})")
+        return cls._streaming_agents_cache[cache_key]
+    
+    @classmethod
+    def get_streaming_planner_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25,
+        memory_agent: Optional['MemoryAgent'] = None
+    ) -> Any:
+        """Возвращает StreamingPlannerAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            memory_agent: MemoryAgent (если None, получается автоматически)
+            
+        Returns:
+            Экземпляр StreamingPlannerAgent
+        """
+        if memory_agent is None:
+            memory_agent = cls.get_memory_agent()
+        from agents.streaming_planner import StreamingPlannerAgent
+        cache_key = f"streaming_planner_{model}_{temperature}"
+        return cls._get_streaming_agent(
+            agent_type="StreamingPlannerAgent",
+            agent_class=StreamingPlannerAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature,
+            memory_agent=memory_agent
+        )
+    
+    @classmethod
+    def get_streaming_test_generator_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.18
+    ) -> Any:
+        """Возвращает StreamingTestGeneratorAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр StreamingTestGeneratorAgent
+        """
+        from agents.streaming_test_generator import StreamingTestGeneratorAgent
+        cache_key = f"streaming_test_generator_{model}_{temperature}"
+        return cls._get_streaming_agent(
+            agent_type="StreamingTestGeneratorAgent",
+            agent_class=StreamingTestGeneratorAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_streaming_coder_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25
+    ) -> Any:
+        """Возвращает StreamingCoderAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр StreamingCoderAgent
+        """
+        from agents.streaming_coder import StreamingCoderAgent
+        cache_key = f"streaming_coder_{model}_{temperature}"
+        return cls._get_streaming_agent(
+            agent_type="StreamingCoderAgent",
+            agent_class=StreamingCoderAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_streaming_debugger_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.2
+    ) -> Any:
+        """Возвращает StreamingDebuggerAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр StreamingDebuggerAgent
+        """
+        from agents.streaming_debugger import StreamingDebuggerAgent
+        cache_key = f"streaming_debugger_{model}_{temperature}"
+        return cls._get_streaming_agent(
+            agent_type="StreamingDebuggerAgent",
+            agent_class=StreamingDebuggerAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_streaming_reflection_agent(
+        cls,
+        model: Optional[str] = None,
+        temperature: float = 0.25
+    ) -> Any:
+        """Возвращает StreamingReflectionAgent, создавая его при необходимости.
+        
+        Args:
+            model: Модель для агента
+            temperature: Температура генерации
+            
+        Returns:
+            Экземпляр StreamingReflectionAgent
+        """
+        from agents.streaming_reflection import StreamingReflectionAgent
+        cache_key = f"streaming_reflection_{model}_{temperature}"
+        return cls._get_streaming_agent(
+            agent_type="StreamingReflectionAgent",
+            agent_class=StreamingReflectionAgent,
+            cache_key=cache_key,
+            model=model,
+            temperature=temperature
+        )
+    
+    @classmethod
+    def get_streaming_critic_agent(cls) -> Any:
+        """Возвращает StreamingCriticAgent, создавая его при необходимости.
+        
+        Returns:
+            Экземпляр StreamingCriticAgent
+        """
+        from agents.streaming_critic import StreamingCriticAgent
+        cache_key = "streaming_critic"
+        return cls._get_streaming_agent(
+            agent_type="StreamingCriticAgent",
+            agent_class=StreamingCriticAgent,
+            cache_key=cache_key,
+            model=None,
+            temperature=0.1
+        )
+    
+    @classmethod
+    def shutdown(cls) -> None:
+        """Корректно завершает работу всех зависимостей.
+        
+        Вызывается при graceful shutdown приложения для освобождения ресурсов.
+        """
+        with cls._lock:
+            if cls._rag_system:
+                # ChromaDB PersistentClient не требует явного закрытия,
+                # но можно добавить cleanup если понадобится
+                logger.info("✅ RAGSystem остановлен")
+                cls._rag_system = None
+            
+            if cls._memory_agent:
+                # MemoryAgent не имеет явного cleanup, но можно добавить если понадобится
+                logger.info("✅ MemoryAgent остановлен")
+                cls._memory_agent = None
+            
+            # Очищаем кэш агентов
+            with cls._agents_lock:
+                cls._agents_cache.clear()
+                logger.info("✅ Кэш агентов очищен")
+            
+            # Очищаем кэш стриминговых агентов
+            with cls._streaming_agents_lock:
+                cls._streaming_agents_cache.clear()
+                logger.info("✅ Кэш стриминговых агентов очищен")
+            
+            logger.info("✅ DependencyContainer остановлен")
 
 
 # === Удобные функции для импорта ===
@@ -93,11 +550,12 @@ def get_memory_agent() -> 'MemoryAgent':
     return DependencyContainer.get_memory_agent()
 
 
-def get_rag_system(collection_name: str = "code_knowledge") -> 'RAGSystem':
+def get_rag_system(collection_name: Optional[str] = None) -> 'RAGSystem':
     """Возвращает глобальный RAGSystem.
     
     Args:
-        collection_name: Название коллекции
+        collection_name: Название коллекции. Если None, используется значение
+                        из конфигурации (rag.code_collection).
         
     Returns:
         Экземпляр RAGSystem
@@ -110,11 +568,147 @@ def reset_dependencies() -> None:
     DependencyContainer.reset()
 
 
-@lru_cache(maxsize=1)
+def shutdown_dependencies() -> None:
+    """Корректно завершает работу всех зависимостей.
+    
+    Вызывается при graceful shutdown приложения.
+    """
+    DependencyContainer.shutdown()
+
+
 def get_dependency_container() -> DependencyContainer:
     """Возвращает глобальный контейнер зависимостей.
     
     Returns:
         Экземпляр DependencyContainer
+        
+    Note:
+        lru_cache не нужен, т.к. DependencyContainer уже реализует Singleton.
     """
     return DependencyContainer()
+
+
+# === Удобные функции для получения агентов ===
+
+def get_intent_agent(model: Optional[str] = None, temperature: float = 0.2) -> 'IntentAgent':
+    """Возвращает IntentAgent через DependencyContainer."""
+    return DependencyContainer.get_intent_agent(model=model, temperature=temperature)
+
+
+def get_planner_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25,
+    memory_agent: Optional['MemoryAgent'] = None
+) -> 'PlannerAgent':
+    """Возвращает PlannerAgent через DependencyContainer."""
+    return DependencyContainer.get_planner_agent(
+        model=model,
+        temperature=temperature,
+        memory_agent=memory_agent
+    )
+
+
+def get_researcher_agent(memory_agent: Optional['MemoryAgent'] = None) -> 'ResearcherAgent':
+    """Возвращает ResearcherAgent через DependencyContainer."""
+    return DependencyContainer.get_researcher_agent(memory_agent=memory_agent)
+
+
+def get_test_generator_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.18
+) -> 'TestGeneratorAgent':
+    """Возвращает TestGeneratorAgent через DependencyContainer."""
+    return DependencyContainer.get_test_generator_agent(model=model, temperature=temperature)
+
+
+def get_coder_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25
+) -> 'CoderAgent':
+    """Возвращает CoderAgent через DependencyContainer."""
+    return DependencyContainer.get_coder_agent(model=model, temperature=temperature)
+
+
+def get_debugger_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.2
+) -> 'DebuggerAgent':
+    """Возвращает DebuggerAgent через DependencyContainer."""
+    return DependencyContainer.get_debugger_agent(model=model, temperature=temperature)
+
+
+def get_reflection_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25
+) -> 'ReflectionAgent':
+    """Возвращает ReflectionAgent через DependencyContainer."""
+    return DependencyContainer.get_reflection_agent(model=model, temperature=temperature)
+
+
+def get_critic_agent() -> 'CriticAgent':
+    """Возвращает CriticAgent через DependencyContainer."""
+    return DependencyContainer.get_critic_agent()
+
+
+# === Удобные функции для получения стриминговых агентов ===
+
+def get_streaming_planner_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25,
+    memory_agent: Optional['MemoryAgent'] = None
+) -> Any:
+    """Возвращает StreamingPlannerAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_planner_agent(
+        model=model,
+        temperature=temperature,
+        memory_agent=memory_agent
+    )
+
+
+def get_streaming_test_generator_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.18
+) -> Any:
+    """Возвращает StreamingTestGeneratorAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_test_generator_agent(
+        model=model,
+        temperature=temperature
+    )
+
+
+def get_streaming_coder_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25
+) -> Any:
+    """Возвращает StreamingCoderAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_coder_agent(
+        model=model,
+        temperature=temperature
+    )
+
+
+def get_streaming_debugger_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.2
+) -> Any:
+    """Возвращает StreamingDebuggerAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_debugger_agent(
+        model=model,
+        temperature=temperature
+    )
+
+
+def get_streaming_reflection_agent(
+    model: Optional[str] = None,
+    temperature: float = 0.25
+) -> Any:
+    """Возвращает StreamingReflectionAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_reflection_agent(
+        model=model,
+        temperature=temperature
+    )
+
+
+def get_streaming_critic_agent() -> Any:
+    """Возвращает StreamingCriticAgent через DependencyContainer."""
+    return DependencyContainer.get_streaming_critic_agent()

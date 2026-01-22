@@ -1,6 +1,9 @@
 /**
  * Утилиты для работы с моделями
  */
+import { ModelsResponse } from '../types/api'
+import { api } from '../services/apiClient'
+import { extractErrorMessage } from './apiErrorHandler'
 
 // Кэш информации о моделях с сервера
 let modelsCache: Map<string, { is_reasoning?: boolean }> = new Map()
@@ -19,26 +22,23 @@ export async function loadModelsInfo(): Promise<void> {
   }
 
   try {
-    const response = await fetch('/api/models')
-    if (response.ok) {
-      const data = await response.json()
-      modelsCache.clear()
-      
-      // Обрабатываем детальную информацию о моделях
-      if (data.models_detailed && Array.isArray(data.models_detailed)) {
-        for (const model of data.models_detailed) {
-          if (model.name) {
-            modelsCache.set(model.name, {
-              is_reasoning: model.is_reasoning || false
-            })
-          }
+    const data = await api.models.list()
+    modelsCache.clear()
+    
+    // Обрабатываем детальную информацию о моделях
+    if (data.models_detailed && Array.isArray(data.models_detailed)) {
+      for (const model of data.models_detailed) {
+        if (model.name) {
+          modelsCache.set(model.name, {
+            is_reasoning: model.is_reasoning || false
+          })
         }
       }
-      
-      cacheTimestamp = now
     }
+    
+    cacheTimestamp = now
   } catch (error) {
-    console.warn('Ошибка загрузки информации о моделях:', error)
+    console.warn('Ошибка загрузки информации о моделях:', extractErrorMessage(error))
   }
 }
 

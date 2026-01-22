@@ -19,23 +19,35 @@ from infrastructure.workflow_state import AgentState
 from infrastructure.workflow_decorators import workflow_node
 from agents.intent import IntentAgent, IntentResult
 from agents.researcher import ResearcherAgent
-from backend.dependencies import get_memory_agent
+from backend.dependencies import (
+    get_memory_agent,
+    get_intent_agent,
+    get_planner_agent,
+    get_researcher_agent,
+    get_test_generator_agent,
+    get_coder_agent,
+    get_debugger_agent,
+    get_reflection_agent,
+    get_critic_agent,
+    get_streaming_planner_agent,
+    get_streaming_test_generator_agent,
+    get_streaming_coder_agent,
+    get_streaming_debugger_agent,
+    get_streaming_reflection_agent,
+    get_streaming_critic_agent
+)
 from utils.validation import validate_code
 from utils.config import get_config
 from utils.logger import get_logger
 from utils.file_context import extract_file_path_from_task, read_file_context, prepare_modify_context
-
-# Синхронные агенты (fallback)
+from infrastructure.workflow_config import get_workflow_config
+# Синхронные агенты (fallback) - используются только для типизации
 from agents.planner import PlannerAgent
 from agents.test_generator import TestGeneratorAgent
 from agents.coder import CoderAgent
 from agents.debugger import DebuggerAgent
 from agents.reflection import ReflectionAgent
-from agents.critic import CriticAgent, get_critic_agent
-
-# Стриминговые агенты (real-time <think> блоки)
-from agents.streaming_planner import StreamingPlannerAgent
-from agents.streaming_test_generator import StreamingTestGeneratorAgent
+from agents.critic import CriticAgent
 from agents.streaming_coder import StreamingCoderAgent
 from agents.streaming_debugger import StreamingDebuggerAgent
 from agents.streaming_reflection import StreamingReflectionAgent
@@ -55,31 +67,75 @@ logger = get_logger()
 def _is_streaming_enabled() -> bool:
     """Проверяет включён ли режим стриминга в config.toml."""
     try:
-        config = get_config()
-        streaming_config = config._config_data.get("streaming", {})
-        return streaming_config.get("use_streaming_agents", False)
+        workflow_config = get_workflow_config()
+        return workflow_config.streaming_enabled
     except Exception:
         return False
 
 
-# Глобальные агенты (инициализируются один раз)
-# Синхронные версии
-_intent_agent: IntentAgent | None = None
-_planner_agent: PlannerAgent | None = None
-_researcher_agent: ResearcherAgent | None = None
-_test_generator: TestGeneratorAgent | None = None
-_coder_agent: CoderAgent | None = None
-_debugger_agent: DebuggerAgent | None = None
-_reflection_agent: ReflectionAgent | None = None
-_critic_agent: CriticAgent | None = None
-
-# Стриминговые версии
-_streaming_planner: StreamingPlannerAgent | None = None
-_streaming_test_generator: StreamingTestGeneratorAgent | None = None
-_streaming_coder: StreamingCoderAgent | None = None
-_streaming_debugger: StreamingDebuggerAgent | None = None
-_streaming_reflection: StreamingReflectionAgent | None = None
-_streaming_critic: StreamingCriticAgent | None = None
+def _get_streaming_node_adapter(streaming_node_func, stage_name: str, fallback_key: str = "", fallback_value: Any = ""):
+    """Создаёт адаптер для стримингового узла, совместимый с LangGraph.
+    
+    Адаптер использует EventStore для хранения событий вне state,
+    предотвращая раздувание состояния при длительных задачах.
+    
+    Args:
+        streaming_node_func: Функция стримингового узла (stream_planner_node, etc.)
+        stage_name: Название этапа для декоратора
+        fallback_key: Ключ в state для fallback значения
+        fallback_value: Fallback значение при ошибке
+        
+    Returns:
+        Функция-адаптер, совместимая с LangGraph (принимает и возвращает AgentState)
+    """
+    @workflow_node(stage=stage_name, fallback_key=fallback_key if fallback_key else None, fallback_value=fallback_value)
+    async def adapter(state: AgentState) -> AgentState:
+        """Адаптер для стримингового узла с использованием EventStore."""
+        # Получаем session_id для изоляции событий
+        session_id = state.get("task_id") or state.get("session_id") or "default"
+        
+        # Инициализируем EventStore для сессии
+        from infrastructure.event_store import get_event_store
+        event_store = await get_event_store(session_id)
+        
+        # Инициализируем список ссылок на события если его нет или он None
+        if "event_references" not in state or state.get("event_references") is None:
+            state["event_references"] = []
+        
+        # Вызываем стриминговый узел и сохраняем события в EventStore
+        final_state = None
+        try:
+            async for event_type, data in streaming_node_func(state):
+                if event_type == "done":
+                    final_state = data
+                else:
+                    # Сохраняем событие в EventStore и получаем ID
+                    event_id = await event_store.save_event(event_type, data)
+                    # Сохраняем только ID события в state (не сами данные)
+                    # Убеждаемся что event_references это список
+                    if state.get("event_references") is None:
+                        state["event_references"] = []
+                    state["event_references"].append(event_id)
+                    
+                    logger.debug(
+                        f"💾 Событие сохранено в EventStore: {event_type} "
+                        f"(ID: {event_id[:8]}..., всего ссылок: {len(state['event_references'])})"
+                    )
+        except Exception as e:
+            logger.error(f"❌ Ошибка в стриминговом узле {stage_name}: {e}", error=e)
+            # Возвращаем state с fallback значением
+            if fallback_key:
+                state[fallback_key] = fallback_value
+        
+        # Возвращаем финальный state (или исходный если не получен)
+        if final_state:
+            # Сохраняем ссылки на события в финальном state
+            final_state["event_references"] = state.get("event_references", [])
+            return final_state
+        
+        return state
+    
+    return adapter
 
 
 def _get_memory_agent() -> 'MemoryAgent':
@@ -91,130 +147,89 @@ def _get_memory_agent() -> 'MemoryAgent':
     return get_memory_agent()
 
 
-def _initialize_agents(state: AgentState) -> None:
-    """Инициализирует агентов если они ещё не инициализированы.
-    
-    Инициализирует синхронные агенты. Стриминговые агенты
-    инициализируются отдельно через _initialize_streaming_agents().
+def _get_agent_from_container(agent_type: str, state: AgentState) -> Any:
+    """Получает агента через DependencyContainer (thread-safe).
     
     Args:
+        agent_type: Тип агента (intent, planner, coder, etc.)
         state: State с параметрами для инициализации
+        
+    Returns:
+        Экземпляр агента
     """
-    global _intent_agent, _planner_agent, _researcher_agent
-    global _test_generator, _coder_agent, _debugger_agent, _reflection_agent, _critic_agent
-    
-    # MemoryAgent получаем через DependencyContainer (Singleton)
+    model = state.get("model")
+    temperature = state.get("temperature", 0.25)
     memory_agent = _get_memory_agent()
     
-    if _intent_agent is None:
-        _intent_agent = IntentAgent(model=None, temperature=0.2)
-    
-    if _planner_agent is None:
-        _planner_agent = PlannerAgent(
-            model=state.get("model"),
-            temperature=state.get("temperature", 0.25),
-            memory_agent=memory_agent
-        )
-    
-    if _researcher_agent is None:
-        _researcher_agent = ResearcherAgent(memory_agent=memory_agent)
-    
-    if _test_generator is None:
-        _test_generator = TestGeneratorAgent(
-            model=state.get("model"),
-            temperature=0.18
-        )
-    
-    if _coder_agent is None:
-        _coder_agent = CoderAgent(
-            model=state.get("model"),
-            temperature=state.get("temperature", 0.25)
-        )
-    
-    if _debugger_agent is None:
-        _debugger_agent = DebuggerAgent(
-            model=state.get("model"),
-            temperature=0.2
-        )
-    
-    if _reflection_agent is None:
-        _reflection_agent = ReflectionAgent(
-            model=state.get("model"),
-            temperature=state.get("temperature", 0.25)
-        )
-    
-    if _critic_agent is None:
-        _critic_agent = get_critic_agent()
+    if agent_type == "intent":
+        return get_intent_agent(model=None, temperature=0.2)
+    elif agent_type == "planner":
+        return get_planner_agent(model=model, temperature=temperature, memory_agent=memory_agent)
+    elif agent_type == "researcher":
+        return get_researcher_agent(memory_agent=memory_agent)
+    elif agent_type == "test_generator":
+        return get_test_generator_agent(model=model, temperature=0.18)
+    elif agent_type == "coder":
+        return get_coder_agent(model=model, temperature=temperature)
+    elif agent_type == "debugger":
+        return get_debugger_agent(model=model, temperature=0.2)
+    elif agent_type == "reflection":
+        return get_reflection_agent(model=model, temperature=temperature)
+    elif agent_type == "critic":
+        return get_critic_agent()
+    else:
+        raise ValueError(f"Unknown agent type: {agent_type}")
 
 
-# Кэш текущей модели для отслеживания изменений
-_current_streaming_model: str | None = None
-
-
-def _initialize_streaming_agents(state: AgentState) -> None:
-    """Инициализирует стриминговые агенты если они ещё не инициализированы.
+def _get_streaming_agent_for_state(agent_type: str, state: AgentState) -> Any:
+    """Лениво получает стримингового агента для конкретного state.
     
-    Вызывается только если use_streaming_agents = true в config.toml.
-    Переинициализирует агентов если модель изменилась.
+    Использует DependencyContainer для потокобезопасного кэширования.
     
     Args:
+        agent_type: Тип агента (planner, coder, test_generator, etc.)
         state: State с параметрами для инициализации
+        
+    Returns:
+        Экземпляр стримингового агента или None если стриминг отключён
     """
-    global _streaming_planner, _streaming_test_generator, _streaming_coder
-    global _streaming_debugger, _streaming_reflection, _streaming_critic
-    global _current_streaming_model
+    if not _is_streaming_enabled():
+        return None
     
+    model = state.get("model")
+    temperature = state.get("temperature", 0.25)
     memory_agent = _get_memory_agent()
-    requested_model = state.get("model")
     
-    # Переинициализируем агентов если модель изменилась
-    model_changed = _current_streaming_model is not None and requested_model != _current_streaming_model
-    if model_changed:
-        logger.info(f"🔄 Модель изменилась: {_current_streaming_model} → {requested_model}, переинициализирую агентов")
-        _streaming_planner = None
-        _streaming_test_generator = None
-        _streaming_coder = None
-        _streaming_debugger = None
-        _streaming_reflection = None
-        _streaming_critic = None
-    
-    _current_streaming_model = requested_model
-    
-    if _streaming_planner is None:
-        # Для планирования используем быструю модель (не reasoning)
-        # Агент сам выберет подходящую через router
-        _streaming_planner = StreamingPlannerAgent(
+    if agent_type == "planner":
+        return get_streaming_planner_agent(
             model=None,  # Авто-выбор быстрой модели для planning
-            temperature=state.get("temperature", 0.25),
+            temperature=temperature,
             memory_agent=memory_agent
         )
-    
-    if _streaming_test_generator is None:
-        _streaming_test_generator = StreamingTestGeneratorAgent(
-            model=requested_model,
+    elif agent_type == "test_generator":
+        return get_streaming_test_generator_agent(
+            model=model,
             temperature=0.18
         )
-    
-    if _streaming_coder is None:
-        _streaming_coder = StreamingCoderAgent(
-            model=requested_model,
-            temperature=state.get("temperature", 0.25)
+    elif agent_type == "coder":
+        return get_streaming_coder_agent(
+            model=model,
+            temperature=temperature
         )
-    
-    if _streaming_debugger is None:
-        _streaming_debugger = StreamingDebuggerAgent(
-            model=requested_model,
+    elif agent_type == "debugger":
+        return get_streaming_debugger_agent(
+            model=model,
             temperature=0.2
         )
-    
-    if _streaming_reflection is None:
-        _streaming_reflection = StreamingReflectionAgent(
-            model=requested_model,
-            temperature=state.get("temperature", 0.25)
+    elif agent_type == "reflection":
+        return get_streaming_reflection_agent(
+            model=model,
+            temperature=temperature
         )
-    
-    if _streaming_critic is None:
-        _streaming_critic = StreamingCriticAgent()
+    elif agent_type == "critic":
+        return get_streaming_critic_agent()
+    else:
+        raise ValueError(f"Unknown streaming agent type: {agent_type}")
 
 
 
@@ -227,28 +242,24 @@ def _default_intent() -> IntentResult:
 @workflow_node(stage="intent", fallback_key="intent_result", fallback_value=_default_intent)
 async def intent_node(state: AgentState) -> AgentState:
     """Узел для определения намерения пользователя."""
-    _initialize_agents(state)
     task = state.get("task", "")
     
     logger.info("📋 Определяю намерение...")
     
+    # Получаем агента через DependencyContainer (thread-safe)
+    intent_agent = _get_agent_from_container("intent", state)
+    
     # Быстрая проверка на greeting (не требует LLM)
-    if _intent_agent and IntentAgent.is_greeting_fast(task):
+    if IntentAgent.is_greeting_fast(task):
         intent_result = IntentResult(
             type="greeting",
             confidence=0.95,
             description="Приветствие пользователя"
         )
-    elif _intent_agent:
+    else:
         # LLM вызов в отдельном потоке
         intent_result = await asyncio.to_thread(
-            _intent_agent.determine_intent, task
-        )
-    else:
-        intent_result = IntentResult(
-            type="explain",
-            confidence=0.5,
-            description="Агент не инициализирован"
+            intent_agent.determine_intent, task
         )
     
     state["intent_result"] = intent_result
@@ -263,8 +274,6 @@ async def planner_node(state: AgentState) -> AgentState:
     
     Для стриминга используйте stream_planner_node().
     """
-    _initialize_agents(state)
-    
     task = state.get("task", "")
     intent_result = state.get("intent_result")
     
@@ -274,23 +283,23 @@ async def planner_node(state: AgentState) -> AgentState:
     
     logger.info("📝 Создаю план...")
     
-    if _planner_agent:
-        plan = await asyncio.to_thread(
-            _planner_agent.create_plan,
-            task=task,
-            intent_type=intent_result.type
-        )
-        state["plan"] = plan
+    # Получаем агента через DependencyContainer (thread-safe)
+    planner_agent = _get_agent_from_container("planner", state)
+    plan = await asyncio.to_thread(
+        planner_agent.create_plan,
+        task=task,
+        intent_type=intent_result.type
+    )
+    state["plan"] = plan
+    if plan:
         logger.info(f"✅ План создан ({len(plan)} символов)")
-    else:
-        state["plan"] = ""
     
     return state
 
 
 async def stream_planner_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия planner_node.
     
     Yields:
@@ -299,8 +308,6 @@ async def stream_planner_node(
             - ("plan_chunk", chunk)
             - ("done", state)
     """
-    _initialize_streaming_agents(state)
-    
     task = state.get("task", "")
     intent_result = state.get("intent_result")
     
@@ -311,19 +318,20 @@ async def stream_planner_node(
     
     logger.info("📝 Стриминг плана...")
     
-    if _streaming_planner:
-        logger.info(f"✅ StreamingPlannerAgent инициализирован (модель: {_streaming_planner.model})")
+    streaming_planner = _get_streaming_agent_for_state("planner", state)
+    
+    if streaming_planner:
+        logger.info(f"✅ StreamingPlannerAgent получен (модель: {streaming_planner.model})")
         plan = ""
         event_count = 0
-        async for event_type, data in _streaming_planner.create_plan_stream(
+        async for event_type, data in streaming_planner.create_plan_stream(
             task=task,
             intent_type=intent_result.type,
             stage="planning"
         ):
             event_count += 1
-            logger.info(f"📤 Planner stream event #{event_count}: {event_type}, data_len={len(str(data)) if data else 0}")
+            logger.debug(f"📤 Planner stream event #{event_count}: {event_type}")
             if event_type == "thinking":
-                logger.info(f"🧠 Yielding thinking event из planner (SSE длина: {len(data) if isinstance(data, str) else 'N/A'})")
                 yield ("thinking", data)
             elif event_type == "plan_chunk":
                 yield ("plan_chunk", data)
@@ -333,7 +341,7 @@ async def stream_planner_node(
         state["plan"] = plan
         logger.info(f"✅ План создан ({len(plan)} символов, {event_count} событий)")
     else:
-        logger.warning("⚠️ StreamingPlannerAgent не инициализирован!")
+        logger.warning("⚠️ StreamingPlannerAgent недоступен!")
         state["plan"] = ""
     
     yield ("done", state)
@@ -342,7 +350,6 @@ async def stream_planner_node(
 @workflow_node(stage="research", fallback_key="context", fallback_value="")
 async def researcher_node(state: AgentState) -> AgentState:
     """Узел для сбора контекста (codebase + RAG + веб-поиск)."""
-    _initialize_agents(state)
     
     task = state.get("task", "")
     intent_result = state.get("intent_result")
@@ -366,23 +373,21 @@ async def researcher_node(state: AgentState) -> AgentState:
             logger.info(f"📄 Файл для модификации: {file_path}")
     
     # Собираем контекст через Researcher
-    if _researcher_agent:
-        context = await asyncio.to_thread(
-            _researcher_agent.research,
-            query=task,
-            intent_type=intent_result.type,
-            disable_web_search=state.get("disable_web_search", False),
-            project_path=state.get("project_path"),
-            file_extensions=state.get("file_extensions")
-        )
-        
-        if file_context:
-            context = file_context + "\n\n---\n\n" + context if context else file_context
-        
-        state["context"] = context
-        logger.info(f"✅ Контекст собран ({len(context)} символов)")
-    else:
-        state["context"] = file_context or ""
+    researcher_agent = _get_agent_from_container("researcher", state)
+    context = await asyncio.to_thread(
+        researcher_agent.research,
+        query=task,
+        intent_type=intent_result.type,
+        disable_web_search=state.get("disable_web_search", False),
+        project_path=state.get("project_path"),
+        file_extensions=state.get("file_extensions")
+    )
+    
+    if file_context:
+        context = file_context + "\n\n---\n\n" + context if context else file_context
+    
+    state["context"] = context
+    logger.info(f"✅ Контекст собран ({len(context)} символов)")
     
     return state
 
@@ -393,8 +398,6 @@ async def generator_node(state: AgentState) -> AgentState:
     
     Для стриминга используйте stream_generator_node().
     """
-    _initialize_agents(state)
-    
     intent_result = state.get("intent_result")
     if not intent_result or intent_result.type == "greeting":
         state["tests"] = ""
@@ -402,32 +405,29 @@ async def generator_node(state: AgentState) -> AgentState:
     
     logger.info("🧪 Генерирую тесты...")
     
-    if _test_generator:
-        tests = await asyncio.to_thread(
-            _test_generator.generate_tests,
-            plan=state.get("plan", ""),
-            context=state.get("context", ""),
-            intent_type=intent_result.type
-        )
-        state["tests"] = tests
-        if tests:
-            logger.info(f"✅ Тесты сгенерированы ({len(tests)} символов)")
-    else:
-        state["tests"] = ""
+    # Получаем агента через DependencyContainer (thread-safe)
+    test_generator = _get_agent_from_container("test_generator", state)
+    tests = await asyncio.to_thread(
+        test_generator.generate_tests,
+        plan=state.get("plan", ""),
+        context=state.get("context", ""),
+        intent_type=intent_result.type
+    )
+    state["tests"] = tests
+    if tests:
+        logger.info(f"✅ Тесты сгенерированы ({len(tests)} символов)")
     
     return state
 
 
 async def stream_generator_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия generator_node (тесты).
     
     Yields:
         tuple[event_type, data]: События для SSE
     """
-    _initialize_streaming_agents(state)
-    
     intent_result = state.get("intent_result")
     if not intent_result or intent_result.type == "greeting":
         state["tests"] = ""
@@ -436,9 +436,11 @@ async def stream_generator_node(
     
     logger.info("🧪 Стриминг тестов...")
     
-    if _streaming_test_generator:
+    streaming_test_generator = _get_streaming_agent_for_state("test_generator", state)
+    
+    if streaming_test_generator:
         tests = ""
-        async for event_type, data in _streaming_test_generator.generate_tests_stream(
+        async for event_type, data in streaming_test_generator.generate_tests_stream(
             plan=state.get("plan", ""),
             context=state.get("context", ""),
             intent_type=intent_result.type,
@@ -468,7 +470,6 @@ async def coder_node(state: AgentState) -> AgentState:
     Для SIMPLE/MEDIUM задач использует стандартный CoderAgent.
     Для стриминга используйте stream_coder_node().
     """
-    _initialize_agents(state)
     
     intent_result = state.get("intent_result")
     if not intent_result or intent_result.type == "greeting":
@@ -480,18 +481,9 @@ async def coder_node(state: AgentState) -> AgentState:
     # Проверяем сложность задачи
     complexity = getattr(intent_result, 'complexity', TaskComplexity.SIMPLE)
     
-    # Проверяем конфиг для инкрементальной генерации
-    config = get_config()
-    incremental_config = config._config_data.get("incremental_coding", {})
-    incremental_enabled = incremental_config.get("enabled", False)
-    min_complexity = incremental_config.get("min_complexity", "complex")
-    
-    # Определяем использовать ли инкрементальную генерацию
-    use_incremental = (
-        incremental_enabled and
-        complexity == TaskComplexity.COMPLEX and
-        min_complexity in ("simple", "medium", "complex")
-    )
+    # Используем WorkflowConfig для проверки инкрементальной генерации
+    workflow_config = get_workflow_config()
+    use_incremental = workflow_config.should_use_incremental(complexity)
     
     if use_incremental:
         # Инкрементальная генерация для complex задач
@@ -517,27 +509,27 @@ async def coder_node(state: AgentState) -> AgentState:
             logger.info(f"✅ Код сгенерирован инкрементально ({len(state['code'])} символов)")
     else:
         # Стандартная генерация для simple/medium задач
-        if _coder_agent:
-            code = await asyncio.to_thread(
-                _coder_agent.generate_code,
-                plan=state.get("plan", ""),
-                tests=state.get("tests", ""),
-                context=state.get("context", ""),
-                intent_type=intent_result.type
-            )
-            state["code"] = code
-            if code:
-                logger.info(f"✅ Код сгенерирован ({len(code)} символов)")
-        else:
-            state["code"] = ""
+        coder_agent = _get_agent_from_container("coder", state)
+        code = await asyncio.to_thread(
+            coder_agent.generate_code,
+            plan=state.get("plan", ""),
+            tests=state.get("tests", ""),
+            context=state.get("context", ""),
+            intent_type=intent_result.type
+        )
+        state["code"] = code
+        if code:
+            logger.info(f"✅ Код сгенерирован ({len(code)} символов)")
     
     return state
 
 
 async def stream_coder_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия coder_node.
+    
+    Поддерживает инкрементальную генерацию для COMPLEX задач (как и обычный coder_node).
     
     Yields:
         tuple[event_type, data]: События для SSE
@@ -545,8 +537,6 @@ async def stream_coder_node(
             - ("code_chunk", chunk) — чанк кода
             - ("done", state)
     """
-    _initialize_streaming_agents(state)
-    
     intent_result = state.get("intent_result")
     if not intent_result or intent_result.type == "greeting":
         state["code"] = ""
@@ -555,27 +545,63 @@ async def stream_coder_node(
     
     logger.info("💻 Стриминг кода...")
     
-    if _streaming_coder:
-        code = ""
-        async for event_type, data in _streaming_coder.generate_code_stream(
+    # Проверяем сложность задачи
+    from utils.model_checker import TaskComplexity
+    complexity = getattr(intent_result, 'complexity', TaskComplexity.SIMPLE)
+    
+    # Используем WorkflowConfig для проверки инкрементальной генерации
+    workflow_config = get_workflow_config()
+    use_incremental = workflow_config.should_use_incremental(complexity)
+    
+    if use_incremental:
+        # Инкрементальная генерация для complex задач
+        logger.info("⚡ Используем инкрементальную генерацию (Compiler-in-the-Loop) в стриминге...")
+        
+        incremental_coder = IncrementalCoder(model=state.get("model"))
+        
+        code_parts = []
+        async for step in incremental_coder.generate_with_feedback(
             plan=state.get("plan", ""),
             tests=state.get("tests", ""),
-            context=state.get("context", ""),
-            intent_type=intent_result.type,
-            stage="coding"
+            context=state.get("context", "")
         ):
-            if event_type == "thinking":
-                yield ("thinking", data)
-            elif event_type == "code_chunk":
-                yield ("code_chunk", data)
-            elif event_type == "done":
-                code = data
+            code_parts.append(step.code)
+            # Отправляем событие о прогрессе инкрементальной генерации
+            yield ("code_chunk", f"# {step.function_name}: {'✅' if step.tests_passed else '❌'}\n{step.code}\n")
+            logger.info(
+                f"  📦 {step.function_name}: "
+                f"{'✅' if step.tests_passed else '❌'} "
+                f"(попыток: {step.fix_attempts})"
+            )
         
-        state["code"] = code
-        if code:
-            logger.info(f"✅ Код сгенерирован ({len(code)} символов)")
+        state["code"] = "\n\n".join(code_parts)
+        if state["code"]:
+            logger.info(f"✅ Код сгенерирован инкрементально ({len(state['code'])} символов)")
     else:
-        state["code"] = ""
+        # Стандартная стриминговая генерация для simple/medium задач
+        streaming_coder = _get_streaming_agent_for_state("coder", state)
+        
+        if streaming_coder:
+            code = ""
+            async for event_type, data in streaming_coder.generate_code_stream(
+                plan=state.get("plan", ""),
+                tests=state.get("tests", ""),
+                context=state.get("context", ""),
+                intent_type=intent_result.type,
+                stage="coding"
+            ):
+                if event_type == "thinking":
+                    yield ("thinking", data)
+                elif event_type == "code_chunk":
+                    yield ("code_chunk", data)
+                elif event_type == "done":
+                    code = data
+            
+            state["code"] = code
+            if code:
+                logger.info(f"✅ Код сгенерирован ({len(code)} символов)")
+        else:
+            state["code"] = ""
     
     yield ("done", state)
 
@@ -616,41 +642,38 @@ async def debugger_node(state: AgentState) -> AgentState:
     
     Для стриминга используйте stream_debugger_node().
     """
-    _initialize_agents(state)
-    
     logger.info("🐛 Анализирую ошибки...")
     
-    if _debugger_agent:
-        debug_result = await asyncio.to_thread(
-            _debugger_agent.analyze_errors,
-            validation_results=state.get("validation_results", {}),
-            code=state.get("code", ""),
-            tests=state.get("tests", ""),
-            task=state.get("task", "")
-        )
-        state["debug_result"] = debug_result
-        logger.info(f"✅ Анализ завершён. Тип: {debug_result.error_type}")
-    else:
-        state["debug_result"] = None
+    # Получаем агента через DependencyContainer (thread-safe)
+    debugger_agent = _get_agent_from_container("debugger", state)
+    debug_result = await asyncio.to_thread(
+        debugger_agent.analyze_errors,
+        validation_results=state.get("validation_results", {}),
+        code=state.get("code", ""),
+        tests=state.get("tests", ""),
+        task=state.get("task", "")
+    )
+    state["debug_result"] = debug_result
+    logger.info(f"✅ Анализ завершён. Тип: {debug_result.error_type}")
     
     return state
 
 
 async def stream_debugger_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия debugger_node.
     
     Yields:
         tuple[event_type, data]: События для SSE
     """
-    _initialize_streaming_agents(state)
-    
     logger.info("🐛 Стриминг анализа ошибок...")
     
-    if _streaming_debugger:
+    streaming_debugger = _get_streaming_agent_for_state("debugger", state)
+    
+    if streaming_debugger:
         debug_result = None
-        async for event_type, data in _streaming_debugger.analyze_errors_stream(
+        async for event_type, data in streaming_debugger.analyze_errors_stream(
             validation_results=state.get("validation_results", {}),
             code=state.get("code", ""),
             tests=state.get("tests", ""),
@@ -679,7 +702,6 @@ async def fixer_node(state: AgentState) -> AgentState:
     
     Для стриминга используйте stream_fixer_node().
     """
-    _initialize_agents(state)
     
     # Увеличиваем счетчик итераций
     state["iteration"] = state.get("iteration", 0) + 1
@@ -691,31 +713,30 @@ async def fixer_node(state: AgentState) -> AgentState:
     
     logger.info(f"🔧 Исправляю код (итерация {state['iteration']})...")
     
-    if _coder_agent:
-        fixed_code = await asyncio.to_thread(
-            _coder_agent.fix_code,
-            code=state.get("code", ""),
-            instructions=debug_result.fix_instructions,
-            tests=state.get("tests", ""),
-            validation_results=state.get("validation_results", {})
-        )
-        if fixed_code:
-            state["code"] = fixed_code
-            logger.info(f"✅ Код исправлен ({len(fixed_code)} символов)")
+    # Получаем агента через DependencyContainer (thread-safe)
+    coder_agent = _get_agent_from_container("coder", state)
+    fixed_code = await asyncio.to_thread(
+        coder_agent.fix_code,
+        code=state.get("code", ""),
+        instructions=debug_result.fix_instructions,
+        tests=state.get("tests", ""),
+        validation_results=state.get("validation_results", {})
+    )
+    if fixed_code:
+        state["code"] = fixed_code
+        logger.info(f"✅ Код исправлен ({len(fixed_code)} символов)")
     
     return state
 
 
 async def stream_fixer_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия fixer_node.
     
     Yields:
         tuple[event_type, data]: События для SSE
     """
-    _initialize_streaming_agents(state)
-    
     state["iteration"] = state.get("iteration", 0) + 1
     
     debug_result = state.get("debug_result")
@@ -726,9 +747,11 @@ async def stream_fixer_node(
     
     logger.info(f"🔧 Стриминг исправления (итерация {state['iteration']})...")
     
-    if _streaming_coder:
+    streaming_coder = _get_streaming_agent_for_state("coder", state)
+    
+    if streaming_coder:
         fixed_code = ""
-        async for event_type, data in _streaming_coder.fix_code_stream(
+        async for event_type, data in streaming_coder.fix_code_stream(
             code=state.get("code", ""),
             instructions=debug_result.fix_instructions,
             tests=state.get("tests", ""),
@@ -755,17 +778,17 @@ async def reflection_node(state: AgentState) -> AgentState:
     
     Для стриминга используйте stream_reflection_node().
     """
-    _initialize_agents(state)
-    
     intent_result = state.get("intent_result")
-    if not _reflection_agent or not intent_result:
+    if not intent_result:
         state["reflection_result"] = None
         return state
     
     logger.info("🔍 Анализирую результаты...")
     
+    # Получаем агента через DependencyContainer (thread-safe)
+    reflection_agent = _get_agent_from_container("reflection", state)
     reflection_result = await asyncio.to_thread(
-        _reflection_agent.reflect,
+        reflection_agent.reflect,
         task=state.get("task", ""),
         plan=state.get("plan", ""),
         context=state.get("context", ""),
@@ -775,7 +798,7 @@ async def reflection_node(state: AgentState) -> AgentState:
     )
     state["reflection_result"] = reflection_result
     
-    # Сохраняем опыт в память
+    # Сохраняем опыт в память (включая код и план для переиспользования)
     memory_agent = _get_memory_agent()
     await asyncio.to_thread(
         memory_agent.save_task_experience,
@@ -783,7 +806,9 @@ async def reflection_node(state: AgentState) -> AgentState:
         intent_type=intent_result.type,
         reflection_result=reflection_result,
         key_decisions=state.get("plan", "")[:500],
-        what_worked=reflection_result.analysis
+        what_worked=reflection_result.analysis,
+        code=state.get("code", ""),  # Сохраняем готовый код
+        plan=state.get("plan", "")  # Сохраняем план
     )
     
     logger.info(f"✅ Рефлексия завершена. Оценка: {reflection_result.overall_score:.2f}")
@@ -792,16 +817,21 @@ async def reflection_node(state: AgentState) -> AgentState:
 
 async def stream_reflection_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия reflection_node.
     
     Yields:
         tuple[event_type, data]: События для SSE
     """
-    _initialize_streaming_agents(state)
-    
     intent_result = state.get("intent_result")
-    if not _streaming_reflection or not intent_result:
+    if not intent_result:
+        state["reflection_result"] = None
+        yield ("done", state)
+        return
+    
+    streaming_reflection = _get_streaming_agent_for_state("reflection", state)
+    
+    if not streaming_reflection:
         state["reflection_result"] = None
         yield ("done", state)
         return
@@ -809,7 +839,7 @@ async def stream_reflection_node(
     logger.info("🔍 Стриминг рефлексии...")
     
     reflection_result = None
-    async for event_type, data in _streaming_reflection.reflect_stream(
+    async for event_type, data in streaming_reflection.reflect_stream(
         task=state.get("task", ""),
         plan=state.get("plan", ""),
         context=state.get("context", ""),
@@ -827,7 +857,7 @@ async def stream_reflection_node(
     
     state["reflection_result"] = reflection_result
     
-    # Сохраняем опыт в память
+    # Сохраняем опыт в память (включая код и план для переиспользования)
     if reflection_result:
         memory_agent = _get_memory_agent()
         await asyncio.to_thread(
@@ -836,7 +866,9 @@ async def stream_reflection_node(
             intent_type=intent_result.type,
             reflection_result=reflection_result,
             key_decisions=state.get("plan", "")[:500],
-            what_worked=reflection_result.analysis
+            what_worked=reflection_result.analysis,
+            code=state.get("code", ""),  # Сохраняем готовый код
+            plan=state.get("plan", "")  # Сохраняем план
         )
         logger.info(f"✅ Рефлексия завершена. Оценка: {reflection_result.overall_score:.2f}")
     
@@ -850,10 +882,8 @@ async def critic_node(state: AgentState) -> AgentState:
     Включает multi-agent дебаты если enabled в config.
     Для стриминга используйте stream_critic_node().
     """
-    _initialize_agents(state)
-    
     code = state.get("code", "")
-    if not _critic_agent or not code:
+    if not code:
         state["critic_report"] = None
         return state
     
@@ -875,8 +905,10 @@ async def critic_node(state: AgentState) -> AgentState:
     
     logger.info("🔎 Критический анализ кода...")
     
+    # Получаем агента через DependencyContainer (thread-safe)
+    critic_agent = _get_agent_from_container("critic", state)
     critic_report = await asyncio.to_thread(
-        _critic_agent.analyze,
+        critic_agent.analyze,
         code=state.get("code", code),  # Используем обновлённый код
         tests=state.get("tests", ""),
         task_description=state.get("task", ""),
@@ -890,16 +922,21 @@ async def critic_node(state: AgentState) -> AgentState:
 
 async def stream_critic_node(
     state: AgentState
-) -> AsyncGenerator[tuple[str, Any], AgentState]:
+) -> AsyncGenerator[tuple[str, Any], None]:
     """Стриминговая версия critic_node.
     
     Yields:
         tuple[event_type, data]: События для SSE
     """
-    _initialize_streaming_agents(state)
-    
     code = state.get("code", "")
-    if not _streaming_critic or not code:
+    if not code:
+        state["critic_report"] = None
+        yield ("done", state)
+        return
+    
+    streaming_critic = _get_streaming_agent_for_state("critic", state)
+    
+    if not streaming_critic:
         state["critic_report"] = None
         yield ("done", state)
         return
@@ -907,7 +944,7 @@ async def stream_critic_node(
     logger.info("🔎 Стриминг критического анализа...")
     
     critic_report = None
-    async for event_type, data in _streaming_critic.analyze_stream(
+    async for event_type, data in streaming_critic.analyze_stream(
         code=code,
         tests=state.get("tests", ""),
         task_description=state.get("task", ""),

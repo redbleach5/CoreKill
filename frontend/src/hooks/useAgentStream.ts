@@ -1,5 +1,17 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { SSE_EVENTS, AGENT_STAGES } from '../constants/sse'
+import { handleSSEError } from '../utils/apiErrorHandler'
+import { api } from '../services/apiClient'
+import { ValidationResult, ToolValidationResult } from '../types/api'
+import { createSSEEventHandler, createSSEEventHandlerWithTime } from '../utils/sseHelpers'
+
+// Простой logger для frontend
+const logger = {
+  debug: (msg: string) => console.debug(msg),
+  info: (msg: string) => console.info(msg),
+  warn: (msg: string) => console.warn(msg),
+  error: (msg: string) => console.error(msg)
+}
 
 // Результат этапа (stage result) — структура зависит от типа этапа
 export interface StageResult {
@@ -43,25 +55,6 @@ export interface StageStatus {
 }
 
 // Результат проверки одного инструмента
-export interface ToolValidationResult {
-  success: boolean
-  output?: string
-  errors?: string
-  issues?: string
-}
-
-// Результат валидации (pytest, mypy, bandit)
-export interface ValidationResult {
-  success: boolean
-  pytest_passed: boolean
-  mypy_passed: boolean
-  bandit_passed: boolean
-  pytest?: ToolValidationResult
-  mypy?: ToolValidationResult
-  bandit?: ToolValidationResult
-  errors?: string[]
-}
-
 // Результат рефлексии
 export interface ReflectionResult {
   planning_score: number
@@ -159,6 +152,14 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [isRunning, setIsRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
+  const heartbeatTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const lastEventTimeRef = useRef<number>(Date.now())
+  const reconnectAttemptsRef = useRef<number>(0)
+  
+  const HEARTBEAT_INTERVAL = 30000 // 30 секунд
+  const MAX_RECONNECT_ATTEMPTS = 5
+  const RECONNECT_DELAY = 1000 // 1 секунда
   const isCompletedRef = useRef<boolean>(false)  // Флаг завершения, сохраняется между переподключениями
   
   // Phase 7: Under The Hood
@@ -189,6 +190,16 @@ export function useAgentStream(): UseAgentStreamReturn {
       // Если соединение закрыто, закрываем его явно перед созданием нового
       eventSourceRef.current.close()
       eventSourceRef.current = null
+    }
+    
+    // Очищаем таймауты при старте новой задачи
+    if (heartbeatTimeoutRef.current) {
+      clearTimeout(heartbeatTimeoutRef.current)
+      heartbeatTimeoutRef.current = null
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
     }
 
     // АДАПТИВНАЯ ЗАДЕРЖКА: ждем завершения предыдущей задачи (если флаг завершения еще не сброшен)
@@ -258,20 +269,51 @@ export function useAgentStream(): UseAgentStreamReturn {
       params.set('file_extensions', options.fileExtensions)
     }
 
-    // В dev режиме подключаемся напрямую к backend (Vite proxy не поддерживает SSE)
-    // В production можно использовать прокси
-    const isDev = typeof window !== 'undefined' && window.location.port === '5173'
-    const apiUrl = isDev
-      ? `http://localhost:8000/api/stream?${params.toString()}`
-      : `/api/stream?${params.toString()}`
-    
-    const eventSource = new EventSource(apiUrl)
+    // Используем централизованный API клиент для создания SSE соединения
+    const eventSource = api.stream(params)
     eventSourceRef.current = eventSource
+    
+    // Сбрасываем счётчик переподключений при успешном подключении
+    reconnectAttemptsRef.current = 0
+    
+    // Обновляем время последнего события
+    lastEventTimeRef.current = Date.now()
+    
+    // Запускаем heartbeat проверку
+    const startHeartbeat = () => {
+      if (heartbeatTimeoutRef.current) {
+        clearTimeout(heartbeatTimeoutRef.current)
+      }
+      
+      heartbeatTimeoutRef.current = setTimeout(() => {
+        const timeSinceLastEvent = Date.now() - lastEventTimeRef.current
+        if (timeSinceLastEvent > HEARTBEAT_INTERVAL && !isCompletedRef.current) {
+          // Нет событий в течение HEARTBEAT_INTERVAL - проверяем соединение
+          if (eventSource.readyState === EventSource.OPEN) {
+            // Соединение открыто, но нет событий - возможно проблема
+            logger.warn('⚠️ Heartbeat timeout: нет событий в течение 30 секунд')
+          } else if (eventSource.readyState === EventSource.CLOSED) {
+            // Соединение закрыто - пытаемся переподключиться
+            handleReconnect(task, options)
+          }
+        } else if (!isCompletedRef.current) {
+          // Продолжаем проверку
+          startHeartbeat()
+        }
+      }, HEARTBEAT_INTERVAL)
+    }
+    
+    eventSource.onopen = () => {
+      logger.debug('✅ SSE соединение установлено')
+      startHeartbeat()
+    }
 
     eventSource.onmessage = (event: MessageEvent) => {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
+        // Обновляем время последнего события
+        lastEventTimeRef.current = Date.now()
         handleSSEEvent(data)
       } catch {
         // Игнорируем ошибки парсинга некорректных SSE событий
@@ -282,6 +324,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
         updateStage(data.stage, {
           stage: data.stage,
           status: 'start',
@@ -296,6 +339,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
         updateStage(data.stage, {
           stage: data.stage,
           status: 'progress',
@@ -311,6 +355,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
         
         // Для простых ответов (greeting/help/chat) сохраняем message в results
         const simpleStages = [AGENT_STAGES.GREETING, AGENT_STAGES.HELP, AGENT_STAGES.CHAT]
@@ -363,6 +408,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
         
         if (data.chunk) {
           setResults(prev => {
@@ -380,154 +426,201 @@ export function useAgentStream(): UseAgentStreamReturn {
       }
     })
 
+    // Обработчик стриминга плана (чанки по мере генерации)
+    eventSource.addEventListener(SSE_EVENTS.PLAN_CHUNK, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
+        
+        if (data.chunk) {
+          setResults(prev => ({
+            ...prev,
+            plan: (prev.plan || '') + data.chunk
+          }))
+        }
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // Обработчик стриминга тестов (чанки по мере генерации)
+    eventSource.addEventListener(SSE_EVENTS.TEST_CHUNK, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        lastEventTimeRef.current = Date.now() // Обновляем время последнего события
+        
+        if (data.chunk) {
+          setResults(prev => ({
+            ...prev,
+            tests: (prev.tests || '') + data.chunk
+          }))
+        }
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
     // === Обработчики thinking событий (reasoning модели) ===
     
     // Начало рассуждения
-    eventSource.addEventListener(SSE_EVENTS.THINKING_STARTED, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setStages(prev => ({
-          ...prev,
-          [data.stage]: {
-            ...prev[data.stage],
-            thinking: {
-              status: 'started',
-              content: '',
-              elapsedMs: 0,
-              totalChars: data.total_chars || 0
-            }
-          }
-        }))
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
-
-    // Чанк рассуждения (стриминг)
-    eventSource.addEventListener(SSE_EVENTS.THINKING_IN_PROGRESS, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setStages(prev => {
-          const currentStage = prev[data.stage]
-          const currentThinking = currentStage?.thinking
-          
-          return {
+    eventSource.addEventListener(
+      SSE_EVENTS.THINKING_STARTED,
+      createSSEEventHandler<{ stage: string; total_chars?: number }>(
+        (data) => {
+          setStages(prev => ({
             ...prev,
             [data.stage]: {
-              ...currentStage,
+              ...prev[data.stage] || { stage: data.stage, status: 'idle', message: '' },
               thinking: {
-                status: 'in_progress',
-                content: (currentThinking?.content || '') + data.content,
-                elapsedMs: data.elapsed_ms || 0,
+                status: 'started',
+                content: '',
+                elapsedMs: 0,
                 totalChars: data.total_chars || 0
               }
             }
-          }
-        })
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+          }))
+        },
+        'THINKING_STARTED',
+        ['stage']
+      )
+    )
+
+    // Чанк рассуждения (стриминг)
+    eventSource.addEventListener(
+      SSE_EVENTS.THINKING_IN_PROGRESS,
+      createSSEEventHandlerWithTime<{ stage: string; content?: string; elapsed_ms?: number; total_chars?: number }>(
+        (data) => {
+          setStages(prev => {
+            const currentStage = prev[data.stage] || { stage: data.stage, status: 'idle', message: '' }
+            const currentThinking = currentStage?.thinking
+            
+            return {
+              ...prev,
+              [data.stage]: {
+                ...currentStage,
+                thinking: {
+                  status: 'in_progress',
+                  content: (currentThinking?.content || '') + (data.content || ''),
+                  elapsedMs: data.elapsed_ms || 0,
+                  totalChars: data.total_chars || 0
+                }
+              }
+            }
+          })
+        },
+        'THINKING_IN_PROGRESS',
+        lastEventTimeRef,
+        ['stage']
+      )
+    )
 
     // Рассуждение завершено
-    eventSource.addEventListener(SSE_EVENTS.THINKING_COMPLETED, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setStages(prev => ({
-          ...prev,
-          [data.stage]: {
-            ...prev[data.stage],
-            thinking: {
-              status: 'completed',
-              content: data.content || prev[data.stage]?.thinking?.content || '',
-              summary: data.summary,
-              elapsedMs: data.elapsed_ms || 0,
-              totalChars: data.total_chars || 0
+    eventSource.addEventListener(
+      SSE_EVENTS.THINKING_COMPLETED,
+      createSSEEventHandler<{ stage: string; content?: string; summary?: string; elapsed_ms?: number; total_chars?: number }>(
+        (data) => {
+          setStages(prev => {
+            const currentStage = prev[data.stage] || { stage: data.stage, status: 'idle', message: '' }
+            const currentThinking = currentStage?.thinking
+            
+            return {
+              ...prev,
+              [data.stage]: {
+                ...currentStage,
+                thinking: {
+                  status: 'completed',
+                  content: data.content || currentThinking?.content || '',
+                  summary: data.summary,
+                  elapsedMs: data.elapsed_ms || 0,
+                  totalChars: data.total_chars || 0
+                }
+              }
             }
-          }
-        }))
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+          })
+        },
+        'THINKING_COMPLETED',
+        ['stage']
+      )
+    )
 
     // Рассуждение прервано пользователем
-    eventSource.addEventListener(SSE_EVENTS.THINKING_INTERRUPTED, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setStages(prev => ({
-          ...prev,
-          [data.stage]: {
-            ...prev[data.stage],
-            thinking: {
-              status: 'interrupted',
-              content: prev[data.stage]?.thinking?.content || '',
-              elapsedMs: data.elapsed_ms || 0,
-              totalChars: data.total_chars || 0
+    eventSource.addEventListener(
+      SSE_EVENTS.THINKING_INTERRUPTED,
+      createSSEEventHandler<{ stage: string; elapsed_ms?: number; total_chars?: number }>(
+        (data) => {
+          setStages(prev => {
+            const currentStage = prev[data.stage] || { stage: data.stage, status: 'idle', message: '' }
+            const currentThinking = currentStage?.thinking
+            
+            return {
+              ...prev,
+              [data.stage]: {
+                ...currentStage,
+                thinking: {
+                  status: 'interrupted',
+                  content: currentThinking?.content || '',
+                  elapsedMs: data.elapsed_ms || 0,
+                  totalChars: data.total_chars || 0
+                }
+              }
             }
-          }
-        }))
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+          })
+        },
+        'THINKING_INTERRUPTED',
+        ['stage']
+      )
+    )
 
     // === Phase 7: Under The Hood events ===
     
     // Log entry
-    eventSource.addEventListener(SSE_EVENTS.LOG, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setLogs(prev => {
-          const newLogs = [...prev, data as LogEntry]
-          // Ограничиваем количество логов в памяти
-          if (newLogs.length > 500) {
-            return newLogs.slice(-500)
-          }
-          return newLogs
-        })
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+    eventSource.addEventListener(
+      SSE_EVENTS.LOG,
+      createSSEEventHandler<LogEntry>(
+        (data) => {
+          setLogs(prev => {
+            const newLogs = [...prev, data]
+            // Ограничиваем количество логов в памяти
+            if (newLogs.length > 500) {
+              return newLogs.slice(-500)
+            }
+            return newLogs
+          })
+        },
+        'LOG',
+        ['stage', 'message']
+      )
+    )
     
     // Tool call started
-    eventSource.addEventListener(SSE_EVENTS.TOOL_CALL_START, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setToolCalls(prev => [...prev, data as ToolCall])
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+    eventSource.addEventListener(
+      SSE_EVENTS.TOOL_CALL_START,
+      createSSEEventHandler<ToolCall>(
+        (data) => {
+          setToolCalls(prev => [...prev, data])
+        },
+        'TOOL_CALL_START',
+        ['id', 'type', 'name']
+      )
+    )
     
     // Tool call ended
-    eventSource.addEventListener(SSE_EVENTS.TOOL_CALL_END, (event: MessageEvent) => {
-      try {
-        if (!event.data || event.data.trim() === '') return
-        const data = JSON.parse(event.data)
-        
-        setToolCalls(prev => prev.map(call => 
-          call.id === data.id 
-            ? { ...call, ...data } 
-            : call
-        ))
-      } catch {
-        // Игнорируем ошибки парсинга
-      }
-    })
+    eventSource.addEventListener(
+      SSE_EVENTS.TOOL_CALL_END,
+      createSSEEventHandler<Partial<ToolCall> & { id: string }>(
+        (data) => {
+          setToolCalls(prev => prev.map(call => 
+            call.id === data.id 
+              ? { ...call, ...data } 
+              : call
+          ))
+        },
+        'TOOL_CALL_END',
+        ['id']
+      )
+    )
 
     // Обработчик кастомного события 'error' от backend (не путать с onerror)
     eventSource.addEventListener(SSE_EVENTS.ERROR, (event: MessageEvent) => {
@@ -536,19 +629,22 @@ export function useAgentStream(): UseAgentStreamReturn {
         if (!event.data || event.data.trim() === '') return
         
         const data = JSON.parse(event.data)
+        const errorMessage = handleSSEError(data)
+        
         updateStage(data.stage || 'unknown', {
           stage: data.stage || 'unknown',
           status: 'error',
-          message: data.error || 'Ошибка',
-          error: data.error
+          message: errorMessage,
+          error: errorMessage
         })
-        setError(data.error || 'Произошла ошибка')
+        setError(errorMessage)
         isCompletedRef.current = true
         setIsRunning(false)
         eventSource.close()
         eventSourceRef.current = null
-      } catch {
-        setError('Ошибка обработки события')
+      } catch (e) {
+        const errorMessage = handleSSEError(e)
+        setError(errorMessage)
         isCompletedRef.current = true
         setIsRunning(false)
         eventSource.close()
@@ -597,9 +693,15 @@ export function useAgentStream(): UseAgentStreamReturn {
       }
     })
 
-    eventSource.onerror = () => {
-      // Если задача уже завершена, закрываем соединение
+    const handleReconnect = (task: string, options: TaskOptions) => {
       if (isCompletedRef.current) {
+        return
+      }
+      
+      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+        setError(`Не удалось переподключиться после ${MAX_RECONNECT_ATTEMPTS} попыток`)
+        setIsRunning(false)
+        isCompletedRef.current = true
         if (eventSourceRef.current) {
           eventSourceRef.current.close()
           eventSourceRef.current = null
@@ -607,18 +709,47 @@ export function useAgentStream(): UseAgentStreamReturn {
         return
       }
       
+      reconnectAttemptsRef.current += 1
+      logger.info(`🔄 Попытка переподключения ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`)
+      
+      // Закрываем старое соединение
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close()
+        eventSourceRef.current = null
+      }
+      
+      // Очищаем heartbeat
+      if (heartbeatTimeoutRef.current) {
+        clearTimeout(heartbeatTimeoutRef.current)
+        heartbeatTimeoutRef.current = null
+      }
+      
+      // Пытаемся переподключиться через задержку
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (!isCompletedRef.current) {
+          _createEventSource(task, options)
+        }
+      }, RECONNECT_DELAY * reconnectAttemptsRef.current) // Экспоненциальная задержка
+    }
+    
+    eventSource.onerror = () => {
+      // Если задача уже завершена, закрываем соединение
+      if (isCompletedRef.current) {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
+        }
+        if (heartbeatTimeoutRef.current) {
+          clearTimeout(heartbeatTimeoutRef.current)
+          heartbeatTimeoutRef.current = null
+        }
+        return
+      }
+      
       // Проверяем состояние подключения
       if (eventSource.readyState === EventSource.CLOSED) {
-        // Подключение закрыто во время выполнения задачи
-        setTimeout(() => {
-          if (!isCompletedRef.current && eventSourceRef.current) {
-            setError('Подключение к серверу закрыто. Задача была прервана.')
-            setIsRunning(false)
-            isCompletedRef.current = true
-            eventSourceRef.current.close()
-            eventSourceRef.current = null
-          }
-        }, 100)
+        // Подключение закрыто во время выполнения задачи - пытаемся переподключиться
+        handleReconnect(task, options)
       } else if (eventSource.readyState === EventSource.CONNECTING) {
         // Попытка переподключения - предотвращаем если задача завершена
         if (isCompletedRef.current && eventSourceRef.current) {
@@ -685,6 +816,15 @@ export function useAgentStream(): UseAgentStreamReturn {
     return () => {
       if (eventSourceRef.current) {
         eventSourceRef.current.close()
+        eventSourceRef.current = null
+      }
+      if (heartbeatTimeoutRef.current) {
+        clearTimeout(heartbeatTimeoutRef.current)
+        heartbeatTimeoutRef.current = null
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+        reconnectTimeoutRef.current = null
       }
     }
   }, [])

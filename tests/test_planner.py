@@ -2,22 +2,17 @@
 import pytest
 from unittest.mock import Mock, patch
 from agents.planner import PlannerAgent
+from tests.test_utils import create_mock_agent_dependencies
 
 
 class TestPlannerAgent:
     """Тесты для класса PlannerAgent."""
     
     @pytest.fixture
-    def agent(self):
+    def agent(self, mock_agent_dependencies):
         """Создаёт экземпляр PlannerAgent для тестов."""
-        with patch('agents.planner.get_model_router') as mock_router:
-            mock_router_instance = Mock()
-            mock_router_instance.select_model.return_value = Mock(model="test-model")
-            mock_router.return_value = mock_router_instance
-            
-            with patch('agents.planner.create_llm_for_stage') as mock_llm:
-                mock_llm.return_value = Mock(model="test-model", temperature=0.25)
-                return PlannerAgent(temperature=0.25)
+        with patch.multiple('agents.planner', **mock_agent_dependencies):
+            return PlannerAgent(temperature=0.25)
     
     def test_init(self, agent):
         """Тест инициализации агента."""

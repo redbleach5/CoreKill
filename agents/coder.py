@@ -1,8 +1,10 @@
 """Агент для генерации кода по тестам и плану (TDD)."""
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, TYPE_CHECKING
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from infrastructure.code_retrieval import get_code_retriever, CodeExample
+from infrastructure.coder_prompt_builder import get_coder_prompt_builder
+from infrastructure.code_security import get_code_security_checker
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -10,13 +12,17 @@ from utils.model_checker import (
     check_model_available
 )
 from utils.config import get_config
-from infrastructure.model_router import get_model_router
+from utils.intent_helpers import get_intent_description
+from agents.base import BaseAgent
+
+if TYPE_CHECKING:
+    from infrastructure.coder_interfaces import ILLM, IPromptEnhancer, ICodeRetriever, IPromptBuilder
 
 
 logger = get_logger()
 
 
-class CoderAgent:
+class CoderAgent(BaseAgent):
     """Агент для генерации рабочего кода, который должен пройти сгенерированные тесты.
     
     Следует TDD-подходу: код генерируется ПОСЛЕ тестов.
@@ -27,7 +33,11 @@ class CoderAgent:
         self, 
         model: Optional[str] = None, 
         temperature: float = 0.25,
-        user_query: str = ""
+        user_query: str = "",
+        llm: Optional['ILLM'] = None,
+        prompt_enhancer: Optional['IPromptEnhancer'] = None,
+        retriever: Optional['ICodeRetriever'] = None,
+        prompt_builder: Optional['IPromptBuilder'] = None
     ) -> None:
         """Инициализация агента генерации кода.
         
@@ -35,28 +45,30 @@ class CoderAgent:
             model: Модель для генерации кода (если None, выбирается из config)
             temperature: Температура генерации (0.15-0.35 по правилам)
             user_query: Оригинальный запрос пользователя для улучшения промптов
+            llm: LLM для генерации (для тестирования, по умолчанию создаётся автоматически)
+            prompt_enhancer: Улучшитель промптов (для тестирования)
+            retriever: Поисковик примеров кода (для тестирования)
+            prompt_builder: Билдер промптов (для тестирования)
         """
-        if model is None:
-            # Используем ModelRouter для выбора модели (поддерживает будущее расширение роя моделей)
-            router = get_model_router()
-            model_selection = router.select_model(
-                task_type="coding",
-                preferred_model=None,
-                context={"agent": "coder"}
-            )
-            model = model_selection.model
-        
-        self.llm = create_llm_for_stage(
-            stage="coding",
+        # Инициализация базового класса (LLM создаётся автоматически)
+        super().__init__(
             model=model,
             temperature=temperature,
-            top_p=0.9
+            stage="coding",
+            llm=llm
         )
+        
         self.user_query = user_query
-        self.prompt_enhancer = get_prompt_enhancer()
+        self.prompt_enhancer = prompt_enhancer or get_prompt_enhancer()
         
         # Code Retrieval для few-shot примеров (Phase 4)
-        self.retriever = get_code_retriever()
+        self.retriever = retriever or get_code_retriever()
+        
+        # Единый билдер промптов (устраняет дубли)
+        self.prompt_builder = prompt_builder or get_coder_prompt_builder()
+        
+        # Проверка безопасности кода
+        self.security_checker = get_code_security_checker()
 
     def generate_code(
         self,
@@ -101,60 +113,50 @@ class CoderAgent:
             except Exception as e:
                 logger.debug(f"Code retrieval пропущен: {e}")
         
-        # Используем динамическое улучшение промпта через LLM
-        if query:
-            # Если есть примеры, используем их
-            if examples:
-                prompt = self._build_prompt_with_examples(
-                    plan=plan,
-                    tests=tests,
-                    context=context,
-                    intent_type=intent_type,
-                    examples=examples,
-                    user_query=query
-                )
-            else:
-                prompt = self.prompt_enhancer.enhance_for_coding(
-                    user_query=query,
-                    intent_type=intent_type,
-                    plan=plan,
-                    tests=tests,
-                    context=context
-                )
+        # Используем единый PromptBuilder (устраняет дубли)
+        if query and not examples:
+            # Если есть запрос и нет примеров, используем PromptEnhancer для улучшения
+            prompt = self.prompt_enhancer.enhance_for_coding(
+                user_query=query,
+                intent_type=intent_type,
+                plan=plan,
+                tests=tests,
+                context=context
+            )
         else:
-            # Fallback на старый метод если нет запроса
-            if examples:
-                prompt = self._build_prompt_with_examples(
-                    plan=plan,
-                    tests=tests,
-                    context=context,
-                    intent_type=intent_type,
-                    examples=examples,
-                    user_query=""
-                )
-            else:
-                prompt = self._build_code_generation_prompt(
-                    plan=plan,
-                    tests=tests,
-                    context=context,
-                    intent_type=intent_type
-                )
+            # Используем единый билдер (с примерами или без)
+            prompt = self.prompt_builder.build_generation_prompt(
+                plan=plan,
+                tests=tests,
+                context=context,
+                intent_type=intent_type,
+                user_query=query,
+                examples=examples
+            )
         
         config = get_config()
         response = self.llm.generate(prompt, num_predict=config.llm_tokens_code)
         
-        # Очищаем и валидируем сгенерированный код
-        cleaned_code = self._clean_code(response)
+        # Очищаем и валидируем сгенерированный код (используем метод из BaseAgent)
+        # Если ответ содержит reasoning, извлекаем код из него
+        cleaned_code = self._clean_code_from_reasoning(response)
         
         if cleaned_code:
             logger.info(f"✅ Сгенерирован код (размер: {len(cleaned_code)} символов)")
             
-            # Сохраняем успешную генерацию в историю (Phase 4)
-            if self.retriever and query:
+            # Проверка безопасности перед сохранением в историю
+            is_safe, security_warnings = self.security_checker.check_code(cleaned_code)
+            if security_warnings:
+                logger.warning(f"⚠️ Обнаружены предупреждения безопасности: {', '.join(security_warnings[:2])}")
+            
+            # Сохраняем успешную генерацию в историю (Phase 4) только если код безопасен
+            if self.retriever and query and is_safe:
                 try:
                     self.retriever.add_from_history(query, cleaned_code, success=True)
                 except Exception as e:
                     logger.debug(f"Не удалось сохранить в историю: {e}")
+            elif self.retriever and query and not is_safe:
+                logger.warning("⚠️ Код не сохранён в историю из-за предупреждений безопасности")
         else:
             logger.warning("⚠️ Не удалось сгенерировать валидный код")
         
@@ -184,7 +186,8 @@ class CoderAgent:
             logger.warning("⚠️ Пустой код или инструкции")
             return code
         
-        prompt = self._build_fix_prompt(
+        # Используем единый PromptBuilder
+        prompt = self.prompt_builder.build_fix_prompt(
             code=code,
             instructions=instructions,
             tests=tests,
@@ -194,8 +197,8 @@ class CoderAgent:
         config = get_config()
         response = self.llm.generate(prompt, num_predict=config.llm_tokens_code)
         
-        # Очищаем исправленный код
-        fixed_code = self._clean_code(response)
+        # Очищаем исправленный код (используем метод из BaseAgent)
+        fixed_code = self._clean_code_from_reasoning(response)
         
         if fixed_code:
             logger.info(f"✅ Код исправлен (размер: {len(fixed_code)} символов)")
@@ -204,242 +207,3 @@ class CoderAgent:
             fixed_code = code
         
         return fixed_code
-
-    def _build_fix_prompt(
-        self,
-        code: str,
-        instructions: str,
-        tests: str,
-        validation_results: Dict[str, Any]
-    ) -> str:
-        """Строит промпт для исправления кода.
-        
-        Args:
-            code: Исходный код с ошибками
-            instructions: Инструкции от Debugger Agent
-            tests: Тесты
-            validation_results: Результаты валидации
-            
-        Returns:
-            Промпт для исправления кода
-        """
-        # Извлекаем информацию об ошибках для контекста
-        error_summary = []
-        if not validation_results.get("pytest", {}).get("success", True):
-            pytest_output = validation_results.get("pytest", {}).get("output", "")
-            error_summary.append(f"pytest errors: {pytest_output[:300]}")
-        if not validation_results.get("mypy", {}).get("success", True):
-            mypy_errors = validation_results.get("mypy", {}).get("errors", "")
-            error_summary.append(f"mypy errors: {mypy_errors[:300]}")
-        if not validation_results.get("bandit", {}).get("success", True):
-            bandit_issues = validation_results.get("bandit", {}).get("issues", "")
-            error_summary.append(f"bandit issues: {bandit_issues[:300]}")
-        
-        errors_context = "\n".join(error_summary) if error_summary else "No specific error details"
-        
-        prompt = f"""You are an expert Python code fixer. Fix the code according to the specific instructions from Debugger Agent.
-
-Current code (with errors):
-```python
-{code}
-```
-
-Tests:
-```python
-{tests[:1000]}
-```
-
-Validation errors:
-{errors_context}
-
-FIX INSTRUCTIONS (from Debugger Agent):
-{instructions}
-
-IMPORTANT RULES:
-1. Follow the fix instructions EXACTLY - they are specific and targeted
-2. Make MINIMAL changes - only fix what is mentioned in instructions
-3. Do NOT rewrite the entire code - only fix the specific issues
-4. Keep all existing functionality that was working
-5. Maintain type hints and docstrings
-6. Ensure the code passes all tests after fixing
-7. Return ONLY the fixed Python code, no explanations, no markdown
-
-Fixed code:
-"""
-        return prompt
-
-    def _build_prompt_with_examples(
-        self,
-        plan: str,
-        tests: str,
-        context: str,
-        intent_type: str,
-        examples: list[CodeExample],
-        user_query: str
-    ) -> str:
-        """Строит промпт с few-shot примерами кода.
-        
-        Args:
-            plan: План реализации
-            tests: Тесты
-            context: Контекст
-            intent_type: Тип намерения
-            examples: Примеры похожего кода
-            user_query: Запрос пользователя
-            
-        Returns:
-            Промпт с примерами
-        """
-        examples_str = "\n\n".join(ex.formatted for ex in examples[:3])
-        
-        context_section = ""
-        if context.strip():
-            context_section = f"\nContext:\n{context[:1000]}\n"
-        
-        return f"""Generate Python code similar in STYLE to these examples:
-
-{examples_str}
-
----
-
-YOUR TASK:
-{user_query if user_query else plan}
-
-PLAN:
-{plan}
-
-TESTS TO PASS:
-```python
-{tests[:2000]}
-```
-{context_section}
-RULES:
-1. Follow the STYLE of the examples above (naming, docstrings, type hints)
-2. Use same naming conventions as examples
-3. Must pass all tests
-4. Include all necessary imports
-5. Return ONLY Python code, no explanations
-
-CODE:
-"""
-
-    def _build_code_generation_prompt(
-        self,
-        plan: str,
-        tests: str,
-        context: str,
-        intent_type: str
-    ) -> str:
-        """Строит промпт для генерации кода."""
-        
-        intent_descriptions = {
-            "create": "создать новую функцию/класс/модуль",
-            "modify": "изменить существующий код",
-            "debug": "исправить ошибки в коде",
-            "optimize": "оптимизировать производительность кода",
-            "explain": "объяснить код (генерация документации)",
-            "test": "написать тесты (но тесты уже есть, нужно реализовать тестируемый код)",
-            "refactor": "рефакторинг кода без изменения функциональности"
-        }
-        
-        intent_desc = intent_descriptions.get(intent_type, "выполнить задачу")
-        
-        context_section = ""
-        if context.strip():
-            context_section = f"""
-Контекст из базы знаний:
-{context}
-"""
-        
-        prompt = f"""Ты - эксперт по написанию чистого Python кода. Реализуй код, который пройдёт следующие тесты.
-
-Тип задачи: {intent_desc}
-
-План реализации:
-{plan}
-{context_section}
-Тесты, которые должен пройти код:
-{tests}
-
-Требования к коду:
-1. Код должен проходить ВСЕ предоставленные тесты
-2. Используй type hints для всех функций и методов
-3. Добавь docstrings на русском языке для всех публичных функций/классов/методов
-   Формат: \"\"\"Описание функции.
-   
-   Args:
-       param: Описание параметра.
-   
-   Returns:
-       Описание возвращаемого значения.
-   \"\"\"
-4. Следуй PEP8 и лучшим практикам Python
-5. Код должен быть читаемым и понятным
-6. Обрабатывай ошибки там, где это необходимо
-7. Используй понятные имена переменных (snake_case)
-8. Не добавляй лишних комментариев в код (только docstrings)
-9. Импортируй все необходимые модули
-
-Верни ТОЛЬКО код на Python, без объяснений и markdown разметки. Начни сразу с import statements.
-
-Код:
-"""
-        return prompt
-
-    def _clean_code(self, raw_code: str) -> str:
-        """Очищает сгенерированный код от лишних элементов.
-        
-        Args:
-            raw_code: Сырой код от модели
-            
-        Returns:
-            Очищенный код
-        """
-        if not raw_code:
-            return ""
-        
-        lines = raw_code.split("\n")
-        cleaned_lines: list[str] = []
-        
-        # Убираем markdown блоки кода
-        skip_until_code = False
-        in_code_block = False
-        
-        for line in lines:
-            stripped = line.strip()
-            
-            # Пропускаем markdown блоки
-            if stripped.startswith("```"):
-                if not in_code_block:
-                    in_code_block = True
-                    skip_until_code = True
-                else:
-                    in_code_block = False
-                continue
-            
-            if skip_until_code:
-                # Ждём начала реального кода (импорт, def, class)
-                if (stripped.startswith("import") or 
-                    stripped.startswith("from") or 
-                    stripped.startswith("def ") or 
-                    stripped.startswith("class ") or
-                    stripped.startswith("@") or
-                    stripped.startswith("#")):
-                    skip_until_code = False
-                    cleaned_lines.append(line)
-                continue
-            
-            # Пропускаем строки с объяснениями в начале
-            if not cleaned_lines and (not stripped or stripped.lower().startswith("вот")):
-                continue
-            
-            cleaned_lines.append(line)
-        
-        cleaned = "\n".join(cleaned_lines).strip()
-        
-        # Убеждаемся что есть хотя бы def или class
-        if "def " not in cleaned and "class " not in cleaned:
-            logger.warning("⚠️ В сгенерированном коде не найдено функций или классов")
-            return ""
-        
-        return cleaned

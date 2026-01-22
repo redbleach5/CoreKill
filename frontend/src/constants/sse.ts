@@ -8,6 +8,8 @@ export const SSE_EVENTS = {
   STAGE_PROGRESS: 'stage_progress',
   STAGE_END: 'stage_end',
   CODE_CHUNK: 'code_chunk', // Стриминг кода по частям
+  PLAN_CHUNK: 'plan_chunk', // Стриминг плана по частям
+  TEST_CHUNK: 'test_chunk', // Стриминг тестов по частям
   // Thinking события для reasoning моделей (DeepSeek-R1, QwQ)
   THINKING_STARTED: 'thinking_started',
   THINKING_IN_PROGRESS: 'thinking_in_progress',
