@@ -1,5 +1,5 @@
 """RAG-система на базе ChromaDB для локального поиска по документам."""
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, TYPE_CHECKING
 import os
 import ollama
 from utils.config import get_config
@@ -13,6 +13,8 @@ try:
     from chromadb.config import Settings
     CHROMADB_AVAILABLE = True
 except ImportError:
+    chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment,misc]
     CHROMADB_AVAILABLE = False
     logger.warning("⚠️ ChromaDB недоступен. RAG будет работать в режиме без векторной БД.")
 
@@ -35,6 +37,10 @@ class RAGSystem:
         self.enabled = CHROMADB_AVAILABLE
         config = get_config()
         self.embedding_model = getattr(config, 'embedding_model', 'nomic-embed-text')
+        
+        # Типизация для Optional клиента и коллекции
+        self.client: Any = None
+        self.collection: Any = None
         
         # Инициализируем ChromaDB только если доступен
         if self.enabled:
@@ -205,7 +211,7 @@ class RAGSystem:
             metadatas = results.get("metadatas", [[]])[0]
             distances = results.get("distances", [[]])[0]
             
-            result_list: List[Dict[str, any]] = []
+            result_list: List[Dict[str, Any]] = []
             for i, doc in enumerate(documents):
                 if doc:
                     result_list.append({

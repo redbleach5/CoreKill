@@ -9,6 +9,7 @@ import asyncio
 import os
 import signal
 from contextlib import asynccontextmanager
+from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -203,9 +204,10 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
 
 
 # Подключаем роутеры
-from backend.routers import code_executor
+from backend.routers import code_executor, metrics
 app.include_router(agent.router)
 app.include_router(code_executor.router)
+app.include_router(metrics.router)
 
 
 @app.get("/")
@@ -222,11 +224,11 @@ async def root() -> dict:
 async def health() -> dict:
     """Health check endpoint с проверкой зависимостей."""
     import ollama
-    from datetime import datetime
+    from datetime import datetime, timezone
     
-    health_status = {
+    health_status: dict[str, Any] = {
         "status": "ok",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "services": {
             "api": "ok",
             "ollama": "unknown"

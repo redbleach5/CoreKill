@@ -98,7 +98,7 @@ class GreetingLogFilter(logging.Filter):
                                         for i, arg in enumerate(args_list):
                                             if isinstance(arg, str) and old_query_part in arg:
                                                 args_list[i] = arg.replace(old_query_part, new_query_part)
-                                        record.args = tuple(args_list) if isinstance(record.args, tuple) else args_list
+                                        record.args = tuple(args_list) if isinstance(record.args, tuple) else args_list  # type: ignore[assignment]
             except Exception as e:
                 # Логируем ошибку для отладки (но не через наш логгер, чтобы не было циклических вызовов)
                 import sys

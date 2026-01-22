@@ -62,8 +62,8 @@ def estimate_workflow_tokens(
     
     # Добавляем накладные расходы на генерацию (output обычно в 1-2 раза больше промпта)
     # Для кода и тестов добавляем множитель
-    total += estimate_tokens(code) * 0.5  # Генерация кода
-    total += estimate_tokens(tests) * 0.5  # Генерация тестов
+    total += int(estimate_tokens(code) * 0.5)  # Генерация кода
+    total += int(estimate_tokens(tests) * 0.5)  # Генерация тестов
     
     return int(total)
 

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
+import { Zap } from 'lucide-react'
 import { TaskOptions } from '../hooks/useAgentStream'
+import { formatModelName, isReasoningModelSync } from '../utils/modelUtils'
 
 export type { TaskOptions }
 
@@ -63,31 +65,47 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
       <h2 className="text-lg font-semibold text-gray-100">Настройки</h2>
 
       <div>
-        <label htmlFor="model" className="block text-sm font-medium mb-2 text-gray-300">
+        <label htmlFor="model" className="block text-sm font-medium mb-2 text-gray-300 flex items-center gap-2">
           Модель Ollama:
-        </label>
-        <select
-          id="model"
-          value={options.model}
-          onChange={handleModelChange}
-          disabled={modelsLoading}
-          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 text-gray-100 rounded-lg 
-                     focus:ring-2 focus:ring-blue-500 focus:border-blue-500
-                     disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed
-                     transition-all duration-200"
-        >
-          {modelsLoading ? (
-            <option>Загрузка моделей...</option>
-          ) : availableModels.length > 0 ? (
-            availableModels.map((model) => (
-              <option key={model} value={model}>
-                {model}
-              </option>
-            ))
-          ) : (
-            <option value={options.model}>{options.model}</option>
+          {options.model && isReasoningModelSync(options.model) && (
+            <Zap className="w-4 h-4 text-gray-400" title="Reasoning модель (поддерживает размышления)" />
           )}
-        </select>
+        </label>
+        <div className="relative">
+          <select
+            id="model"
+            value={options.model}
+            onChange={handleModelChange}
+            disabled={modelsLoading}
+            className="w-full px-3 py-2 pr-8 bg-gray-700 border border-gray-600 text-gray-100 rounded-lg 
+                       focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+                       disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed
+                       transition-all duration-200 appearance-none"
+          >
+            {modelsLoading ? (
+              <option>Загрузка моделей...</option>
+            ) : availableModels.length > 0 ? (
+              availableModels.map((model) => (
+                <option key={model} value={model}>
+                  {formatModelName(model)}
+                </option>
+              ))
+            ) : (
+              <option value={options.model}>{formatModelName(options.model)}</option>
+            )}
+          </select>
+          {/* Иконка Zap для reasoning моделей в селекте (из Tool Calls) */}
+          {options.model && isReasoningModelSync(options.model) && (
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+              <Zap className="w-4 h-4 text-gray-400" />
+            </div>
+          )}
+        </div>
+        {options.model && isReasoningModelSync(options.model) && (
+          <p className="text-xs text-gray-400 mt-1">
+            Reasoning модель: показывает процесс размышления
+          </p>
+        )}
       </div>
 
       <div>

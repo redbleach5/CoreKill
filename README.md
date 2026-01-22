@@ -17,11 +17,13 @@
 git clone https://github.com/redbleach5/CoreKill.git
 cd CoreKill
 
-# 2. Установите Ollama модели
-ollama pull qwen2.5-coder:7b    # Для генерации кода
-ollama pull deepseek-r1:8b      # Reasoning модель (рекомендуется)
-ollama pull phi3:mini           # Для chat (или любая лёгкая модель)
+# 2. Установите Ollama модели (минимальный набор)
+ollama pull qwen2.5-coder:7b    # Для генерации кода (SIMPLE/MEDIUM)
+ollama pull deepseek-r1:7b      # Reasoning модель для сложных задач (COMPLEX)
 ollama pull nomic-embed-text    # Для RAG
+
+# Опционально для лучшего качества:
+# ollama pull deepseek-r1:14b   # Более мощная reasoning модель (16GB+ VRAM)
 
 # 3. Запустите (автоустановка зависимостей)
 python3 run.py
@@ -54,14 +56,58 @@ python3 run.py
 - Переключение между диалогами без потери контекста
 - Автосохранение на сервере
 
-### Умный выбор моделей
-Система автоматически выбирает модель по сложности задачи:
+### Умный выбор моделей (SmartModelRouter)
 
-| Сложность | Примеры | Модель |
-|-----------|---------|--------|
-| SIMPLE | "привет", "что умеешь?" | phi3:mini (быстрая) |
-| MEDIUM | "объясни async/await" | qwen2.5-coder:7b |
-| COMPLEX | "напиши игру змейка" | qwen2.5-coder:7b или 13B+ |
+Система автоматически выбирает оптимальную модель по сложности задачи:
+
+| Сложность | Примеры | Модель | Reasoning |
+|-----------|---------|--------|-----------|
+| SIMPLE | "привет", "что умеешь?" | phi3:mini (быстрая) | ❌ |
+| MEDIUM | "объясни async/await" | qwen2.5-coder:7b | ❌ |
+| COMPLEX | "напиши игру змейка" | deepseek-r1 (если есть) | ✅ |
+
+### Рекомендуемые модели
+
+#### Reasoning Models (для COMPLEX задач)
+
+Reasoning модели имеют **встроенный chain-of-thought** и рассуждают в `<think>` блоках:
+
+| Модель | Размер | VRAM | Качество | Установка |
+|--------|--------|------|----------|-----------|
+| **deepseek-r1:7b** | 7B | ~6GB | ★★★★☆ | `ollama pull deepseek-r1:7b` |
+| **deepseek-r1:8b** | 8B | ~7GB | ★★★★☆ | `ollama pull deepseek-r1:8b` |
+| **deepseek-r1:14b** | 14B | ~12GB | ★★★★★ | `ollama pull deepseek-r1:14b` |
+| **qwq:32b** | 32B | ~24GB | ★★★★★ | `ollama pull qwq:32b` |
+
+**Преимущества:**
+- Сами разбивают задачу на шаги
+- Лучше справляются со сложными задачами
+- Не требуют промптов "think step by step"
+
+#### Coder Models (для SIMPLE/MEDIUM задач)
+
+| Модель | Размер | VRAM | Качество | Для задач |
+|--------|--------|------|----------|-----------|
+| **qwen2.5-coder:7b** | 7B | ~6GB | ★★★★★ | MEDIUM, код |
+| **qwen2.5-coder:1.5b** | 1.5B | ~2GB | ★★★☆☆ | SIMPLE, быстрые |
+| **deepseek-coder:6.7b** | 6.7B | ~6GB | ★★★★☆ | MEDIUM, код |
+
+#### Рекомендуемые наборы
+
+```bash
+# Минимальный (8GB RAM/VRAM)
+ollama pull qwen2.5-coder:7b      # Для SIMPLE/MEDIUM
+ollama pull deepseek-r1:7b        # Для COMPLEX (reasoning)
+
+# Оптимальный (16GB+ RAM/VRAM)
+ollama pull qwen2.5-coder:7b      # Для SIMPLE/MEDIUM
+ollama pull deepseek-r1:14b       # Для COMPLEX (reasoning)
+
+# Максимальный (32GB+ RAM/VRAM)
+ollama pull qwen2.5-coder:7b
+ollama pull deepseek-r1:14b
+ollama pull qwq:32b               # Топовый reasoning
+```
 
 ### Многоагентная архитектура
 ```
@@ -72,7 +118,9 @@ Intent → Planner → Researcher → TestGenerator → Coder → Validator → 
 - ✅ **100% локальная работа** — Ollama + ChromaDB
 - ✅ **LangGraph workflow** — управление состоянием и переходами
 - ✅ **Reasoning Models** — поддержка DeepSeek-R1, QwQ с chain-of-thought
-- ✅ **Structured Output** — Pydantic валидация ответов LLM
+- ✅ **Real-time Thinking** — стриминг `<think>` блоков reasoning моделей в UI
+- ✅ **Structured Output** — Pydantic валидация ответов LLM с автоматическим fallback
+- ✅ **Compiler-in-the-Loop** — инкрементальная генерация с немедленной валидацией
 - ✅ **TDD подход** — тесты генерируются ДО кода
 - ✅ **Self-Healing** — автоисправление ошибок (до 3 итераций)
 - ✅ **История диалогов** — с автоматической суммаризацией
@@ -140,6 +188,13 @@ show_thinking = false           # Показывать <think> блоки
 [structured_output]
 enabled = true
 max_retries = 2
+enabled_agents = ["intent", "debugger", "reflection"]  # Агенты с Pydantic
+
+# Compiler-in-the-Loop (инкрементальная генерация)
+[incremental_coding]
+enabled = true                  # Включить для complex задач
+min_complexity = "complex"      # simple | medium | complex
+max_fix_attempts = 3            # Попыток исправления на функцию
 
 [hardware]
 max_model_vram_gb = 0           # 0 = без лимита
@@ -200,10 +255,23 @@ ruff check .
 
 ## 📚 Документация
 
+**→ [DOCS_INDEX.md](DOCS_INDEX.md)** ⭐ **ГЛАВНЫЙ ИНДЕКС** — навигация по всей документации
+
+### Основные документы
+- [EXECUTIVE_DASHBOARD.md](EXECUTIVE_DASHBOARD.md) — 📊 статус проекта для менеджмента
 - [ARCHITECTURE.md](ARCHITECTURE.md) — архитектура системы
+- [future/IMPLEMENTATION_STATUS.md](future/IMPLEMENTATION_STATUS.md) — актуальный статус всех фич
+- [future/ROADMAP_2026.md](future/ROADMAP_2026.md) — roadmap (7 фаз)
+
+### Планы развития
+- [future/UNDER_THE_HOOD_VISUALIZATION.md](future/UNDER_THE_HOOD_VISUALIZATION.md) — 🎨 **Фаза 7** (5 дней)
+- [future/QUALITY_IMPROVEMENT_PLAN.md](future/QUALITY_IMPROVEMENT_PLAN.md) — план улучшений
+- [future/SCALABILITY_AND_ARCHITECTURE_PLAN.md](future/SCALABILITY_AND_ARCHITECTURE_PLAN.md) — масштабирование
+
+### Дополнительно
 - [DEPLOYMENT.md](DEPLOYMENT.md) — развёртывание
-- [future/ROADMAP_2026.md](future/ROADMAP_2026.md) — roadmap развития
-- [future/russia.md](future/russia.md) — работа в РФ, доступность сервисов
+- [DEPRECATION.md](DEPRECATION.md) — устаревший код
+- [future/russia.md](future/russia.md) — работа в РФ
 
 ## 🐛 Troubleshooting
 

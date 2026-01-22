@@ -68,7 +68,7 @@ def read_file_context(file_path: str, max_lines: int = 1000) -> Optional[str]:
     
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            lines = []
+            lines: list[str] = []
             for i, line in enumerate(f):
                 if i >= max_lines:
                     return '\n'.join(lines) + f"\n\n... (файл обрезан, всего {max_lines} строк) ...\n"

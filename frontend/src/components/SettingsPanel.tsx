@@ -1,6 +1,7 @@
 // Панель настроек приложения
 import React, { useState, useEffect } from 'react'
-import { X, Save, RotateCcw, FolderOpen } from 'lucide-react'
+import { X, Save, RotateCcw, FolderOpen, Zap } from 'lucide-react'
+import { formatModelName, isReasoningModelSync } from '../utils/modelUtils'
 
 interface Settings {
   model: string
@@ -89,22 +90,35 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         <div className="p-6 space-y-6">
           {/* Model Selection */}
           <div>
-            <label className="block text-sm font-medium text-gray-200 mb-2">
+            <label className="block text-sm font-medium text-gray-200 mb-2 flex items-center gap-2">
               Модель
+              {settings.model && isReasoningModelSync(settings.model) && (
+                <Zap className="w-4 h-4 text-gray-400" title="Reasoning модель (поддерживает размышления)" />
+              )}
             </label>
-            <select
-              value={settings.model}
-              onChange={e => handleChange('model', e.target.value)}
-              className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 transition-colors"
-            >
-              {availableModels.map(model => (
-                <option key={model} value={model} className="bg-slate-900">
-                  {model}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                value={settings.model}
+                onChange={e => handleChange('model', e.target.value)}
+                className="w-full bg-white/10 border border-white/20 rounded-lg px-3 py-2 pr-8 text-white focus:outline-none focus:border-blue-500 transition-colors appearance-none"
+              >
+                {availableModels.map(model => (
+                  <option key={model} value={model} className="bg-slate-900">
+                    {formatModelName(model)}
+                  </option>
+                ))}
+              </select>
+              {/* Иконка Zap для reasoning моделей в селекте (из Tool Calls) */}
+              {settings.model && isReasoningModelSync(settings.model) && (
+                <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+                  <Zap className="w-4 h-4 text-gray-400" />
+                </div>
+              )}
+            </div>
             <p className="text-xs text-gray-500 mt-1">
-              Выберите LLM модель для генерации кода
+              {settings.model && isReasoningModelSync(settings.model) 
+                ? 'Reasoning модель: показывает процесс размышления в <think> блоках'
+                : 'Выберите LLM модель для генерации кода'}
             </p>
           </div>
 

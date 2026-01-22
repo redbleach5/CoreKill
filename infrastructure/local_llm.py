@@ -71,6 +71,28 @@ class StructuredOutputError(Exception):
     pass
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class StreamChunk:
+    """Чанк стриминга от LLM.
+    
+    Используется для real-time стриминга генерации в UI.
+    Позволяет отделять <think> блоки от основного контента.
+    
+    Attributes:
+        content: Текст текущего чанка
+        is_thinking: True если чанк находится внутри <think> блока
+        is_done: True если это последний чанк
+        full_response: Накопленный полный ответ
+    """
+    content: str
+    is_thinking: bool
+    is_done: bool
+    full_response: str
+
+
 # TypeVar для generic generate_structured
 T = TypeVar('T', bound=BaseModel)
 
@@ -192,7 +214,7 @@ class LocalLLM:
                 # Вызов с timeout через ThreadPoolExecutor (работает в любом потоке)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
-                        ollama.generate,
+                        ollama.generate,  # type: ignore[arg-type]
                         **generate_kwargs
                     )
                     
@@ -271,7 +293,7 @@ class LocalLLM:
                 # Вызов с timeout через ThreadPoolExecutor
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(
-                        ollama.chat,
+                        ollama.chat,  # type: ignore[arg-type]
                         model=self.model,
                         messages=messages,
                         options=options,
@@ -475,6 +497,156 @@ JSON:"""
             retries
         )
     
+    # === STREAMING МЕТОДЫ ===
+    # Real-time стриминг для UI: thinking блоки, генерация кода и т.д.
+    
+    async def generate_stream(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        num_predict: int = 4096,
+        format: Optional[str] = None,
+        **kwargs: Any
+    ):
+        """Асинхронный стриминг генерации текста.
+        
+        Использует Ollama streaming API для real-time отдачи чанков.
+        Позволяет показывать <think> блоки и код по мере генерации.
+        
+        Args:
+            prompt: Текст промпта
+            temperature: Температура генерации
+            top_p: Параметр top_p
+            num_predict: Максимальное количество токенов
+            format: Формат ответа ("json" для JSON)
+            **kwargs: Дополнительные параметры
+            
+        Yields:
+            StreamChunk с данными чанка
+            
+        Example:
+            async for chunk in llm.generate_stream(prompt):
+                if chunk.is_thinking:
+                    yield thinking_event(chunk.content)
+                else:
+                    yield code_event(chunk.content)
+        """
+        temp = temperature if temperature is not None else self.temperature
+        tp = top_p if top_p is not None else self.top_p
+        
+        options: Dict[str, Any] = {
+            "temperature": temp,
+            "top_p": tp,
+            "num_predict": num_predict
+        }
+        options.update(kwargs.get("options", {}))
+        
+        generate_kwargs = {
+            "model": self.model,
+            "prompt": prompt,
+            "options": options,
+            "stream": True  # Включаем стриминг
+        }
+        
+        if format:
+            generate_kwargs["format"] = format
+        
+        for k, v in kwargs.items():
+            if k not in ("options", "format"):
+                generate_kwargs[k] = v
+        
+        full_response = ""
+        in_thinking = False
+        
+        try:
+            # Ollama streaming API
+            # Запускаем в отдельном потоке чтобы не блокировать event loop
+            import queue
+            import threading
+            
+            chunk_queue: queue.Queue = queue.Queue()
+            error_holder: list = []
+            
+            def stream_worker():
+                try:
+                    for chunk in ollama.generate(**generate_kwargs):
+                        chunk_queue.put(chunk)
+                    chunk_queue.put(None)  # Сигнал завершения
+                except Exception as e:
+                    error_holder.append(e)
+                    chunk_queue.put(None)
+            
+            thread = threading.Thread(target=stream_worker, daemon=True)
+            thread.start()
+            
+            wait_count = 0
+            last_log_time = asyncio.get_event_loop().time()
+            
+            while True:
+                try:
+                    # Неблокирующее ожидание с таймаутом
+                    chunk = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: chunk_queue.get(timeout=0.5)
+                    )
+                    wait_count = 0  # Reset on successful get
+                except queue.Empty:
+                    wait_count += 1
+                    # Логируем каждые 10 секунд ожидания
+                    current_time = asyncio.get_event_loop().time()
+                    if current_time - last_log_time > 10:
+                        logger.info(f"⏳ Ожидаю ответ от LLM... ({wait_count * 0.5:.0f}с)")
+                        last_log_time = current_time
+                    continue
+                
+                if chunk is None:
+                    # Стриминг завершён
+                    if error_holder:
+                        logger.error(f"❌ Ошибка стриминга: {error_holder[0]}")
+                    break
+                
+                content = chunk.get("response", "")
+                is_done = chunk.get("done", False)
+                
+                if content:
+                    full_response += content
+                    
+                    # Определяем находимся ли внутри <think> блока
+                    # Простая эвристика: считаем открывающие/закрывающие теги
+                    think_opens = full_response.lower().count("<think>")
+                    think_closes = full_response.lower().count("</think>")
+                    in_thinking = think_opens > think_closes
+                    
+                    yield StreamChunk(
+                        content=content,
+                        is_thinking=in_thinking,
+                        is_done=is_done,
+                        full_response=full_response
+                    )
+                
+                if is_done:
+                    break
+            
+            # Финальный чанк
+            if full_response:
+                yield StreamChunk(
+                    content="",
+                    is_thinking=False,
+                    is_done=True,
+                    full_response=full_response
+                )
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка стриминга LLM: {e}", error=e)
+            # Yield пустой финальный чанк при ошибке
+            yield StreamChunk(
+                content="",
+                is_thinking=False,
+                is_done=True,
+                full_response=full_response
+            )
+    
     # === ASYNC МЕТОДЫ ===
     # Используют asyncio.to_thread() для совместимости с существующим синхронным кодом
     # Это позволяет не блокировать event loop FastAPI при LLM запросах
@@ -654,7 +826,7 @@ class AsyncLocalLLM:
 
 def create_llm_for_stage(
     stage: str,
-    model: str,
+    model: str | None = None,
     temperature: float = 0.25,
     top_p: float = 0.9
 ) -> LocalLLM:
@@ -662,7 +834,7 @@ def create_llm_for_stage(
     
     Args:
         stage: Название этапа (intent, planning, coding, etc.)
-        model: Название модели Ollama
+        model: Название модели Ollama (None = default)
         temperature: Температура генерации
         top_p: Параметр top_p
         
@@ -673,8 +845,11 @@ def create_llm_for_stage(
     config = get_config()
     timeout = config.get_stage_timeout(stage)
     
+    # Используем дефолтную модель если не указана
+    resolved_model = model or "qwen2.5-coder:7b"
+    
     return LocalLLM(
-        model=model,
+        model=resolved_model,
         temperature=temperature,
         top_p=top_p,
         timeout=timeout

@@ -26,6 +26,11 @@ class Config:
             cls._instance._load_config()
         return cls._instance
     
+    def reload(self) -> None:
+        """Перезагружает конфигурацию из config.toml."""
+        self._load_config()
+        logger.info("🔄 Конфигурация перезагружена")
+    
     def _load_config(self) -> None:
         """Загружает конфигурацию из config.toml."""
         config_path = Path(__file__).parent.parent / "config.toml"
@@ -375,12 +380,25 @@ class Config:
     def get_stage_timeout(self, stage: str) -> int:
         """Возвращает таймаут для конкретного этапа workflow.
         
+        Читает свежее значение из файла для hot-reload.
+        
         Args:
             stage: Название этапа (intent, planning, coding, etc.)
             
         Returns:
             Таймаут в секундах
         """
+        # Hot-reload таймаутов — читаем свежее значение из файла
+        try:
+            config_path = Path(__file__).parent.parent / "config.toml"
+            if config_path.exists():
+                with open(config_path, "rb") as f:
+                    fresh_config = tomllib.load(f)
+                    timeouts = fresh_config.get("timeouts", {})
+                    return timeouts.get(stage, timeouts.get("default", 120))
+        except Exception:
+            pass
+        # Fallback на кэшированные значения
         timeouts = self._config_data.get("timeouts", {})
         return timeouts.get(stage, timeouts.get("default", 120))
     

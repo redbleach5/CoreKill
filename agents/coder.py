@@ -2,6 +2,7 @@
 from typing import Optional, Dict, Any
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.prompt_enhancer import get_prompt_enhancer
+from infrastructure.code_retrieval import get_code_retriever, CodeExample
 from utils.logger import get_logger
 from utils.model_checker import (
     get_available_model,
@@ -53,6 +54,9 @@ class CoderAgent:
         )
         self.user_query = user_query
         self.prompt_enhancer = get_prompt_enhancer()
+        
+        # Code Retrieval для few-shot примеров (Phase 4)
+        self.retriever = get_code_retriever()
 
     def generate_code(
         self,
@@ -84,23 +88,57 @@ class CoderAgent:
         # Используем оригинальный запрос пользователя если передан
         query = user_query or self.user_query
         
+        # Ищем похожие примеры кода (Phase 4: Code Retrieval)
+        examples: list[CodeExample] = []
+        if self.retriever:
+            try:
+                examples = self.retriever.find_similar(
+                    query=f"{plan}\n{query}" if query else plan,
+                    n=3
+                )
+                if examples:
+                    logger.info(f"📚 Найдено {len(examples)} примеров кода для few-shot")
+            except Exception as e:
+                logger.debug(f"Code retrieval пропущен: {e}")
+        
         # Используем динамическое улучшение промпта через LLM
         if query:
-            prompt = self.prompt_enhancer.enhance_for_coding(
-                user_query=query,
-                intent_type=intent_type,
-                plan=plan,
-                tests=tests,
-                context=context
-            )
+            # Если есть примеры, используем их
+            if examples:
+                prompt = self._build_prompt_with_examples(
+                    plan=plan,
+                    tests=tests,
+                    context=context,
+                    intent_type=intent_type,
+                    examples=examples,
+                    user_query=query
+                )
+            else:
+                prompt = self.prompt_enhancer.enhance_for_coding(
+                    user_query=query,
+                    intent_type=intent_type,
+                    plan=plan,
+                    tests=tests,
+                    context=context
+                )
         else:
             # Fallback на старый метод если нет запроса
-            prompt = self._build_code_generation_prompt(
-                plan=plan,
-                tests=tests,
-                context=context,
-                intent_type=intent_type
-            )
+            if examples:
+                prompt = self._build_prompt_with_examples(
+                    plan=plan,
+                    tests=tests,
+                    context=context,
+                    intent_type=intent_type,
+                    examples=examples,
+                    user_query=""
+                )
+            else:
+                prompt = self._build_code_generation_prompt(
+                    plan=plan,
+                    tests=tests,
+                    context=context,
+                    intent_type=intent_type
+                )
         
         config = get_config()
         response = self.llm.generate(prompt, num_predict=config.llm_tokens_code)
@@ -110,6 +148,13 @@ class CoderAgent:
         
         if cleaned_code:
             logger.info(f"✅ Сгенерирован код (размер: {len(cleaned_code)} символов)")
+            
+            # Сохраняем успешную генерацию в историю (Phase 4)
+            if self.retriever and query:
+                try:
+                    self.retriever.add_from_history(query, cleaned_code, success=True)
+                except Exception as e:
+                    logger.debug(f"Не удалось сохранить в историю: {e}")
         else:
             logger.warning("⚠️ Не удалось сгенерировать валидный код")
         
@@ -222,6 +267,61 @@ IMPORTANT RULES:
 Fixed code:
 """
         return prompt
+
+    def _build_prompt_with_examples(
+        self,
+        plan: str,
+        tests: str,
+        context: str,
+        intent_type: str,
+        examples: list[CodeExample],
+        user_query: str
+    ) -> str:
+        """Строит промпт с few-shot примерами кода.
+        
+        Args:
+            plan: План реализации
+            tests: Тесты
+            context: Контекст
+            intent_type: Тип намерения
+            examples: Примеры похожего кода
+            user_query: Запрос пользователя
+            
+        Returns:
+            Промпт с примерами
+        """
+        examples_str = "\n\n".join(ex.formatted for ex in examples[:3])
+        
+        context_section = ""
+        if context.strip():
+            context_section = f"\nContext:\n{context[:1000]}\n"
+        
+        return f"""Generate Python code similar in STYLE to these examples:
+
+{examples_str}
+
+---
+
+YOUR TASK:
+{user_query if user_query else plan}
+
+PLAN:
+{plan}
+
+TESTS TO PASS:
+```python
+{tests[:2000]}
+```
+{context_section}
+RULES:
+1. Follow the STYLE of the examples above (naming, docstrings, type hints)
+2. Use same naming conventions as examples
+3. Must pass all tests
+4. Include all necessary imports
+5. Return ONLY Python code, no explanations
+
+CODE:
+"""
 
     def _build_code_generation_prompt(
         self,

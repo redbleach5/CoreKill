@@ -210,11 +210,20 @@ class SmartModelRouter(ModelRouter):
                     reason="Лёгкая модель для быстрых операций"
                 )
         
-        # Для генерации кода выбираем лучшую coder модель
-        if task_type in ["coding", "testing", "reflection", "debug"]:
-            # По умолчанию предполагаем medium сложность для кода
+        # Для генерации кода выбираем модель по сложности
+        if task_type == "coding":
+            # Для coding — medium сложность (может использовать reasoning)
             return self.select_model_for_complexity(
                 complexity=TaskComplexity.MEDIUM,
+                task_type=task_type,
+                preferred_model=preferred_model
+            )
+        
+        if task_type in ["testing", "reflection", "debug"]:
+            # Для testing/reflection/debug — SIMPLE, быстрая модель
+            # Reasoning модели слишком медленные для этих задач
+            return self.select_model_for_complexity(
+                complexity=TaskComplexity.SIMPLE,
                 task_type=task_type,
                 preferred_model=preferred_model
             )
@@ -324,10 +333,10 @@ class SmartModelRouter(ModelRouter):
         )
         
         if best_model:
-            model_info = available_models.get(best_model)
-            quality = model_info.estimated_quality if model_info else 0.5
-            tier = model_info.tier if model_info else "unknown"
-            is_reasoning = model_info.is_reasoning if model_info else False
+            best_model_info: ModelInfo | None = available_models.get(best_model)
+            quality = best_model_info.estimated_quality if best_model_info else 0.5
+            tier = best_model_info.tier if best_model_info else "unknown"
+            is_reasoning = best_model_info.is_reasoning if best_model_info else False
             
             logger.info(
                 f"🤖 Выбрана модель {best_model} для {complexity.value} задачи "
@@ -374,8 +383,16 @@ class SmartModelRouter(ModelRouter):
         if not reasoning_models:
             return None
         
-        # Выбираем лучшую reasoning модель
-        best = max(reasoning_models, key=lambda m: m.estimated_quality)
+        # Выбираем лучшую reasoning модель: сначала по качеству, затем по размеру
+        # Это гарантирует выбор самой мощной модели при одинаковом качестве
+        import re
+        def _model_priority(m: ModelInfo) -> tuple[float, float]:
+            """Приоритет модели: (качество, размер_параметров_в_миллиардах)."""
+            param_match = re.search(r'(\d+\.?\d*)', m.parameter_size)
+            param_value = float(param_match.group(1)) if param_match else 0.0
+            return (m.estimated_quality, param_value)
+        
+        best = max(reasoning_models, key=_model_priority)
         
         return ModelSelection(
             model=best.name,

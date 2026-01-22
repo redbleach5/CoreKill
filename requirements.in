@@ -12,6 +12,9 @@ pydantic
 ollama
 chromadb
 
+# Code Retrieval (Phase 4)
+sentence-transformers
+
 # Workflow (согласно core_vision.md: "LangGraph для workflow")
 langgraph
 
@@ -25,6 +28,7 @@ pytest-cov
 pytest-asyncio
 mypy
 bandit
+ruff  # Быстрый линтер для Python
 
 # UI утилиты (согласно russian_ui.md: "прогресс-бары (tqdm)")
 tqdm

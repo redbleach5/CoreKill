@@ -1,5 +1,6 @@
 import { StageStatus } from '../hooks/useAgentStream'
 import { CheckCircle2, Circle, Loader2, XCircle, Brain, FileSearch, TestTube, Code2, Shield, RefreshCw, ListTodo } from 'lucide-react'
+import { ThinkingBlock } from './ThinkingBlock'
 
 interface ProgressStepsProps {
   stages: Record<string, StageStatus>
@@ -133,6 +134,14 @@ export function ProgressSteps({ stages }: ProgressStepsProps) {
                   <p className="mt-1 text-xs text-red-400 truncate">
                     {stages[stage].error}
                   </p>
+                )}
+
+                {/* Блок рассуждений (thinking) для reasoning моделей */}
+                {stages[stage]?.thinking && stages[stage].thinking.status !== 'idle' && (
+                  <ThinkingBlock
+                    thinking={stages[stage].thinking}
+                    stageName={stage}
+                  />
                 )}
               </div>
             </div>

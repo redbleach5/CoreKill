@@ -174,8 +174,10 @@ def _ensure_code_import(test_str: str) -> str:
     names_to_import = {n for n in names_to_import if not n.startswith('test_')}
     
     if not names_to_import:
-        # Если не нашли конкретных имён, делаем wildcard import
-        import_line = "from code import *\n"
+        # Fallback: если не удалось определить конкретные имена для импорта,
+        # используем wildcard для доступа ко всем определениям из code.py
+        # Это допустимо в изолированном тестовом окружении
+        import_line = "from code import *  # noqa: F403 - wildcard import в тестовом окружении\n"
     else:
         # Импортируем конкретные имена
         import_line = f"from code import {', '.join(sorted(names_to_import))}\n"
@@ -334,10 +336,89 @@ def validate_code(code_str: str, test_str: Optional[str] = None) -> dict:
     results["bandit"] = {"success": bandit_success, "issues": bandit_issues}
     
     # Все проверки должны пройти
+    pytest_result = results["pytest"]
+    mypy_result = results["mypy"]
+    bandit_result = results["bandit"]
     results["all_passed"] = (
-        (results["pytest"]["success"] if test_str else True) and
-        results["mypy"]["success"] and
-        results["bandit"]["success"]
+        (pytest_result["success"] if test_str else True) and  # type: ignore[index]
+        mypy_result["success"] and  # type: ignore[index]
+        bandit_result["success"]  # type: ignore[index]
     )
     
     return results
+
+
+def validate_code_quick(code: str, tests: str = "") -> dict:
+    """Быстрая валидация кода без полного pytest.
+    
+    Используется для инкрементальной генерации (Compiler-in-the-Loop).
+    Проверяет только синтаксис и базовое выполнение, без mypy/bandit.
+    
+    Проверяет:
+    1. Синтаксис (ast.parse)
+    2. Компиляция (compile)
+    3. Базовые тесты (exec) — если предоставлены
+    
+    Args:
+        code: Код для валидации
+        tests: Опциональные тесты для выполнения
+        
+    Returns:
+        {"passed": bool, "error": Optional[str]}
+        
+    Example:
+        result = validate_code_quick("def add(a, b): return a + b", "assert add(1, 2) == 3")
+        if result["passed"]:
+            print("✅ Код валиден")
+        else:
+            print(f"❌ Ошибка: {result['error']}")
+    """
+    if not code.strip():
+        return {"passed": False, "error": "Empty code"}
+    
+    # 1. Проверка синтаксиса через ast.parse
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        error_msg = f"SyntaxError at line {e.lineno}: {e.msg}"
+        if e.text:
+            error_msg += f" -> {e.text.strip()}"
+        return {"passed": False, "error": error_msg}
+    except Exception as e:
+        return {"passed": False, "error": f"ParseError: {e}"}
+    
+    # 2. Проверка компиляции
+    try:
+        compile(code, "<string>", "exec")
+    except Exception as e:
+        return {"passed": False, "error": f"CompileError: {e}"}
+    
+    # 3. Выполнение тестов (если предоставлены)
+    if tests.strip():
+        try:
+            # Создаём изолированное пространство имён
+            namespace: dict = {}
+            
+            # Выполняем код
+            exec(code, namespace)
+            
+            # Выполняем тесты
+            exec(tests, namespace)
+            
+            return {"passed": True, "error": None}
+            
+        except AssertionError as e:
+            return {"passed": False, "error": f"AssertionError: {e}"}
+        except NameError as e:
+            return {"passed": False, "error": f"NameError: {e}"}
+        except TypeError as e:
+            return {"passed": False, "error": f"TypeError: {e}"}
+        except ValueError as e:
+            return {"passed": False, "error": f"ValueError: {e}"}
+        except AttributeError as e:
+            return {"passed": False, "error": f"AttributeError: {e}"}
+        except Exception as e:
+            return {"passed": False, "error": f"RuntimeError: {type(e).__name__}: {e}"}
+    
+    # Тесты не предоставлены — только синтаксис/компиляция
+    return {"passed": True, "error": None}

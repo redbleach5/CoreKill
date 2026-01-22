@@ -212,6 +212,54 @@ class SSEManager:
         
         return await SSEManager.send_event("complete", data)
 
+    @staticmethod
+    async def stream_incremental_progress(
+        function_name: str,
+        status: str,
+        current: int,
+        total: int,
+        fix_attempts: int = 0,
+        error: Optional[str] = None
+    ) -> str:
+        """Генерирует событие прогресса инкрементальной генерации.
+        
+        Используется для Compiler-in-the-Loop (Phase 3).
+        
+        Args:
+            function_name: Имя генерируемой функции
+            status: Статус (generating, validating, fixing, passed, failed)
+            current: Номер текущей функции (1-based)
+            total: Общее количество функций
+            fix_attempts: Количество попыток исправления
+            error: Текст ошибки (если status == "failed")
+            
+        Returns:
+            SSE событие
+            
+        Example:
+            event = await SSEManager.stream_incremental_progress(
+                function_name="calculate_sum",
+                status="passed",
+                current=2,
+                total=5,
+                fix_attempts=0
+            )
+        """
+        data: Dict[str, Any] = {
+            "function": function_name,
+            "status": status,
+            "fix_attempts": fix_attempts,
+            "progress": {
+                "current": current,
+                "total": total
+            }
+        }
+        
+        if error:
+            data["error"] = error
+        
+        return await SSEManager.send_event("incremental_progress", data)
+
     async def send_stage_event(
         self,
         task_id: str,

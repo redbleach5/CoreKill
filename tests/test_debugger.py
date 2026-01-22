@@ -154,20 +154,22 @@ Fix the add function to return 5 instead of 3 when called with (1, 2)
             with patch('agents.debugger.create_llm_for_stage') as mock_llm_factory:
                 mock_llm_factory.return_value = mock_llm
                 
-                agent = DebuggerAgent(model="test-model")
-                
-                result = agent.analyze_errors(
-                    validation_results=validation_results_pytest_fail,
-                    code="def add(a, b): return a + b",
-                    tests="def test_add(): assert add(1, 2) == 5",
-                    task="Test task"
-                )
-                
-                assert isinstance(result, DebugResult)
-                assert result.error_type == "pytest"
-                assert result.confidence > 0.0
-                assert len(result.fix_instructions) > 0
-                assert "Fix" in result.fix_instructions or "fix" in result.fix_instructions.lower()
+                # Отключаем structured output для теста (используем legacy путь с mock LLM)
+                with patch('agents.debugger.is_structured_output_enabled', return_value=False):
+                    agent = DebuggerAgent(model="test-model")
+                    
+                    result = agent.analyze_errors(
+                        validation_results=validation_results_pytest_fail,
+                        code="def add(a, b): return a + b",
+                        tests="def test_add(): assert add(1, 2) == 5",
+                        task="Test task"
+                    )
+                    
+                    assert isinstance(result, DebugResult)
+                    assert result.error_type == "pytest"
+                    assert result.confidence > 0.0
+                    assert len(result.fix_instructions) > 0
+                    assert "Fix" in result.fix_instructions or "fix" in result.fix_instructions.lower()
     
     def test_parse_analysis_response(self, debugger_agent):
         """Тест парсинга ответа от LLM."""

@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 from datetime import datetime
 
 from infrastructure.logging.models import LogEvent
@@ -45,7 +45,7 @@ class FileLoggerSink(LoggerSink):
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         
         # Открываем файл для добавления
-        self._file_handle: Optional[open] = None
+        self._file_handle: Optional[TextIO] = None
         self._open_file()
     
     def _open_file(self) -> None:

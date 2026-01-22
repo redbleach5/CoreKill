@@ -69,7 +69,7 @@ def workflow_node(
                 # Устанавливаем fallback значение если указано
                 if fallback_key is not None:
                     value = fallback_value() if callable(fallback_value) else fallback_value
-                    state[fallback_key] = value
+                    state[fallback_key] = value  # type: ignore[literal-required]
                 
                 _record_stage_duration(stage, time.time() - start_time)
                 _save_checkpoint(state, stage)
@@ -85,7 +85,7 @@ def workflow_node(
                 # Устанавливаем fallback значение если указано
                 if fallback_key is not None:
                     value = fallback_value() if callable(fallback_value) else fallback_value
-                    state[fallback_key] = value
+                    state[fallback_key] = value  # type: ignore[literal-required]
                 
                 _record_stage_duration(stage, time.time() - start_time)
                 _save_checkpoint(state, stage)

@@ -8,6 +8,16 @@ export const SSE_EVENTS = {
   STAGE_PROGRESS: 'stage_progress',
   STAGE_END: 'stage_end',
   CODE_CHUNK: 'code_chunk', // Стриминг кода по частям
+  // Thinking события для reasoning моделей (DeepSeek-R1, QwQ)
+  THINKING_STARTED: 'thinking_started',
+  THINKING_IN_PROGRESS: 'thinking_in_progress',
+  THINKING_COMPLETED: 'thinking_completed',
+  THINKING_INTERRUPTED: 'thinking_interrupted',
+  // Phase 7: Under The Hood
+  LOG: 'log',                           // Live log entry
+  TOOL_CALL_START: 'tool_call_start',   // Tool/LLM call started
+  TOOL_CALL_END: 'tool_call_end',       // Tool/LLM call ended
+  METRICS_UPDATE: 'metrics_update',     // Real-time metrics
   ERROR: 'error',
   WARNING: 'warning',
   COMPLETE: 'complete'

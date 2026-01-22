@@ -500,8 +500,8 @@ class ContextEngine:
         self.cache_dir = cache_dir or Path(".context_cache")
         self.cache_dir.mkdir(exist_ok=True)
         
-        # Кэш индексов проектов
-        self._index_cache: Dict[str, List[CodeChunk]] = {}
+        # Кэш индексов проектов: cache_key -> {file_path -> chunks}
+        self._index_cache: Dict[str, Dict[str, List[CodeChunk]]] = {}
     
     def index_project(self, project_path: str, extensions: Optional[List[str]] = None) -> Dict[str, List[CodeChunk]]:
         """Индексирует проект - разбивает все файлы на чанки.

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.cache import get_cache
 from infrastructure.web_search import web_search
+from infrastructure.ast_analyzer import ProjectAnalyzer, analyze_code_structure
 from utils.logger import get_logger
 
 
@@ -432,6 +433,8 @@ class ChatAgent:
     ) -> ChatResponse:
         """Анализирует проект на основе собранного контекста.
         
+        Использует AST анализ для точных метрик (Phase 6).
+        
         Args:
             task: Исходный запрос пользователя
             codebase_context: Контекст из кодовой базы (индексированные файлы)
@@ -440,9 +443,35 @@ class ChatAgent:
         Returns:
             ChatResponse с анализом проекта
         """
+        # Phase 6: AST анализ для точных метрик
+        ast_report = ""
+        try:
+            analyzer = ProjectAnalyzer()
+            stats = analyzer.analyze_project(project_path)
+            
+            # Форматируем AST метрики
+            ast_report = f"""
+## 📊 AST Метрики (точные данные)
+- Файлов проанализировано: {stats['files_analyzed']}
+- Строк кода (LOC): {stats['total_loc']}
+- Функций: {stats['total_functions']}
+- Классов: {stats['total_classes']}
+- Модулей в графе: {stats['dependency_graph']['modules']}
+- Связей (imports): {stats['dependency_graph']['edges']}
+
+### Самые важные модули:
+"""
+            for module, importance in stats['most_important_modules'][:5]:
+                ast_report += f"- {module} (importance: {importance:.1f})\n"
+            
+            logger.info(f"📊 AST анализ: {stats['files_analyzed']} файлов, {stats['total_loc']} LOC")
+        except Exception as e:
+            logger.debug(f"AST анализ пропущен: {e}")
+        
         prompt = f"""Проанализируй проект и дай структурированный обзор.
 
 Путь к проекту: {project_path}
+{ast_report}
 
 Контекст кодовой базы:
 {codebase_context}

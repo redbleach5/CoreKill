@@ -17,10 +17,12 @@ import { MessageList, ChatInput, WelcomeScreen } from './components/chat'
 import { AppHeader, QuickSettings, LayoutMode } from './components/header'
 import { ChatHistory } from './components/ChatHistory'
 import { IDEPanel } from './components/IDEPanel'
+import { MetricsDashboard } from './components/MetricsDashboard'
+import { UnderTheHoodPanel } from './components/debug'
 import { ChatMessage, InteractionMode } from './types/chat'
 
 function App() {
-  const { stages, results, metrics, isRunning, error, startTask, stopTask, reset } = useAgentStream()
+  const { stages, results, metrics, isRunning, error, logs, toolCalls, clearLogs, startTask, stopTask, reset } = useAgentStream()
   const { isExecuting, executeCode } = useCodeExecution()
   
   const [options, setOptions] = useState<TaskOptions>({
@@ -52,6 +54,9 @@ function App() {
   // История чатов
   const [showChatHistory] = useState(true)
   const [chatHistoryCollapsed, setChatHistoryCollapsed] = useState(false)
+  
+  // Phase 7: Under The Hood
+  const [showUnderTheHood, setShowUnderTheHood] = useState(false)
 
   // Загрузка доступных моделей
   useEffect(() => {
@@ -62,6 +67,9 @@ function App() {
           const data = await response.json()
           const models = data.models || []
           setAvailableModels(models)
+          // Загружаем информацию о reasoning моделях для кэша
+          const { loadModelsInfo } = await import('./utils/modelUtils')
+          await loadModelsInfo()
           // Не устанавливаем модель автоматически — по умолчанию "Авто" (пустая строка)
         }
       } catch {
@@ -413,6 +421,9 @@ function App() {
         onNewChat={handleNewChat}
         layoutMode={layoutMode}
         onLayoutChange={setLayoutMode}
+        showUnderTheHood={showUnderTheHood}
+        onToggleUnderTheHood={() => setShowUnderTheHood(!showUnderTheHood)}
+        activeToolCalls={toolCalls.filter(c => c.status === 'running').length}
       />
 
       {/* Quick Settings */}
@@ -464,8 +475,23 @@ function App() {
               {renderSplitView()}
             </div>
           )}
+          {layoutMode === 'metrics' && (
+            <div className="flex-1 overflow-auto">
+              <MetricsDashboard />
+            </div>
+          )}
         </div>
       </main>
+      
+      {/* Phase 7: Under The Hood Panel */}
+      <UnderTheHoodPanel
+        isOpen={showUnderTheHood}
+        onClose={() => setShowUnderTheHood(false)}
+        logs={logs}
+        toolCalls={toolCalls}
+        stages={stages}
+        onClearLogs={clearLogs}
+      />
     </div>
   )
 }

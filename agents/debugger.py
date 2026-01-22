@@ -1,9 +1,20 @@
-"""Агент для анализа ошибок и генерации инструкций по исправлению кода."""
+"""Агент для анализа ошибок и генерации инструкций по исправлению кода.
+
+Поддерживает два режима работы:
+- Structured Output (Pydantic): generate_structured() с гарантированным форматом
+- Legacy: ручной парсинг текста (fallback)
+
+Режим выбирается через config.toml:
+    [structured_output]
+    enabled_agents = ["intent", "debugger"]
+"""
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 from infrastructure.local_llm import create_llm_for_stage
 from utils.logger import get_logger
 from infrastructure.model_router import get_model_router
+from utils.structured_helpers import generate_with_fallback, is_structured_output_enabled
+from models.agent_responses import DebugResponse, ErrorType
 
 
 logger = get_logger()
@@ -58,6 +69,9 @@ class DebuggerAgent:
     ) -> DebugResult:
         """Анализирует ошибки валидации и генерирует инструкции по исправлению.
         
+        Использует structured output если включён в config.toml,
+        иначе fallback на legacy парсинг.
+        
         Args:
             validation_results: Результаты валидации (pytest, mypy, bandit)
             code: Исходный код с ошибками
@@ -75,6 +89,171 @@ class DebuggerAgent:
         # Определяем тип ошибки
         error_type = self._determine_error_type(validation_results)
         
+        # Проверяем, включён ли structured output для debugger
+        if is_structured_output_enabled("debugger"):
+            debug_result = self._analyze_structured(
+                task=task,
+                code=code,
+                tests=tests,
+                error_details=error_details,
+                error_type=error_type
+            )
+        else:
+            debug_result = self._analyze_legacy(
+                task=task,
+                code=code,
+                tests=tests,
+                error_details=error_details,
+                error_type=error_type
+            )
+        
+        logger.info(
+            f"✅ Анализ завершён. Тип ошибки: {debug_result.error_type}, "
+            f"уверенность: {debug_result.confidence:.2f}"
+        )
+        
+        return debug_result
+    
+    def _analyze_structured(
+        self,
+        task: str,
+        code: str,
+        tests: str,
+        error_details: Dict[str, str],
+        error_type: str
+    ) -> DebugResult:
+        """Анализирует ошибки через structured output (Pydantic).
+        
+        Args:
+            task: Исходная задача
+            code: Код с ошибками
+            tests: Тесты
+            error_details: Детали ошибок
+            error_type: Тип ошибки
+            
+        Returns:
+            DebugResult с анализом ошибок
+        """
+        error_sections = []
+        if error_details.get("pytest"):
+            error_sections.append(f"pytest errors:\n{error_details['pytest']}")
+        if error_details.get("mypy"):
+            error_sections.append(f"mypy errors:\n{error_details['mypy']}")
+        if error_details.get("bandit"):
+            error_sections.append(f"bandit issues:\n{error_details['bandit']}")
+        
+        errors_text = "\n\n".join(error_sections)
+        
+        prompt = f"""Analyze Python code errors and provide fix instructions.
+
+TASK: {task}
+
+CODE (with errors):
+```python
+{code[:1500]}
+```
+
+TESTS:
+```python
+{tests[:1000]}
+```
+
+VALIDATION ERRORS:
+{errors_text}
+
+ERROR TYPES: syntax, runtime, logic, type, import, test
+- syntax: SyntaxError, IndentationError
+- runtime: RuntimeError, ValueError, KeyError
+- logic: Wrong output, incorrect algorithm
+- type: Type mismatch, wrong annotations
+- import: ModuleNotFoundError, ImportError
+- test: AssertionError, test failure
+
+Analyze errors and provide:
+1. error_type: one of the types above
+2. error_location: file:line or function name
+3. root_cause: brief explanation of why code fails
+4. fix_instructions: specific steps to fix (in English, actionable)
+5. confidence: 0.0-1.0"""
+
+        from utils.config import get_config
+        config = get_config()
+        
+        # Используем generate_with_fallback
+        response = generate_with_fallback(
+            llm=self.llm,
+            prompt=prompt,
+            response_model=DebugResponse,
+            fallback_fn=lambda: self._analyze_legacy_response(
+                task, code, tests, error_details, error_type
+            ),
+            agent_name="debugger",
+            num_predict=config.llm_tokens_debug
+        )
+        
+        # Конвертируем DebugResponse -> DebugResult
+        resp_error_type = response.error_type if isinstance(response.error_type, str) else response.error_type.value
+        
+        return DebugResult(
+            error_summary=f"{resp_error_type} error at {response.error_location}",
+            root_cause=response.root_cause,
+            fix_instructions=response.fix_instructions,
+            confidence=response.confidence,
+            error_type=error_type  # Используем наш определённый тип (pytest/mypy/bandit)
+        )
+    
+    def _analyze_legacy_response(
+        self,
+        task: str,
+        code: str,
+        tests: str,
+        error_details: Dict[str, str],
+        error_type: str
+    ) -> DebugResponse:
+        """Legacy анализ, возвращает DebugResponse для совместимости с fallback.
+        
+        Используется как fallback для generate_with_fallback.
+        """
+        result = self._analyze_legacy(task, code, tests, error_details, error_type)
+        
+        # Маппинг error_type на ErrorType enum
+        error_type_map = {
+            "pytest": "test",
+            "mypy": "type",
+            "bandit": "runtime",  # security issues → runtime
+            "syntax": "syntax",
+            "multiple": "logic"
+        }
+        mapped_type = error_type_map.get(result.error_type, "logic")
+        
+        return DebugResponse(
+            error_type=ErrorType(mapped_type),
+            error_location="unknown",
+            root_cause=result.root_cause,
+            fix_instructions=result.fix_instructions,
+            confidence=result.confidence
+        )
+    
+    def _analyze_legacy(
+        self,
+        task: str,
+        code: str,
+        tests: str,
+        error_details: Dict[str, str],
+        error_type: str
+    ) -> DebugResult:
+        """Legacy анализ через ручной парсинг текста.
+        
+        Args:
+            task: Исходная задача
+            code: Код с ошибками
+            tests: Тесты
+            error_details: Детали ошибок
+            error_type: Тип ошибки
+            
+        Returns:
+            DebugResult с анализом ошибок
+        """
         # Строим промпт для анализа
         analysis_prompt = self._build_analysis_prompt(
             task=task,
@@ -90,18 +269,11 @@ class DebuggerAgent:
         analysis_response = self.llm.generate(analysis_prompt, num_predict=config.llm_tokens_debug)
         
         # Парсим ответ
-        debug_result = self._parse_analysis_response(
+        return self._parse_analysis_response(
             response=analysis_response,
             error_details=error_details,
             error_type=error_type
         )
-        
-        logger.info(
-            f"✅ Анализ завершён. Тип ошибки: {debug_result.error_type}, "
-            f"уверенность: {debug_result.confidence:.2f}"
-        )
-        
-        return debug_result
     
     def _extract_error_details(
         self,

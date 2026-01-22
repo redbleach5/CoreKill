@@ -51,9 +51,29 @@ enable_model_roster = false
 # Если true, SmartModelRouter выберет DeepSeek-R1/QwQ вместо qwen2.5-coder для сложных задач
 prefer_reasoning_models = true
 
-# Показывать <think> блоки в UI (для отладки)
-# Если true, рассуждения модели будут отображаться пользователю
-show_thinking = false
+# Показывать <think> блоки в UI
+# Если true, рассуждения модели будут отображаться пользователю в реальном времени
+show_thinking = true
+
+# === Streaming ===
+# Настройки real-time стриминга генерации
+
+[streaming]
+# Включить real-time стриминг (thinking + code)
+enabled = true
+
+# Размер чанка для стриминга thinking (символов)
+thinking_chunk_size = 100
+
+# Задержка между чанками thinking (мс) — для плавности UI
+thinking_debounce_ms = 50
+
+# Максимальное время на рассуждение (мс)
+max_thinking_time_ms = 120000
+
+# Использовать StreamingCoderAgent вместо CoderAgent
+# Если false, используется синхронная генерация без стриминга
+use_streaming_agents = true
 
 # Минимальное качество для использования reasoning модели (0.0-1.0)
 min_quality = 0.7
@@ -74,10 +94,76 @@ max_retries = 2
 
 # Агенты которые используют structured output
 # По мере миграции сюда добавляются агенты
-enabled_agents = ["intent"]
+enabled_agents = ["intent", "debugger", "reflection"]
 
 # Fallback на ручной парсинг если structured output не работает
 fallback_to_manual_parsing = true
+
+# === Code Retrieval (Few-Shot Examples) ===
+# Phase 4: Поиск похожего кода для примеров
+
+[code_retrieval]
+# Включить code retrieval для few-shot примеров
+enabled = true
+
+# Источники для поиска примеров
+# local — из текущего проекта, history — из успешных генераций, github — GitHub API
+sources = ["local", "history"]
+
+# Количество примеров для промпта
+num_examples = 3
+
+# Модель для embeddings (sentence-transformers)
+embedding_model = "all-MiniLM-L6-v2"
+
+# Путь к ChromaDB для индекса
+chroma_path = ".chroma_code"
+
+# GitHub токен для Code Search API (опционально)
+# Без токена: 10 req/min, с токеном: 30 req/min
+# github_token = "ghp_..."
+
+# Интервал переиндексации проекта (минуты, 0 = отключено)
+reindex_interval = 0
+
+# Минимальное качество примера для включения (0.0-1.0)
+min_quality = 0.5
+
+# === Multi-Agent Debate ===
+# Phase 5: Несколько критиков анализируют код
+
+[multi_agent_debate]
+# Включить multi-agent дебаты
+enabled = false
+
+# Максимум раундов дебатов
+max_rounds = 3
+
+# Минимальная сложность для дебатов (simple | medium | complex)
+min_complexity = "medium"
+
+# Рецензенты: security, performance, correctness
+reviewers = ["security", "performance", "correctness"]
+
+# Модель для рецензентов (пусто = использовать default)
+reviewer_model = ""
+
+# === Incremental Coding (Compiler-in-the-Loop) ===
+# Phase 3: Инкрементальная генерация с немедленной валидацией
+[incremental_coding]
+# Включить инкрементальную генерацию
+enabled = true
+
+# Минимальная сложность для инкрементальной генерации
+# simple | medium | complex
+# При "complex" — используется только для сложных задач
+min_complexity = "complex"
+
+# Максимум попыток исправления на функцию
+max_fix_attempts = 3
+
+# Таймаут на валидацию одной функции (мс)
+validation_timeout = 5000
 
 # === LLM Generation Limits ===
 # Лимиты токенов для разных этапов генерации
@@ -92,7 +178,8 @@ tokens_planning = 256
 tokens_tests = 2048
 
 # Максимум токенов для генерации кода
-tokens_code = 4096
+# На M2/M1 использовать меньше для скорости (1024-2048)
+tokens_code = 2048
 
 # Максимум токенов для анализа/рефлексии
 tokens_analysis = 1024
@@ -216,11 +303,11 @@ allow_ultra_models = false
 # Более сложные этапы (coder) получают больше времени
 
 [timeouts]
-# Определение намерения — короткий ответ
-intent = 60
+# Определение намерения — увеличен для M2/медленных систем
+intent = 120
 
 # Планирование
-planning = 90
+planning = 120
 
 # Исследование/контекст
 research = 90
@@ -267,3 +354,21 @@ max_checkpoint_age_hours = 24
 
 # Автоматически помечать задачи как paused при потере соединения
 auto_pause_on_disconnect = true
+
+
+# === Debug / Under The Hood ===
+# Phase 7: Визуализация работы системы
+
+[debug]
+# Включить Under The Hood панель
+under_the_hood_enabled = true
+
+# Уровень логирования для UI (debug | info | warning | error)
+log_level = "info"
+
+# Максимум логов в памяти
+max_logs_in_memory = 500
+
+# Включить отслеживание tool calls
+track_tool_calls = true
+

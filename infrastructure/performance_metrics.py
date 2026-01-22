@@ -15,7 +15,7 @@ import asyncio
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import mean, median, stdev
 
 from utils.logger import get_logger
@@ -206,7 +206,7 @@ class PerformanceMetrics:
         try:
             data = {
                 "stages": [m.to_dict() for m in self.stage_metrics.values()],
-                "updated_at": datetime.utcnow().isoformat()
+                "updated_at": datetime.now(timezone.utc).isoformat()
             }
             with open(metrics_file, "w") as f:
                 json.dump(data, f, indent=2)
@@ -257,7 +257,7 @@ class PerformanceMetrics:
                 tokens_per_second=round(tokens_per_second, 2),
                 time_to_first_token=round(total_time / 10, 3),  # Приблизительно
                 model_used=model,
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 performance_multiplier=round(performance_multiplier, 2)
             )
             
@@ -276,7 +276,7 @@ class PerformanceMetrics:
             self.benchmark = SystemBenchmark(
                 tokens_per_second=self.BASE_TOKENS_PER_SECOND,
                 model_used=model,
-                timestamp=datetime.utcnow().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 performance_multiplier=1.0
             )
             return self.benchmark

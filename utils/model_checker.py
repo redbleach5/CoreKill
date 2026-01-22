@@ -630,9 +630,20 @@ def get_reasoning_model(min_quality: float = 0.7) -> Optional[str]:
         logger.debug("🤖 Reasoning модели не найдены")
         return None
     
-    # Выбираем лучшую по качеству
-    best = max(reasoning_models, key=lambda m: m.estimated_quality)
-    logger.info(f"🧠 Выбрана reasoning модель: {best.name} (качество: {best.estimated_quality})")
+    # Выбираем лучшую: сначала по качеству, затем по размеру параметров
+    # Это гарантирует выбор самой мощной модели при одинаковом качестве
+    def _model_priority(m: ModelInfo) -> tuple[float, float]:
+        """Приоритет модели: (качество, размер_параметров_в_миллиардах)."""
+        # Парсим размер параметров для сравнения
+        param_match = re.search(r'(\d+\.?\d*)', m.parameter_size)
+        param_value = float(param_match.group(1)) if param_match else 0.0
+        return (m.estimated_quality, param_value)
+    
+    best = max(reasoning_models, key=_model_priority)
+    logger.info(
+        f"🧠 Выбрана reasoning модель: {best.name} "
+        f"(качество: {best.estimated_quality}, параметры: {best.parameter_size})"
+    )
     return best.name
 
 

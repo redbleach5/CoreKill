@@ -1,4 +1,5 @@
 """Граф LangGraph для workflow агентов."""
+from typing import Any
 from langgraph.graph import StateGraph, START, END
 from infrastructure.workflow_state import AgentState
 from infrastructure.workflow_nodes import (
@@ -23,7 +24,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 
-def create_workflow_graph() -> StateGraph:
+def create_workflow_graph() -> Any:
     """Создаёт и компилирует граф LangGraph для workflow агентов.
     
     Структура графа:
@@ -47,17 +48,17 @@ def create_workflow_graph() -> StateGraph:
     # Создаём граф
     workflow = StateGraph(AgentState)
     
-    # Добавляем узлы
-    workflow.add_node("intent", intent_node)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("researcher", researcher_node)
-    workflow.add_node("test_generator", generator_node)
-    workflow.add_node("coder", coder_node)
-    workflow.add_node("validator", validator_node)
-    workflow.add_node("debugger", debugger_node)
-    workflow.add_node("fixer", fixer_node)
-    workflow.add_node("reflection", reflection_node)
-    workflow.add_node("critic", critic_node)
+    # Добавляем узлы (type: ignore для совместимости с LangGraph типами)
+    workflow.add_node("intent", intent_node)  # type: ignore[call-overload]
+    workflow.add_node("planner", planner_node)  # type: ignore[call-overload]
+    workflow.add_node("researcher", researcher_node)  # type: ignore[call-overload]
+    workflow.add_node("test_generator", generator_node)  # type: ignore[call-overload]
+    workflow.add_node("coder", coder_node)  # type: ignore[call-overload]
+    workflow.add_node("validator", validator_node)  # type: ignore[call-overload]
+    workflow.add_node("debugger", debugger_node)  # type: ignore[call-overload]
+    workflow.add_node("fixer", fixer_node)  # type: ignore[call-overload]
+    workflow.add_node("reflection", reflection_node)  # type: ignore[call-overload]
+    workflow.add_node("critic", critic_node)  # type: ignore[call-overload]
     
     # Добавляем рёбра (переходы)
     # START → intent

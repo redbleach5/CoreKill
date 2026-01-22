@@ -71,7 +71,7 @@ class EnvironmentConfig(BaseModel):
         Returns:
             Экземпляр EnvironmentConfig
         """
-        env_dict = {}
+        env_dict: dict[str, str | int | float | bool] = {}
         for field_name, field_info in cls.model_fields.items():
             alias = field_info.alias or field_name.upper()
             value = os.getenv(alias)
@@ -93,7 +93,7 @@ class EnvironmentConfig(BaseModel):
                 else:
                     env_dict[field_name] = value
         
-        return cls(**env_dict)
+        return cls(**env_dict)  # type: ignore[arg-type]
     
     def get_allowed_origins_list(self) -> list[str]:
         """Возвращает список разрешённых origins.

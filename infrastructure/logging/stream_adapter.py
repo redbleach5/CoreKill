@@ -99,7 +99,7 @@ class LogStreamAdapter:
             try:
                 # Ждём событие с таймаутом для проверки активности
                 event = await asyncio.to_thread(
-                    self._event_queue.get,
+                    self._event_queue.get,  # type: ignore[arg-type]
                     timeout=1.0
                 )
                 

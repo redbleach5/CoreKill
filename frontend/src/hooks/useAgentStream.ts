@@ -22,6 +22,15 @@ export interface StageResult {
   [key: string]: unknown
 }
 
+// Состояние рассуждений (thinking) для reasoning моделей
+export interface ThinkingState {
+  status: 'idle' | 'started' | 'in_progress' | 'completed' | 'interrupted'
+  content: string           // Накопленный текст рассуждений
+  summary?: string          // Краткая сводка (после завершения)
+  elapsedMs: number         // Время рассуждения в мс
+  totalChars: number        // Общее количество символов
+}
+
 export interface StageStatus {
   stage: string
   status: 'idle' | 'start' | 'progress' | 'end' | 'error'
@@ -29,6 +38,8 @@ export interface StageStatus {
   progress?: number
   result?: StageResult
   error?: string
+  // Рассуждения reasoning модели для этого этапа
+  thinking?: ThinkingState
 }
 
 // Результат проверки одного инструмента
@@ -88,12 +99,37 @@ export interface Metrics {
   overall: number
 }
 
+// Phase 7: Under The Hood types
+export interface LogEntry {
+  timestamp: string
+  level: 'debug' | 'info' | 'warning' | 'error'
+  stage: string
+  message: string
+  details?: Record<string, unknown>
+}
+
+export interface ToolCall {
+  id: string
+  type: 'llm' | 'validation' | 'search' | 'file'
+  name: string
+  input_preview: string
+  output_preview?: string
+  tokens_in?: number
+  tokens_out?: number
+  duration_ms: number
+  status: 'running' | 'success' | 'error'
+}
+
 interface UseAgentStreamReturn {
   stages: Record<string, StageStatus>
   results: AgentResults
   metrics: Metrics
   isRunning: boolean
   error: string | null
+  // Phase 7: Under The Hood
+  logs: LogEntry[]
+  toolCalls: ToolCall[]
+  clearLogs: () => void
   startTask: (task: string, options: TaskOptions) => void
   stopTask: () => void
   reset: () => void
@@ -124,6 +160,15 @@ export function useAgentStream(): UseAgentStreamReturn {
   const [error, setError] = useState<string | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
   const isCompletedRef = useRef<boolean>(false)  // Флаг завершения, сохраняется между переподключениями
+  
+  // Phase 7: Under The Hood
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([])
+  
+  const clearLogs = useCallback(() => {
+    setLogs([])
+    setToolCalls([])
+  }, [])
 
   const updateStage = useCallback((stage: string, status: StageStatus) => {
     setStages(prev => ({
@@ -335,6 +380,155 @@ export function useAgentStream(): UseAgentStreamReturn {
       }
     })
 
+    // === Обработчики thinking событий (reasoning модели) ===
+    
+    // Начало рассуждения
+    eventSource.addEventListener(SSE_EVENTS.THINKING_STARTED, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setStages(prev => ({
+          ...prev,
+          [data.stage]: {
+            ...prev[data.stage],
+            thinking: {
+              status: 'started',
+              content: '',
+              elapsedMs: 0,
+              totalChars: data.total_chars || 0
+            }
+          }
+        }))
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // Чанк рассуждения (стриминг)
+    eventSource.addEventListener(SSE_EVENTS.THINKING_IN_PROGRESS, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setStages(prev => {
+          const currentStage = prev[data.stage]
+          const currentThinking = currentStage?.thinking
+          
+          return {
+            ...prev,
+            [data.stage]: {
+              ...currentStage,
+              thinking: {
+                status: 'in_progress',
+                content: (currentThinking?.content || '') + data.content,
+                elapsedMs: data.elapsed_ms || 0,
+                totalChars: data.total_chars || 0
+              }
+            }
+          }
+        })
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // Рассуждение завершено
+    eventSource.addEventListener(SSE_EVENTS.THINKING_COMPLETED, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setStages(prev => ({
+          ...prev,
+          [data.stage]: {
+            ...prev[data.stage],
+            thinking: {
+              status: 'completed',
+              content: data.content || prev[data.stage]?.thinking?.content || '',
+              summary: data.summary,
+              elapsedMs: data.elapsed_ms || 0,
+              totalChars: data.total_chars || 0
+            }
+          }
+        }))
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // Рассуждение прервано пользователем
+    eventSource.addEventListener(SSE_EVENTS.THINKING_INTERRUPTED, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setStages(prev => ({
+          ...prev,
+          [data.stage]: {
+            ...prev[data.stage],
+            thinking: {
+              status: 'interrupted',
+              content: prev[data.stage]?.thinking?.content || '',
+              elapsedMs: data.elapsed_ms || 0,
+              totalChars: data.total_chars || 0
+            }
+          }
+        }))
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
+    // === Phase 7: Under The Hood events ===
+    
+    // Log entry
+    eventSource.addEventListener(SSE_EVENTS.LOG, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setLogs(prev => {
+          const newLogs = [...prev, data as LogEntry]
+          // Ограничиваем количество логов в памяти
+          if (newLogs.length > 500) {
+            return newLogs.slice(-500)
+          }
+          return newLogs
+        })
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+    
+    // Tool call started
+    eventSource.addEventListener(SSE_EVENTS.TOOL_CALL_START, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setToolCalls(prev => [...prev, data as ToolCall])
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+    
+    // Tool call ended
+    eventSource.addEventListener(SSE_EVENTS.TOOL_CALL_END, (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        
+        setToolCalls(prev => prev.map(call => 
+          call.id === data.id 
+            ? { ...call, ...data } 
+            : call
+        ))
+      } catch {
+        // Игнорируем ошибки парсинга
+      }
+    })
+
     // Обработчик кастомного события 'error' от backend (не путать с onerror)
     eventSource.addEventListener(SSE_EVENTS.ERROR, (event: MessageEvent) => {
       try {
@@ -475,6 +669,10 @@ export function useAgentStream(): UseAgentStreamReturn {
     setError(null)
     isCompletedRef.current = false
     
+    // Phase 7: Очищаем логи и tool calls
+    setLogs([])
+    setToolCalls([])
+    
     // Закрываем существующее подключение если есть
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
@@ -497,6 +695,10 @@ export function useAgentStream(): UseAgentStreamReturn {
     metrics,
     isRunning,
     error,
+    // Phase 7: Under The Hood
+    logs,
+    toolCalls,
+    clearLogs,
     startTask,
     stopTask,
     reset

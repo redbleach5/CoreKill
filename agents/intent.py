@@ -1,4 +1,13 @@
-"""Агент для определения намерения пользователя."""
+"""Агент для определения намерения пользователя.
+
+Поддерживает два режима работы:
+- Structured Output (Pydantic): generate_structured() с гарантированным форматом
+- Legacy: ручной парсинг JSON (fallback)
+
+Режим выбирается через config.toml:
+    [structured_output]
+    enabled_agents = ["intent"]
+"""
 from dataclasses import dataclass, field
 from typing import Optional
 from infrastructure.local_llm import LocalLLM
@@ -12,6 +21,8 @@ from utils.model_checker import (
 )
 from utils.config import get_config
 from infrastructure.model_router import get_model_router
+from utils.structured_helpers import generate_with_fallback, is_structured_output_enabled
+from models.agent_responses import IntentResponse, IntentType
 
 
 logger = get_logger()
@@ -212,6 +223,129 @@ class IntentAgent:
     def _classify_with_llm(self, query: str) -> IntentResult:
         """Классифицирует намерение и сложность через LLM.
         
+        Использует structured output если включён в config.toml,
+        иначе fallback на legacy парсинг.
+        
+        Args:
+            query: Запрос пользователя
+            
+        Returns:
+            IntentResult с типом, уверенностью и сложностью
+        """
+        # Проверяем, включён ли structured output для intent
+        if is_structured_output_enabled("intent"):
+            return self._classify_structured(query)
+        else:
+            return self._classify_legacy(query)
+    
+    def _classify_structured(self, query: str) -> IntentResult:
+        """Классифицирует намерение через structured output (Pydantic).
+        
+        Гарантирует формат ответа через JSON Schema валидацию.
+        
+        Args:
+            query: Запрос пользователя
+            
+        Returns:
+            IntentResult с типом, уверенностью и сложностью
+        """
+        prompt = f"""Classify this user request for a CODE GENERATION system.
+
+REQUEST: "{query}"
+
+INTENT TYPES:
+- greeting: ONLY simple greetings without any task (привет, hello, hi)
+- help: Questions about system capabilities (что ты умеешь?, help me)
+- create: Create new code, function, class, module, script
+- modify: Modify existing code
+- debug: Find and fix bugs in SPECIFIC code
+- optimize: Improve performance
+- explain: Explain how code works
+- test: Write tests
+- refactor: Restructure code
+- analyze: Analyze project, codebase, architecture
+
+COMPLEXITY:
+- simple: single function, <100 lines
+- medium: class/module, 100-500 lines
+- complex: multi-file project, 500+ lines
+
+RULES:
+- "greeting" = ONLY if request is JUST a greeting with NO task
+- "help" = meta-questions about system, NOT code tasks
+- "create" = ANY code generation task: "print X", "def X", "напиши X", "создай Y"
+
+EXAMPLES:
+- "print hello" -> create (code task to print something)
+- "print hi" -> create (code task)
+- "def add(a,b)" -> create (function definition)
+- "привет" -> greeting (just greeting)
+- "hello world program" -> create (code task)
+
+Respond with intent, confidence (0-1), complexity, and brief reasoning."""
+
+        config = get_config()
+        
+        # Используем generate_with_fallback для автоматического fallback
+        response = generate_with_fallback(
+            llm=self.llm,
+            prompt=prompt,
+            response_model=IntentResponse,
+            fallback_fn=lambda: self._classify_legacy_response(query),
+            agent_name="intent",
+            num_predict=config.llm_tokens_intent
+        )
+        
+        # Маппинг строковых значений complexity в enum
+        complexity_map = {
+            "simple": TaskComplexity.SIMPLE,
+            "medium": TaskComplexity.MEDIUM,
+            "complex": TaskComplexity.COMPLEX
+        }
+        
+        # Описания для результата
+        descriptions = {
+            "greeting": "Приветствие пользователя",
+            "help": "Вопрос о возможностях системы",
+            "create": "Создание нового кода",
+            "modify": "Изменение существующего кода",
+            "debug": "Поиск и исправление ошибок",
+            "optimize": "Оптимизация производительности",
+            "explain": "Объяснение работы кода",
+            "test": "Написание тестов",
+            "refactor": "Рефакторинг кода",
+            "analyze": "Анализ проекта/кодовой базы"
+        }
+        
+        # Конвертируем IntentResponse -> IntentResult
+        intent_type = response.intent if isinstance(response.intent, str) else response.intent.value
+        complexity = complexity_map.get(response.complexity, TaskComplexity.SIMPLE)
+        
+        return IntentResult(
+            type=intent_type,
+            confidence=response.confidence,
+            description=response.reasoning or descriptions.get(intent_type, "Выполнение задачи"),
+            complexity=complexity
+        )
+    
+    def _classify_legacy_response(self, query: str) -> IntentResponse:
+        """Legacy классификация, возвращает IntentResponse для совместимости.
+        
+        Используется как fallback для generate_with_fallback.
+        """
+        result = self._classify_legacy(query)
+        
+        # Конвертируем IntentResult -> IntentResponse
+        return IntentResponse(
+            intent=IntentType(result.type),
+            confidence=result.confidence,
+            complexity=result.complexity.value,
+            reasoning=result.description
+        )
+    
+    def _classify_legacy(self, query: str) -> IntentResult:
+        """Legacy классификация через ручной парсинг JSON.
+        
         Args:
             query: Запрос пользователя
             
@@ -258,7 +392,6 @@ EXAMPLES:
 JSON response: {{"intent": "type", "confidence": 0.0-1.0, "complexity": "simple|medium|complex"}}
 JSON:"""
 
-        from utils.config import get_config
         config = get_config()
         response = self.llm.generate(prompt, num_predict=config.llm_tokens_intent)
         
@@ -407,6 +540,18 @@ JSON:"""
         return TaskComplexity.SIMPLE
     
     
+    # Ключевые слова кода — если присутствуют, это НЕ приветствие
+    CODE_KEYWORDS = frozenset([
+        # Python
+        "print", "def", "class", "import", "from", "return", "if", "else",
+        "for", "while", "try", "except", "with", "async", "await", "lambda",
+        # Общие
+        "function", "const", "let", "var", "console", "log", "create", "add",
+        "make", "build", "write", "code", "script", "program", "algorithm",
+        # Русские команды
+        "создай", "напиши", "сделай", "добавь", "выведи", "покажи"
+    ])
+    
     def _is_greeting(self, query: str) -> bool:
         """Проверяет, является ли запрос приветствием.
         
@@ -417,6 +562,12 @@ JSON:"""
             True если это приветствие, False иначе
         """
         query_lower = query.strip().lower()
+        words = query_lower.split()
+        
+        # Если есть ключевые слова кода — это НЕ приветствие
+        for word in words:
+            if word in self.CODE_KEYWORDS:
+                return False
         
         # Проверяем точное совпадение или начало фразы
         for greeting in self.GREETINGS:
@@ -424,7 +575,6 @@ JSON:"""
                 return True
         
         # Проверяем короткие запросы (1-2 слова), которые могут быть приветствиями
-        words = query_lower.split()
         if len(words) <= 2:
             for greeting in self.GREETINGS:
                 if greeting in words:

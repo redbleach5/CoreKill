@@ -5,7 +5,7 @@
 """
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import uuid
 import json
 from pathlib import Path
@@ -15,6 +15,17 @@ from utils.config import get_config
 
 
 logger = get_logger()
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Нормализует datetime в timezone-aware UTC.
+
+    Старые сохранённые диалоги могут содержать naive datetime (без tzinfo).
+    Для корректной работы TTL/сортировки приводим их к UTC.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 @dataclass
@@ -43,7 +54,7 @@ class ConversationMessage:
             id=data["id"],
             role=data["role"],
             content=data["content"],
-            timestamp=datetime.fromisoformat(data["timestamp"]),
+            timestamp=_ensure_utc(datetime.fromisoformat(data["timestamp"])),
             metadata=data.get("metadata")
         )
 
@@ -55,8 +66,8 @@ class Conversation:
     messages: List[ConversationMessage] = field(default_factory=list)
     summary: Optional[str] = None
     summarized_count: int = 0  # Сколько сообщений суммаризировано
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: Optional[Dict[str, Any]] = None
     
     def add_message(
@@ -79,11 +90,11 @@ class Conversation:
             id=str(uuid.uuid4()),
             role=role,
             content=content,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             metadata=metadata
         )
         self.messages.append(message)
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
         return message
     
     def get_recent_messages(self, count: int = 10) -> List[ConversationMessage]:
@@ -132,8 +143,8 @@ class Conversation:
             "messages": [m.to_dict() for m in self.messages],
             "summary": self.summary,
             "summarized_count": self.summarized_count,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
+            "created_at": _ensure_utc(self.created_at).isoformat(),
+            "updated_at": _ensure_utc(self.updated_at).isoformat(),
             "metadata": self.metadata
         }
     
@@ -145,8 +156,8 @@ class Conversation:
             messages=[ConversationMessage.from_dict(m) for m in data.get("messages", [])],
             summary=data.get("summary"),
             summarized_count=data.get("summarized_count", 0),
-            created_at=datetime.fromisoformat(data["created_at"]),
-            updated_at=datetime.fromisoformat(data["updated_at"]),
+            created_at=_ensure_utc(datetime.fromisoformat(data["created_at"])),
+            updated_at=_ensure_utc(datetime.fromisoformat(data["updated_at"])),
             metadata=data.get("metadata")
         )
 
@@ -217,7 +228,8 @@ class ConversationMemory:
     def _get_llm(self) -> LocalLLM:
         """Ленивая инициализация LLM для суммаризации."""
         if self._llm is None:
-            self._llm = LocalLLM(model=self._summarization_model, temperature=0.1)
+            model = self._summarization_model or "qwen2.5-coder:7b"
+            self._llm = LocalLLM(model=model, temperature=0.1)
         return self._llm
     
     def get_or_create_conversation(self, conversation_id: Optional[str] = None) -> Conversation:
@@ -404,9 +416,7 @@ class ConversationMemory:
         Returns:
             Количество удалённых диалогов
         """
-        from datetime import timedelta
-        
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         ttl_delta = timedelta(hours=self.ttl_hours)
         expired_ids = []
         

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { ChatMessage } from '../../types/chat'
 import { StageStatus } from '../../hooks/useAgentStream'
+import { ThinkingBlock } from '../ThinkingBlock'
 
 interface MessageListProps {
   messages: ChatMessage[]
@@ -378,54 +379,75 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
                 const isError = status === 'error'
                 
                 return (
-                  <div 
-                    key={stage}
-                    className={`flex items-center gap-2 py-1 px-2 rounded-lg transition-colors ${
-                      isActive ? 'bg-white/5' : ''
-                    }`}
-                  >
-                    {/* Иконка статуса */}
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center ${
-                      isCompleted ? 'bg-emerald-500/20' :
-                      isActive ? 'bg-blue-500/20' :
-                      isError ? 'bg-red-500/20' :
-                      'bg-white/5'
-                    }`}>
-                      {isCompleted ? (
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                      ) : isActive ? (
-                        <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
-                      ) : isError ? (
-                        <AlertCircle className="w-3 h-3 text-red-400" />
-                      ) : (
-                        <StageIcon className="w-3 h-3 text-gray-600" />
-                      )}
-                    </div>
-                    
-                    {/* Название этапа и сообщение об ошибке */}
-                    <div className="flex-1 min-w-0">
-                      <span className={`text-xs ${
-                        isCompleted ? 'text-emerald-400' :
-                        isActive ? 'text-blue-400' :
-                        isError ? 'text-red-400' :
-                        'text-gray-600'
+                  <div key={stage}>
+                    <div 
+                      className={`flex items-center gap-2 py-1 px-2 rounded-lg transition-colors ${
+                        isActive ? 'bg-white/5' : ''
+                      }`}
+                    >
+                      {/* Иконка статуса */}
+                      <div className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                        isCompleted ? 'bg-emerald-500/20' :
+                        isActive ? 'bg-blue-500/20' :
+                        isError ? 'bg-red-500/20' :
+                        'bg-white/5'
                       }`}>
-                        {stageConfig.label}
+                        {isCompleted ? (
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        ) : isActive ? (
+                          <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+                        ) : isError ? (
+                          <AlertCircle className="w-3 h-3 text-red-400" />
+                        ) : (
+                          <StageIcon className="w-3 h-3 text-gray-600" />
+                        )}
+                      </div>
+                      
+                      {/* Название этапа и сообщение об ошибке */}
+                      <div className="flex-1 min-w-0">
+                        <span className={`text-xs ${
+                          isCompleted ? 'text-emerald-400' :
+                          isActive ? 'text-blue-400' :
+                          isError ? 'text-red-400' :
+                          'text-gray-600'
+                        }`}>
+                          {stageConfig.label}
+                        </span>
+                        {isError && stageStatus?.message && (
+                          <div className="text-[10px] text-red-400/80 truncate mt-0.5">
+                            {stageStatus.message}
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Время этапа (адаптивное) или статус ошибки */}
+                      <span className={`text-[10px] ml-auto ${isError ? 'text-red-400' : 'text-gray-600'}`}>
+                        {isError ? 'таймаут' : `~${Math.round(getStageDuration(stage))}с`}
                       </span>
-                      {isError && stageStatus?.message && (
-                        <div className="text-[10px] text-red-400/80 truncate mt-0.5">
-                          {stageStatus.message}
-                        </div>
-                      )}
                     </div>
                     
-                    {/* Время этапа (адаптивное) или статус ошибки */}
-                    <span className={`text-[10px] ml-auto ${isError ? 'text-red-400' : 'text-gray-600'}`}>
-                      {isError ? 'таймаут' : `~${Math.round(getStageDuration(stage))}с`}
-                    </span>
+                    {/* Блок размышлений (thinking) для reasoning моделей */}
+                    {stageStatus?.thinking && stageStatus.thinking.status !== 'idle' && (
+                      <div className="ml-7 mt-2">
+                        <ThinkingBlock
+                          thinking={stageStatus.thinking}
+                          stageName={stage}
+                        />
+                      </div>
+                    )}
                   </div>
-                )
-              })}
+              )})}
+            </div>
+          )}
+          
+          {/* Показываем thinking блок для текущего активного этапа даже без деталей */}
+          {!showDetails && currentStage && stageData[currentStage]?.thinking && 
+           stageData[currentStage].thinking.status !== 'idle' && (
+            <div className="mt-3">
+              <ThinkingBlock
+                thinking={stageData[currentStage].thinking}
+                stageName={currentStage}
+              />
             </div>
           )}
         </div>

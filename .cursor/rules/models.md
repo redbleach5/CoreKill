@@ -38,6 +38,49 @@ print(parsed.thinking)  # Рассуждения из <think> блока
 print(parsed.answer)    # Финальный ответ
 ```
 
+**Real-time стриминг рассуждений и кода:**
+```python
+from infrastructure.reasoning_stream import get_reasoning_stream_manager
+from infrastructure.local_llm import create_llm_for_stage
+
+llm = create_llm_for_stage("coding", model="deepseek-r1:7b")
+manager = get_reasoning_stream_manager()
+
+# Real-time стриминг с разделением thinking и content
+async for event_type, data in manager.stream_from_llm(llm, prompt, "coding"):
+    if event_type == "thinking":
+        yield data  # SSE: thinking_started, thinking_in_progress, thinking_completed
+    elif event_type == "content":
+        yield create_code_chunk_event(data)  # Чанк кода для IDE
+    elif event_type == "done":
+        final_code = extract_code_from_reasoning(data)
+```
+
+**Низкоуровневый стриминг от LLM:**
+```python
+from infrastructure.local_llm import LocalLLM, StreamChunk
+
+llm = LocalLLM(model="deepseek-r1:7b")
+
+async for chunk in llm.generate_stream(prompt):
+    if chunk.is_thinking:
+        # Внутри <think> блока
+        print(f"Thinking: {chunk.content}")
+    else:
+        # Основной контент (код)
+        print(f"Code: {chunk.content}")
+    
+    if chunk.is_done:
+        print(f"Full response: {chunk.full_response}")
+```
+
+См. `infrastructure/reasoning_stream.md` для полной документации.
+
+**Реализованные файлы:**
+- `infrastructure/reasoning_stream.py` — ReasoningStreamManager
+- `infrastructure/reasoning_utils.py` — parse_reasoning_response()
+- `agents/streaming_*.py` — все стриминговые агенты (6 шт.)
+
 ## Таймауты по этапам (config.toml)
 
 ```toml

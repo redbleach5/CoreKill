@@ -1,12 +1,11 @@
 # Tree-sitter — Мультиязычный парсинг кода
 
-## 📋 Обзор
+## Статус: 🔮 Будущее (после Фазы 6)
 
-[Tree-sitter](https://tree-sitter.github.io/) — быстрый инкрементальный парсер, написанный на C. Позволяет парсить код на любом языке в AST.
+[Tree-sitter](https://tree-sitter.github.io/) — быстрый инкрементальный парсер на C. Позволяет парсить код на любом языке в AST.
 
-**Статус:** 🔮 Планируется  
-**Приоритет:** Низкий (после стабилизации Python-only функционала)  
-**Зависит от:** `future/context_engine_ast_parsing.md`
+**Приоритет:** Низкий (после AST Analysis для Python)  
+**Зависит от:** `context_engine_ast_parsing.md`
 
 ---
 
@@ -391,4 +390,4 @@ supported_languages = ["python", "javascript", "typescript"]
 
 - `future/context_engine_ast_parsing.md` — базовый AST парсинг (Python only)
 - `infrastructure/context_engine.py` — текущая реализация
-- `.cursor/rules/legacy_architecture_contract.md` — описание Context Engine
+- [legacy_architecture_contract.md](legacy_architecture_contract.md) — описание Context Engine

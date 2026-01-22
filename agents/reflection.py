@@ -1,4 +1,13 @@
-"""Агент для рефлексии и анализа результатов выполнения задачи."""
+"""Агент для рефлексии и анализа результатов выполнения задачи.
+
+Поддерживает два режима работы:
+- Structured Output (Pydantic): generate_structured() с гарантированным форматом
+- Legacy: ручной парсинг текста (fallback)
+
+Режим выбирается через config.toml:
+    [structured_output]
+    enabled_agents = ["intent", "debugger", "reflection"]
+"""
 from dataclasses import dataclass
 from typing import Dict, Optional, Any
 from infrastructure.local_llm import create_llm_for_stage
@@ -10,6 +19,8 @@ from utils.model_checker import (
 )
 from utils.config import get_config
 from infrastructure.model_router import get_model_router
+from utils.structured_helpers import generate_with_fallback, is_structured_output_enabled
+from models.agent_responses import ReflectionResponse
 
 
 logger = get_logger()
@@ -70,6 +81,9 @@ class ReflectionAgent:
     ) -> ReflectionResult:
         """Проводит рефлексию над результатами выполнения задачи.
         
+        Использует structured output если включён в config.toml,
+        иначе fallback на legacy парсинг.
+        
         Args:
             task: Исходная задача пользователя
             plan: План реализации
@@ -86,6 +100,178 @@ class ReflectionAgent:
         # Сначала вычисляем базовые оценки на основе валидации
         base_scores = self._calculate_base_scores(validation_results, tests, code)
         
+        # Проверяем, включён ли structured output для reflection
+        if is_structured_output_enabled("reflection"):
+            reflection_result = self._reflect_structured(
+                task=task,
+                plan=plan,
+                tests=tests,
+                code=code,
+                validation_results=validation_results,
+                base_scores=base_scores
+            )
+        else:
+            reflection_result = self._reflect_legacy(
+                task=task,
+                plan=plan,
+                context=context,
+                tests=tests,
+                code=code,
+                validation_results=validation_results,
+                base_scores=base_scores
+            )
+        
+        logger.info(
+            f"✅ Рефлексия завершена. Общая оценка: {reflection_result.overall_score:.2f}"
+        )
+        
+        return reflection_result
+    
+    def _reflect_structured(
+        self,
+        task: str,
+        plan: str,
+        tests: str,
+        code: str,
+        validation_results: Dict[str, Any],
+        base_scores: Dict[str, float]
+    ) -> ReflectionResult:
+        """Проводит рефлексию через structured output (Pydantic).
+        
+        Args:
+            task: Исходная задача
+            plan: План реализации
+            tests: Тесты
+            code: Код
+            validation_results: Результаты валидации
+            base_scores: Предварительные оценки
+            
+        Returns:
+            ReflectionResult с оценками и рекомендациями
+        """
+        # Формируем информацию о валидации
+        validation_summary = []
+        if validation_results.get("pytest", {}).get("success"):
+            validation_summary.append("pytest: PASSED")
+        else:
+            validation_summary.append("pytest: FAILED")
+        if validation_results.get("mypy", {}).get("success"):
+            validation_summary.append("mypy: PASSED")
+        else:
+            validation_summary.append("mypy: FAILED")
+        if validation_results.get("bandit", {}).get("success"):
+            validation_summary.append("bandit: PASSED")
+        else:
+            validation_summary.append("bandit: HAS ISSUES")
+        
+        prompt = f"""Evaluate code generation quality and provide reflection.
+
+TASK: {task[:500]}
+
+PLAN:
+{plan[:500]}
+
+TESTS:
+```python
+{tests[:800]}
+```
+
+CODE:
+```python
+{code[:1200]}
+```
+
+VALIDATION: {', '.join(validation_summary)}
+
+BASE SCORES (from validation):
+- planning_score: {base_scores.get('planning', 0.5):.2f}
+- research_score: {base_scores.get('research', 0.5):.2f}
+- testing_score: {base_scores.get('testing', 0.5):.2f}
+- coding_score: {base_scores.get('coding', 0.5):.2f}
+
+Provide:
+1. Updated scores (0.0-1.0) based on code quality, not just validation
+2. Analysis of what went well and what could be improved
+3. Specific improvements list
+4. Whether retry is needed (overall_score < 0.7)"""
+
+        config = get_config()
+        
+        # Используем generate_with_fallback
+        response = generate_with_fallback(
+            llm=self.llm,
+            prompt=prompt,
+            response_model=ReflectionResponse,
+            fallback_fn=lambda: self._reflect_legacy_response(
+                task, plan, "", tests, code, validation_results, base_scores
+            ),
+            agent_name="reflection",
+            num_predict=config.llm_tokens_analysis
+        )
+        
+        # Конвертируем ReflectionResponse -> ReflectionResult
+        return ReflectionResult(
+            planning_score=response.planning_score,
+            research_score=response.research_score,
+            testing_score=response.testing_score,
+            coding_score=response.coding_score,
+            overall_score=response.overall_score,
+            analysis=response.analysis,
+            improvements="\n".join(response.improvements) if response.improvements else "",
+            should_retry=response.should_retry
+        )
+    
+    def _reflect_legacy_response(
+        self,
+        task: str,
+        plan: str,
+        context: str,
+        tests: str,
+        code: str,
+        validation_results: Dict[str, Any],
+        base_scores: Dict[str, float]
+    ) -> ReflectionResponse:
+        """Legacy рефлексия, возвращает ReflectionResponse для совместимости.
+        
+        Используется как fallback для generate_with_fallback.
+        """
+        result = self._reflect_legacy(task, plan, context, tests, code, validation_results, base_scores)
+        
+        return ReflectionResponse(
+            planning_score=result.planning_score,
+            research_score=result.research_score,
+            testing_score=result.testing_score,
+            coding_score=result.coding_score,
+            overall_score=result.overall_score,
+            analysis=result.analysis,
+            improvements=result.improvements.split("\n") if result.improvements else [],
+            should_retry=result.should_retry
+        )
+    
+    def _reflect_legacy(
+        self,
+        task: str,
+        plan: str,
+        context: str,
+        tests: str,
+        code: str,
+        validation_results: Dict[str, Any],
+        base_scores: Dict[str, float]
+    ) -> ReflectionResult:
+        """Legacy рефлексия через ручной парсинг текста.
+        
+        Args:
+            task: Исходная задача
+            plan: План реализации
+            context: Контекст
+            tests: Тесты
+            code: Код
+            validation_results: Результаты валидации
+            base_scores: Базовые оценки
+            
+        Returns:
+            ReflectionResult с оценками и рекомендациями
+        """
         # Затем получаем детальный анализ от LLM
         analysis_prompt = self._build_analysis_prompt(
             task=task,
@@ -101,17 +287,11 @@ class ReflectionAgent:
         analysis_response = self.llm.generate(analysis_prompt, num_predict=config.llm_tokens_analysis)
         
         # Парсим ответ и объединяем с базовыми оценками
-        reflection_result = self._parse_reflection_response(
+        return self._parse_reflection_response(
             analysis_response,
             base_scores,
             validation_results
         )
-        
-        logger.info(
-            f"✅ Рефлексия завершена. Общая оценка: {reflection_result.overall_score:.2f}"
-        )
-        
-        return reflection_result
 
     def _calculate_base_scores(
         self,
