@@ -1,21 +1,15 @@
 """Агент для генерации pytest тестов до написания кода (TDD)."""
 from typing import Optional
-from infrastructure.local_llm import create_llm_for_stage
+from agents.base import BaseAgent
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from utils.logger import get_logger
-from utils.model_checker import (
-    get_available_model,
-    get_any_available_model,
-    check_model_available
-)
 from utils.config import get_config
-from infrastructure.model_router import get_model_router
 
 
 logger = get_logger()
 
 
-class TestGeneratorAgent:
+class TestGeneratorAgent(BaseAgent):
     """Агент для генерации pytest тестов на основе плана, контекста и намерения.
     
     Следует TDD-подходу: тесты генерируются ДО кода.
@@ -80,7 +74,8 @@ class TestGeneratorAgent:
                 context=context,
                 intent_type=intent_type,
                 min_cases=min_test_cases,
-                max_cases=max_test_cases
+                max_cases=max_test_cases,
+                user_query=user_query
             )
         
         config = get_config()
@@ -102,13 +97,35 @@ class TestGeneratorAgent:
         context: str,
         intent_type: str,
         min_cases: int,
-        max_cases: int
+        max_cases: int,
+        user_query: Optional[str] = None
     ) -> str:
-        """Строит промпт для генерации тестов."""
+        """Строит промпт для генерации тестов.
         
+        Args:
+            plan: План реализации
+            context: Контекст из базы знаний
+            intent_type: Тип намерения
+            min_cases: Минимальное количество тестов
+            max_cases: Максимальное количество тестов
+            user_query: Оригинальный запрос пользователя (опционально)
+        """
         # Используем унифицированную функцию для получения описания intent
         from utils.intent_helpers import get_intent_description
         intent_desc = get_intent_description(intent_type, format="planning") or "выполнение задачи"
+        
+        # Секция с описанием задачи от пользователя
+        task_section = ""
+        if user_query:
+            task_section = f"""
+Описание задачи от пользователя:
+{user_query}
+"""
+        elif not user_query:
+            task_section = """
+Описание задачи отсутствует.
+Ориентируйся строго на план реализации и названия функций в тестах.
+"""
         
         context_section = ""
         if context.strip():
@@ -120,7 +137,7 @@ class TestGeneratorAgent:
         prompt = f"""Ты - эксперт по написанию pytest тестов. Сгенерируй тесты для следующей задачи.
 
 Тип задачи: {intent_desc}
-
+{task_section}
 План реализации:
 {plan}
 {context_section}

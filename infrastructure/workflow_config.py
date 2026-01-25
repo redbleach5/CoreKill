@@ -6,6 +6,9 @@
 from typing import Dict, Any
 from utils.config import get_config
 from utils.model_checker import TaskComplexity
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 class WorkflowConfig:
@@ -30,7 +33,8 @@ class WorkflowConfig:
         try:
             streaming_config = self._config._config_data.get("streaming", {})
             return streaming_config.get("use_streaming_agents", False)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка чтения конфигурации streaming: {e}")
             return False
     
     @property

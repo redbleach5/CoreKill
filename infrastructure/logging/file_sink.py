@@ -62,7 +62,7 @@ class FileLoggerSink(LoggerSink):
             # Но не падаем, чтобы не сломать приложение
             # Используем sys.stderr так как это инфраструктурный слой
             # и сама система логирования ещё не работает
-            sys.stderr.write(f"❌ Ошибка открытия файла логов {self.log_file}: {e}\n")
+            sys.stderr.write(f"❌ FileLoggerSink: ошибка открытия файла {self.log_file}: {e}\n")
             self._file_handle = None
     
     def _rotate_if_needed(self) -> None:
@@ -74,9 +74,9 @@ class FileLoggerSink(LoggerSink):
             current_size = self.log_file.stat().st_size
             if current_size >= self.max_size_bytes:
                 self._rotate_file()
-        except Exception:
+        except Exception as e:
             # Игнорируем ошибки ротации, чтобы не прерывать логирование
-            pass
+            sys.stderr.write(f"⚠️ FileLoggerSink: ошибка проверки размера файла: {e}\n")
     
     def _rotate_file(self) -> None:
         """Выполняет ротацию файла."""
@@ -146,8 +146,8 @@ class FileLoggerSink(LoggerSink):
             if self._file_handle is not None:
                 try:
                     self._file_handle.flush()
-                except Exception:
-                    pass
+                except Exception as e:
+                    sys.stderr.write(f"⚠️ FileLoggerSink: ошибка flush: {e}\n")
     
     def close(self) -> None:
         """Закрывает файл."""
@@ -156,7 +156,7 @@ class FileLoggerSink(LoggerSink):
                 try:
                     self._file_handle.flush()
                     self._file_handle.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    sys.stderr.write(f"⚠️ FileLoggerSink: ошибка закрытия файла: {e}\n")
                 finally:
                     self._file_handle = None

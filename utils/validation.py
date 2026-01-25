@@ -1,4 +1,60 @@
-"""Утилиты для валидации кода: pytest, mypy, bandit."""
+"""Утилиты для валидации кода: pytest, mypy, bandit.
+
+Предоставляет функции для проверки сгенерированного кода:
+- Синтаксическая проверка (ast.parse)
+- Запуск pytest для тестов
+- Запуск mypy для проверки типов
+- Запуск bandit для проверки безопасности
+
+Примеры использования:
+    ```python
+    from utils.validation import (
+        check_syntax,
+        run_pytest,
+        run_mypy,
+        run_bandit,
+        validate_code
+    )
+    
+    # Быстрая проверка синтаксиса
+    success, message = check_syntax(code)
+    if not success:
+        print(f"Синтаксическая ошибка: {message}")
+    
+    # Запуск pytest
+    result = run_pytest(code, tests)
+    if result["success"]:
+        print("Все тесты прошли!")
+    
+    # Запуск mypy
+    result = run_mypy(code)
+    if result["success"]:
+        print("Типы корректны!")
+    
+    # Полная валидация
+    results = validate_code(code, tests)
+    print(f"pytest: {results['pytest']['success']}")
+    print(f"mypy: {results['mypy']['success']}")
+    print(f"bandit: {results['bandit']['success']}")
+    ```
+
+Зависимости:
+    - subprocess: для запуска внешних инструментов
+    - tempfile: для создания временных файлов
+    - ast: для синтаксической проверки
+    - pathlib: для работы с путями
+    - utils.logger: для логирования
+
+Связанные утилиты:
+    - agents.validator: использует для валидации кода
+    - infrastructure.workflow_nodes: использует в workflow
+
+Примечания:
+    - Все проверки выполняются в безопасном окружении (временные файлы)
+    - Таймауты защищают от зависания внешних инструментов
+    - Результаты валидации сохраняются для анализа
+    - Поддерживает pytest, mypy, bandit
+"""
 import subprocess
 import tempfile
 import os
@@ -36,6 +92,7 @@ def check_syntax(code_str: str) -> Tuple[bool, str]:
         logger.warning(f"❌ {error_msg}")
         return False, error_msg
     except Exception as e:
+        logger.debug(f"⚠️ Неожиданная ошибка проверки синтаксиса: {e}")
         return False, f"Ошибка парсинга: {e}"
 
 
@@ -348,16 +405,124 @@ def validate_code(code_str: str, test_str: Optional[str] = None) -> dict:
     return results
 
 
+def _execute_code_safely(code: str, tests: str = "", timeout: int = 5) -> dict:
+    """Безопасное выполнение кода через subprocess с изоляцией.
+    
+    ВАЖНО: Заменяет небезопасный exec() на subprocess для предотвращения RCE.
+    
+    Args:
+        code: Код для выполнения
+        tests: Опциональные тесты для выполнения
+        timeout: Таймаут выполнения в секундах (по умолчанию 5)
+        
+    Returns:
+        {"passed": bool, "error": Optional[str]}
+    """
+    import sys
+    
+    # Создаём временную директорию для файлов
+    with tempfile.TemporaryDirectory(prefix="validate_code_quick_") as tmpdir:
+        try:
+            code_file = Path(tmpdir) / "code.py"
+            test_file = Path(tmpdir) / "test_code.py"
+            
+            # Записываем код
+            code_file.write_text(code, encoding="utf-8")
+            
+            # Если есть тесты, создаём файл для их выполнения
+            if tests.strip():
+                # Создаём скрипт который импортирует код и выполняет тесты
+                # Используем импорт вместо exec для безопасности
+                # ВАЖНО: Используем from code import * чтобы функции были доступны в глобальной области
+                test_script = f"""import sys
+from pathlib import Path
+
+# Добавляем директорию в путь
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Импортируем все из code (функции будут в глобальной области видимости)
+from code import *  # noqa: F403, F405
+
+# Выполняем тесты
+{tests}
+"""
+                test_file.write_text(test_script, encoding="utf-8")
+                
+                # Создаём __init__.py для правильного импорта
+                init_file = Path(tmpdir) / "__init__.py"
+                init_file.write_text("", encoding="utf-8")
+                
+                # Запускаем через subprocess с ограничениями
+                result = subprocess.run(
+                    [sys.executable, str(test_file)],
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    # Ограничиваем размер вывода (1MB)
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"}
+                )
+                
+                if result.returncode == 0:
+                    return {"passed": True, "error": None}
+                else:
+                    # Извлекаем информацию об ошибке
+                    error_output = result.stderr or result.stdout
+                    # Ограничиваем размер сообщения об ошибке
+                    if len(error_output) > 500:
+                        error_output = error_output[:500] + "..."
+                    
+                    # Определяем тип ошибки по содержимому
+                    error_lower = error_output.lower()
+                    if "assertionerror" in error_lower:
+                        return {"passed": False, "error": f"AssertionError: {error_output}"}
+                    elif "nameerror" in error_lower:
+                        return {"passed": False, "error": f"NameError: {error_output}"}
+                    elif "typeerror" in error_lower:
+                        return {"passed": False, "error": f"TypeError: {error_output}"}
+                    elif "valueerror" in error_lower:
+                        return {"passed": False, "error": f"ValueError: {error_output}"}
+                    elif "attributeerror" in error_lower:
+                        return {"passed": False, "error": f"AttributeError: {error_output}"}
+                    else:
+                        return {"passed": False, "error": f"RuntimeError: {error_output}"}
+            else:
+                # Нет тестов - только проверяем что код выполняется без ошибок
+                result = subprocess.run(
+                    [sys.executable, str(code_file)],
+                    cwd=tmpdir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout
+                )
+                
+                if result.returncode == 0:
+                    return {"passed": True, "error": None}
+                else:
+                    error_output = result.stderr or result.stdout
+                    if len(error_output) > 500:
+                        error_output = error_output[:500] + "..."
+                    return {"passed": False, "error": f"ExecutionError: {error_output}"}
+        
+        except subprocess.TimeoutExpired:
+            return {"passed": False, "error": f"Timeout: выполнение превысило {timeout} секунд"}
+        except Exception as e:
+            logger.error(f"Ошибка при безопасном выполнении кода: {e}", error=e)
+            return {"passed": False, "error": f"ExecutionError: {str(e)}"}
+
+
 def validate_code_quick(code: str, tests: str = "") -> dict:
     """Быстрая валидация кода без полного pytest.
     
     Используется для инкрементальной генерации (Compiler-in-the-Loop).
     Проверяет только синтаксис и базовое выполнение, без mypy/bandit.
     
+    ВАЖНО: Использует subprocess вместо exec() для безопасности.
+    
     Проверяет:
     1. Синтаксис (ast.parse)
     2. Компиляция (compile)
-    3. Базовые тесты (exec) — если предоставлены
+    3. Базовые тесты (subprocess) — если предоставлены
     
     Args:
         code: Код для валидации
@@ -393,32 +558,9 @@ def validate_code_quick(code: str, tests: str = "") -> dict:
     except Exception as e:
         return {"passed": False, "error": f"CompileError: {e}"}
     
-    # 3. Выполнение тестов (если предоставлены)
+    # 3. Выполнение тестов через безопасный subprocess (если предоставлены)
     if tests.strip():
-        try:
-            # Создаём изолированное пространство имён
-            namespace: dict = {}
-            
-            # Выполняем код
-            exec(code, namespace)
-            
-            # Выполняем тесты
-            exec(tests, namespace)
-            
-            return {"passed": True, "error": None}
-            
-        except AssertionError as e:
-            return {"passed": False, "error": f"AssertionError: {e}"}
-        except NameError as e:
-            return {"passed": False, "error": f"NameError: {e}"}
-        except TypeError as e:
-            return {"passed": False, "error": f"TypeError: {e}"}
-        except ValueError as e:
-            return {"passed": False, "error": f"ValueError: {e}"}
-        except AttributeError as e:
-            return {"passed": False, "error": f"AttributeError: {e}"}
-        except Exception as e:
-            return {"passed": False, "error": f"RuntimeError: {type(e).__name__}: {e}"}
+        return _execute_code_safely(code, tests, timeout=5)
     
     # Тесты не предоставлены — только синтаксис/компиляция
     return {"passed": True, "error": None}

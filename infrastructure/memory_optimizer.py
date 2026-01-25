@@ -32,7 +32,8 @@ class MemoryOptimizer:
         try:
             process = psutil.Process(os.getpid())
             return process.memory_info().rss
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка получения памяти через psutil, используем fallback: {e}")
             # Fallback если psutil не доступен
             return sys.getsizeof(gc.get_objects())
     

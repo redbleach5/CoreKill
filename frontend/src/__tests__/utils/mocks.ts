@@ -106,11 +106,11 @@ export function setupTestMocks() {
   })
 
   // Мокаем fetch
-  global.fetch = vi.fn()
+  globalThis.fetch = vi.fn() as any
 
   return {
     localStorage: localStorageMock,
-    fetch: global.fetch as ReturnType<typeof vi.fn>,
+    fetch: globalThis.fetch as ReturnType<typeof vi.fn>,
   }
 }
 

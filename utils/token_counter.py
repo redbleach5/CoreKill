@@ -1,4 +1,49 @@
-"""Утилита для приблизительного подсчёта токенов."""
+"""Утилита для приблизительного подсчёта токенов.
+
+Использует простые эвристики для оценки количества токенов в тексте.
+Полезно для мониторинга использования токенов и предупреждений о лимитах.
+
+Примеры использования:
+    ```python
+    from utils.token_counter import estimate_tokens, check_token_limit
+    
+    # Оценить количество токенов в тексте
+    text = "Привет, мир! Это тестовый текст."
+    tokens = estimate_tokens(text)
+    # Примерно {tokens} токенов
+    
+    # Проверить превышение лимитов
+    result = check_token_limit(
+        current_tokens=25000,
+        warning_threshold=30000,
+        max_tokens=50000
+    )
+    if result["warning"]:
+        # result["message"] содержит предупреждение
+    
+    # Оценить токены в workflow
+    from utils.token_counter import estimate_workflow_tokens
+    total = estimate_workflow_tokens(
+        task="Создать калькулятор",
+        plan=plan_text,
+        context=context_text,
+        tests=test_code,
+        code=generated_code,
+        prompts_used=[prompt1, prompt2]
+    )
+    ```
+
+Зависимости:
+    - typing: для типизации
+
+Связанные утилиты:
+    - infrastructure.workflow_state: может использовать для мониторинга
+
+Примечания:
+    - Использует эвристику: 1 токен ≈ 4 символа или 1.5 токена на слово
+    - Для более точного подсчёта используйте библиотеки типа tiktoken
+    - Учитывает накладные расходы на генерацию (output обычно больше промпта)
+"""
 from typing import List, Dict, Any
 
 
@@ -85,6 +130,7 @@ def check_token_limit(
         {
             "within_limit": bool,
             "warning": bool,
+            "error": bool,
             "message": str,
             "tokens": int
         }
@@ -93,15 +139,19 @@ def check_token_limit(
         "tokens": current_tokens,
         "within_limit": True,
         "warning": False,
+        "error": False,
         "message": ""
     }
     
     if current_tokens >= max_tokens:
         result["within_limit"] = False
         result["warning"] = True
+        result["error"] = True
         result["message"] = f"⚠️ Превышен максимальный лимит токенов: {current_tokens} >= {max_tokens}"
     elif current_tokens >= warning_threshold:
         result["warning"] = True
         result["message"] = f"⚠️ Приближение к лимиту токенов: {current_tokens} / {max_tokens}"
+    else:
+        result["message"] = f"✅ В пределах лимита: {current_tokens} / {max_tokens}"
     
     return result

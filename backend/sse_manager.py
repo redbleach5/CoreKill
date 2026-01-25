@@ -213,6 +213,43 @@ class SSEManager:
         return await SSEManager.send_event("complete", data)
 
     @staticmethod
+    async def stream_advisor_suggestion(
+        advice: str,
+        confidence: float,
+        priority: str,
+        model_used: str,
+        response_time_ms: int,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Генерирует событие с советом от FastAdvisor.
+        
+        Используется для отправки быстрых консультаций параллельно с основным workflow.
+        
+        Args:
+            advice: Текст совета
+            confidence: Уверенность (0.0-1.0)
+            priority: Приоритет (low, medium, high)
+            model_used: Использованная модель
+            response_time_ms: Время ответа в миллисекундах
+            metadata: Дополнительные метаданные
+            
+        Returns:
+            SSE событие
+        """
+        data: Dict[str, Any] = {
+            "advice": advice,
+            "confidence": confidence,
+            "priority": priority,
+            "model_used": model_used,
+            "response_time_ms": response_time_ms
+        }
+        
+        if metadata:
+            data["metadata"] = metadata
+        
+        return await SSEManager.send_event("advisor_suggestion", data)
+
+    @staticmethod
     async def stream_incremental_progress(
         function_name: str,
         status: str,

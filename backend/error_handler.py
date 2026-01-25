@@ -1,5 +1,6 @@
 """Утилиты для обработки ошибок и retry логики."""
 import asyncio
+import time
 import functools
 from typing import TypeVar, Callable, Any, Optional, Type
 from utils.logger import get_logger
@@ -132,7 +133,7 @@ def sync_retry(config: Optional[RetryConfig] = None) -> Callable:
                             f"⚠️ Попытка {attempt + 1}/{config.max_attempts} не удалась: {e}. "
                             f"Повторная попытка через {delay:.2f}с..."
                         )
-                        asyncio.run(asyncio.sleep(delay))
+                        time.sleep(delay)
                     else:
                         logger.error(
                             f"❌ Все {config.max_attempts} попытки исчерпаны для {func.__name__}"

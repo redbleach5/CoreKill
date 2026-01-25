@@ -1,7 +1,6 @@
 /**
  * Утилиты для работы с моделями
  */
-import { ModelsResponse } from '../types/api'
 import { api } from '../services/apiClient'
 import { extractErrorMessage } from './apiErrorHandler'
 

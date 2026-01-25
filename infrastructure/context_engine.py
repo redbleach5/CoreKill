@@ -1,16 +1,17 @@
-"""Context Engine v0.1 - Минимальная реализация для понимания структуры кода.
+"""Context Engine v0.2 - Улучшенная реализация с AST анализом.
 
 Проблема: Небольшие модели (7B) не могут обработать большие кодовые базы (50-500K токенов)
 в контексте (4-8K). Простой RAG не учитывает структуру кода и зависимости.
 
-Решение v0.1 (минимальная реализация):
-- Умное разбиение кода на чанки (учитывает функции/классы)
+Решение v0.2 (улучшенная реализация):
+- Умное разбиение кода на чанки (AST парсинг для Python, regex fallback)
 - Простая оценка релевантности (BM25 + ключевые слова)
 - Сборка оптимального контекста в пределах лимита токенов
 - Кэширование индекса проекта
+- Использование AST для более точного разбиения (опционально)
 
 Что НЕ включено (для упрощения):
-- AST парсинг и граф зависимостей (слишком сложно для v0.1)
+- Граф зависимостей (может быть добавлен в будущем)
 - Иерархические сводки через LLM (слишком дорого)
 - Сложные стратегии композиции (GREEDY достаточно)
 """
@@ -19,9 +20,12 @@ import hashlib
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Any
 from collections import Counter
 import math
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 @dataclass
@@ -54,22 +58,40 @@ class ScoredChunk:
 
 
 class CodeChunker:
-    """Умное разбиение кода на чанки с учётом структуры."""
+    """Умное разбиение кода на чанки с учётом структуры.
     
-    # Регулярные выражения для поиска структурных элементов
+    Использует AST парсинг для Python файлов (более точное разбиение),
+    fallback на regex для других случаев или при ошибках AST.
+    """
+    
+    # Регулярные выражения для поиска структурных элементов (fallback)
     CLASS_PATTERN = re.compile(r'^class\s+(\w+)(?:\([^)]+\))?:', re.MULTILINE)
     FUNCTION_PATTERN = re.compile(r'^def\s+(\w+)\s*\([^)]*\)\s*[-:>]?', re.MULTILINE)
     
-    def __init__(self, max_chunk_tokens: int = 500) -> None:
+    def __init__(self, max_chunk_tokens: int = 500, use_ast: bool = True) -> None:
         """Инициализация чанкера.
         
         Args:
             max_chunk_tokens: Максимальный размер чанка в токенах
+            use_ast: Использовать AST парсинг для Python файлов (более точное)
         """
         self.max_chunk_tokens = max_chunk_tokens
+        self.use_ast = use_ast
+        self._ast_analyzer: Optional[Any] = None
+        
+        if self.use_ast:
+            try:
+                from infrastructure.ast_analyzer import ASTAnalyzer
+                self._ast_analyzer = ASTAnalyzer()
+            except ImportError:
+                logger.warning("ASTAnalyzer не доступен, используем regex fallback")
+                self.use_ast = False
     
     def chunk_file(self, file_path: str, content: str) -> List[CodeChunk]:
         """Разбивает файл на структурированные чанки.
+        
+        Использует AST парсинг для Python файлов (если включено),
+        fallback на regex для других случаев.
         
         Args:
             file_path: Путь к файлу
@@ -81,6 +103,102 @@ class CodeChunker:
         if not content.strip():
             return []
         
+        # Пытаемся использовать AST для Python файлов
+        if self.use_ast and self._ast_analyzer and file_path.endswith('.py'):
+            try:
+                chunks = self._chunk_file_with_ast(file_path, content)
+                if chunks:
+                    return chunks
+            except Exception as e:
+                logger.debug(f"AST парсинг не удался для {file_path}, используем regex: {e}")
+        
+        # Fallback на regex
+        return self._chunk_file_with_regex(file_path, content)
+    
+    def _chunk_file_with_ast(self, file_path: str, content: str) -> List[CodeChunk]:
+        """Разбивает файл используя AST парсинг (более точное)."""
+        if not self._ast_analyzer:
+            return []
+        
+        analysis = self._ast_analyzer.analyze_code(content, file_path)
+        if not analysis:
+            return []
+        
+        chunks: List[CodeChunk] = []
+        lines = content.split('\n')
+        
+        # Обрабатываем классы
+        for class_info in analysis.classes:
+            start_line = class_info.lineno
+            end_line = class_info.end_lineno or start_line
+            
+            # Извлекаем содержимое класса
+            chunk_content = '\n'.join(lines[start_line - 1:end_line])
+            
+            # Извлекаем сигнатуру и docstring
+            signature = f"class {class_info.name}({', '.join(class_info.bases)})" if class_info.bases else f"class {class_info.name}"
+            docstring = class_info.docstring or ""
+            
+            chunk = CodeChunk(
+                id=f"{file_path}:{start_line}-{end_line}",
+                file_path=file_path,
+                start_line=start_line,
+                end_line=end_line,
+                content=chunk_content,
+                chunk_type="class",
+                name=class_info.name,
+                signature=signature,
+                docstring=docstring
+            )
+            
+            if chunk.estimated_tokens() > self.max_chunk_tokens:
+                sub_chunks = self._split_large_chunk(chunk)
+                chunks.extend(sub_chunks)
+            else:
+                chunks.append(chunk)
+        
+        # Обрабатываем функции на уровне модуля (не методы классов)
+        # В AST анализаторе analysis.functions содержит только функции на уровне модуля
+        # Методы классов уже включены в чанки классов через class_info.methods
+        for func_info in analysis.functions:
+            start_line = func_info.lineno
+            end_line = func_info.end_lineno or start_line
+            
+            chunk_content = '\n'.join(lines[start_line - 1:end_line])
+            
+            # Строим сигнатуру
+            args_str = ', '.join(func_info.args)
+            signature = f"def {func_info.name}({args_str})"
+            if func_info.returns:
+                signature += f" -> {func_info.returns}"
+            docstring = func_info.docstring or ""
+            
+            chunk = CodeChunk(
+                id=f"{file_path}:{start_line}-{end_line}",
+                file_path=file_path,
+                start_line=start_line,
+                end_line=end_line,
+                content=chunk_content,
+                chunk_type="function",
+                name=func_info.name,
+                signature=signature,
+                docstring=docstring
+            )
+            
+            if chunk.estimated_tokens() > self.max_chunk_tokens:
+                sub_chunks = self._split_large_chunk(chunk)
+                chunks.extend(sub_chunks)
+            else:
+                chunks.append(chunk)
+        
+        # Если нет классов/функций, создаём модульный чанк
+        if not chunks:
+            return [self._create_module_chunk(file_path, content, 1, len(lines))]
+        
+        return chunks
+    
+    def _chunk_file_with_regex(self, file_path: str, content: str) -> List[CodeChunk]:
+        """Разбивает файл используя regex (fallback метод)."""
         chunks: List[CodeChunk] = []
         lines = content.split('\n')
         
@@ -408,18 +526,22 @@ class ContextComposer:
         """
         self.max_tokens = max_tokens
     
-    def compose(self, scored_chunks: List[ScoredChunk], query: str = "") -> str:
+    def compose(self, scored_chunks: List[ScoredChunk], query: str = "", max_tokens_override: Optional[int] = None) -> str:
         """Собирает контекст из оцененных чанков.
         
         Args:
             scored_chunks: Список оцененных чанков (уже отсортированных)
             query: Поисковый запрос (для контекста)
+            max_tokens_override: Опциональное ограничение токенов (если None, используется self.max_tokens)
             
         Returns:
             Собранный контекст в пределах лимита токенов
         """
         if not scored_chunks:
             return ""
+        
+        # Используем переданное ограничение или значение по умолчанию
+        max_tokens_limit = max_tokens_override if max_tokens_override is not None else self.max_tokens
         
         sections: List[str] = []
         total_tokens = 0
@@ -429,14 +551,14 @@ class ContextComposer:
             chunk_tokens = chunk.estimated_tokens()
             
             # Проверяем, поместится ли чанк
-            if total_tokens + chunk_tokens > self.max_tokens:
+            if total_tokens + chunk_tokens > max_tokens_limit:
                 # Если чанк слишком большой, можем взять только его часть
                 # или пропустить, если уже есть достаточно контекста
                 
                 # Улучшенная логика: если набрали меньше 70% лимита, пробуем взять частично
                 # Это даёт больше шансов включить важные чанки
-                if total_tokens < self.max_tokens * 0.7:
-                    remaining_tokens = self.max_tokens - total_tokens
+                if total_tokens < max_tokens_limit * 0.7:
+                    remaining_tokens = max_tokens_limit - total_tokens
                     # Минимум 150 токенов для частичного чанка (чтобы было достаточно контекста)
                     if remaining_tokens > 150:
                         partial_content = self._truncate_chunk(chunk, remaining_tokens)
@@ -570,7 +692,7 @@ class ContextEngine:
             max_chunk_tokens: Максимальный размер чанка
             cache_dir: Директория для кэширования индексов
         """
-        self.chunker = CodeChunker(max_chunk_tokens=max_chunk_tokens)
+        self.chunker = CodeChunker(max_chunk_tokens=max_chunk_tokens, use_ast=True)
         self.scorer = RelevanceScorer()
         self.composer = ContextComposer(max_tokens=max_context_tokens)
         self.cache_dir = cache_dir or Path(".context_cache")
@@ -618,6 +740,7 @@ class ContextEngine:
                     if chunks:
                         index[str(file_path.relative_to(project_path_obj))] = chunks
                 except Exception as e:
+                    logger.debug(f"⚠️ Ошибка индексации файла {file_path}: {e}")
                     # Игнорируем ошибки чтения файлов
                     continue
         
@@ -631,7 +754,8 @@ class ContextEngine:
         self,
         query: str,
         project_path: str,
-        extensions: Optional[List[str]] = None
+        extensions: Optional[List[str]] = None,
+        max_context_tokens: Optional[int] = None
     ) -> str:
         """Получает релевантный контекст для запроса из проекта.
         
@@ -639,6 +763,7 @@ class ContextEngine:
             query: Поисковый запрос
             project_path: Путь к проекту
             extensions: Расширения файлов для поиска
+            max_context_tokens: Максимальное количество токенов (опционально, по умолчанию используется self.composer.max_tokens)
             
         Returns:
             Собранный контекст в пределах лимита токенов
@@ -657,8 +782,8 @@ class ContextEngine:
         # Оцениваем релевантность
         scored_chunks = self.scorer.score_chunks(query, all_chunks)
         
-        # Собираем контекст
-        context = self.composer.compose(scored_chunks, query)
+        # Собираем контекст (с опциональным ограничением токенов)
+        context = self.composer.compose(scored_chunks, query, max_tokens_override=max_context_tokens)
         
         return context
     
@@ -677,7 +802,8 @@ class ContextEngine:
             # Кэш содержит только метаданные, нужно будет перестроить
             # Для v0.1 просто не используем кэш файлов, только память
             return self._index_cache.get(cache_key)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка загрузки кэша индекса: {e}")
             return None
     
     def _save_cache(self, cache_key: str, index: Dict[str, List[CodeChunk]]) -> None:

@@ -134,7 +134,15 @@ class SmartModelRouter(ModelRouter):
     - Приоритет reasoning моделей (DeepSeek-R1, QwQ) для complex задач
     - Приоритет качества для сложных задач
     - Приоритет скорости для простых задач
+    - Черный список проблемных моделей
     """
+    
+    # Черный список моделей, которые постоянно падают или нестабильны
+    # Эти модели будут исключены из выбора, особенно для SIMPLE задач
+    PROBLEMATIC_MODELS = {
+        "stable-code:latest",  # Падает из-за нехватки памяти на macOS
+        "stable-code",  # Любая версия stable-code
+    }
     
     def __init__(self, enable_roster: bool = False, prefer_reasoning: bool = True) -> None:
         """Инициализация умного роутера.
@@ -234,9 +242,19 @@ class SmartModelRouter(ModelRouter):
         """
         logger.warning(f"⚠️ Модель {failed_model} недоступна, ищу запасную...")
         
+        # Добавляем failed модель в черный список для этой сессии
+        # (чтобы не выбирать её снова)
+        if failed_model not in self.PROBLEMATIC_MODELS:
+            logger.info(f"📝 Добавляю {failed_model} в черный список на эту сессию")
+        
         # Обновляем список моделей
         self._models = scan_available_models()
-        available_models = self._filter_by_hardware_limits(self._models)
+        
+        # Сначала исключаем проблемные модели (логическая фильтрация)
+        available_models = self._filter_problematic_models(self._models)
+        
+        # Затем фильтруем по hardware лимитам (используем существующий функционал определения ресурсов)
+        available_models = self._filter_by_hardware_limits(available_models)
         
         # Исключаем failed модель
         available_models = {
@@ -250,6 +268,25 @@ class SmartModelRouter(ModelRouter):
         
         # Если известна сложность, выбираем по ней
         if complexity:
+            # Для SIMPLE задач используем легкие модели
+            if complexity == TaskComplexity.SIMPLE:
+                from utils.model_checker import get_light_model
+                light_model = get_light_model()
+                if light_model and light_model != failed_model and light_model not in self.PROBLEMATIC_MODELS:
+                    light_model_info = available_models.get(light_model)
+                    if light_model_info:
+                        return ModelSelection(
+                            model=light_model,
+                            confidence=0.85,
+                            reason=f"Запасная легкая модель для SIMPLE задачи (основная {failed_model} недоступна)",
+                            metadata={
+                                "quality": light_model_info.estimated_quality,
+                                "tier": light_model_info.tier,
+                                "parameter_size": light_model_info.parameter_size
+                            }
+                        )
+            
+            # Для других сложностей используем стандартный выбор
             return self.select_model_for_complexity(
                 complexity=complexity,
                 task_type=task_type,
@@ -258,22 +295,28 @@ class SmartModelRouter(ModelRouter):
         
         # Иначе выбираем по типу задачи
         if task_type in ["intent", "planning"]:
+            # ИСПРАВЛЕНИЕ: Импортируем get_light_model внутри функции, чтобы патч из теста работал
+            from utils.model_checker import get_light_model
             model = get_light_model()
-            if model and model != failed_model:
+            if model and model != failed_model and model not in self.PROBLEMATIC_MODELS:
                 return ModelSelection(
                     model=model,
                     confidence=0.8,
                     reason=f"Запасная лёгкая модель (основная {failed_model} недоступна)"
                 )
         
-        # Fallback: любая доступная модель
-        fallback_model = get_any_available_model()
-        if fallback_model and fallback_model != failed_model:
-            return ModelSelection(
-                model=fallback_model,
-                confidence=0.7,
-                reason=f"Запасная модель (основная {failed_model} недоступна)"
-            )
+        # Fallback: любая доступная модель (исключая проблемные)
+        for model_name, model_info in available_models.items():
+            if model_name != failed_model and model_name not in self.PROBLEMATIC_MODELS:
+                return ModelSelection(
+                    model=model_name,
+                    confidence=0.7,
+                    reason=f"Запасная модель (основная {failed_model} недоступна)",
+                    metadata={
+                        "quality": model_info.estimated_quality,
+                        "tier": model_info.tier
+                    }
+                )
         
         return None
     
@@ -473,8 +516,11 @@ class SmartModelRouter(ModelRouter):
         if not self._models:
             raise RuntimeError("Нет доступных моделей Ollama")
         
-        # Фильтруем модели по hardware лимитам
-        available_models = self._filter_by_hardware_limits(self._models)
+        # Сначала исключаем проблемные модели (логическая фильтрация)
+        available_models = self._filter_problematic_models(self._models)
+        
+        # Затем фильтруем по hardware лимитам (используем существующий функционал определения ресурсов)
+        available_models = self._filter_by_hardware_limits(available_models)
         
         if not available_models:
             logger.warning("⚠️ Все модели отфильтрованы по hardware лимитам, используем все доступные")
@@ -528,18 +574,69 @@ class SmartModelRouter(ModelRouter):
             quality = best_model_info.estimated_quality if best_model_info else 0.5
             tier = best_model_info.tier if best_model_info else "unknown"
             is_reasoning = best_model_info.is_reasoning if best_model_info else False
+            min_quality = self.MIN_QUALITY_THRESHOLDS[complexity]
             
-            logger.info(
-                f"🤖 Выбрана модель {best_model} для {complexity.value} задачи "
-                f"(качество: {quality:.2f}, tier: {tier}"
-                f"{', reasoning' if is_reasoning else ''})"
-            )
+            # Проверяем доступность модели перед выбором
+            from utils.model_checker import check_model_available
+            if not check_model_available(best_model):
+                logger.warning(
+                    f"⚠️ Выбранная модель {best_model} недоступна, ищу альтернативу..."
+                )
+                # Исключаем недоступную модель и выбираем следующую
+                available_models_excluding = {
+                    name: info for name, info in available_models.items()
+                    if name != best_model
+                }
+                if available_models_excluding:
+                    best_model = self._select_best_from_filtered(
+                        available_models_excluding,
+                        complexity=complexity,
+                        prefer_coder=(task_type in ["coding", "testing", "debug"])
+                    )
+                    if best_model:
+                        best_model_info = available_models_excluding.get(best_model)
+                        quality = best_model_info.estimated_quality if best_model_info else 0.5
+                        tier = best_model_info.tier if best_model_info else "unknown"
+                        is_reasoning = best_model_info.is_reasoning if best_model_info else False
+                        logger.info(f"🔄 Выбрана альтернативная модель {best_model}")
+                    else:
+                        logger.error(f"❌ Нет доступных альтернативных моделей")
+                        return ModelSelection(
+                            model=best_model,
+                            confidence=0.3,
+                            reason="Модель недоступна, альтернатив нет",
+                            metadata={"quality": quality, "complexity": complexity.value, "tier": tier}
+                        )
+                else:
+                    logger.error(f"❌ Нет доступных моделей после исключения {best_model}")
+            
+            # Проверяем, достаточно ли качество модели для задачи
+            model_too_small = quality < min_quality
+            
+            if model_too_small:
+                logger.warning(
+                    f"⚠️ ВНИМАНИЕ: Для {complexity.value} задачи требуется модель с качеством >= {min_quality:.2f}, "
+                    f"но выбранная модель {best_model} имеет качество только {quality:.2f}. "
+                    f"Результат может быть неудовлетворительным. Рекомендуется использовать более мощную модель."
+                )
+            else:
+                logger.info(
+                    f"🤖 Выбрана модель {best_model} для {complexity.value} задачи "
+                    f"(качество: {quality:.2f}, tier: {tier}"
+                    f"{', reasoning' if is_reasoning else ''})"
+                )
             
             return ModelSelection(
                 model=best_model,
-                confidence=0.9,
-                reason=f"Оптимальная модель для {complexity.value} задачи",
-                metadata={"quality": quality, "complexity": complexity.value, "tier": tier},
+                confidence=0.9 if not model_too_small else 0.6,
+                reason=f"Оптимальная модель для {complexity.value} задачи" if not model_too_small else f"Модель {best_model} может быть недостаточной для {complexity.value} задачи",
+                metadata={
+                    "quality": quality, 
+                    "complexity": complexity.value, 
+                    "tier": tier,
+                    "model_too_small": model_too_small,
+                    "min_quality_required": min_quality
+                },
                 is_reasoning=is_reasoning
             )
         
@@ -597,16 +694,43 @@ class SmartModelRouter(ModelRouter):
             is_reasoning=True
         )
     
+    def _filter_problematic_models(
+        self,
+        models: Dict[str, ModelInfo]
+    ) -> Dict[str, ModelInfo]:
+        """Фильтрует проблемные модели из черного списка.
+        
+        Отдельный метод для логической фильтрации (не hardware лимиты).
+        Используется перед hardware фильтрацией для исключения известных проблемных моделей.
+        
+        Args:
+            models: Словарь моделей
+            
+        Returns:
+            Отфильтрованный словарь моделей без проблемных
+        """
+        filtered = {}
+        for name, info in models.items():
+            # Исключаем проблемные модели из черного списка
+            if any(problematic in name.lower() for problematic in self.PROBLEMATIC_MODELS):
+                logger.debug(f"⏭️ Модель {name} пропущена: в черном списке проблемных моделей")
+                continue
+            filtered[name] = info
+        return filtered
+    
     def _filter_by_hardware_limits(
         self, 
         models: Dict[str, ModelInfo]
     ) -> Dict[str, ModelInfo]:
         """Фильтрует модели по hardware лимитам из конфига.
         
-        Улучшенная версия с динамической проверкой доступной памяти.
+        Использует существующий функционал определения ресурсов ПК через psutil:
+        - Динамическая проверка доступной памяти (psutil.virtual_memory)
+        - Учет конфигурационных лимитов (max_model_vram_gb, allow_heavy_models, allow_ultra_models)
+        - Резервирование памяти для системы
         
         Args:
-            models: Словарь моделей
+            models: Словарь моделей (уже отфильтрованный от проблемных)
             
         Returns:
             Отфильтрованный словарь моделей
@@ -615,7 +739,7 @@ class SmartModelRouter(ModelRouter):
         allow_heavy = self.config.allow_heavy_models
         allow_ultra = self.config.allow_ultra_models
         
-        # Динамическая проверка доступной памяти
+        # Динамическая проверка доступной памяти (используем существующий функционал)
         available_memory_gb = None
         try:
             import psutil
@@ -690,12 +814,35 @@ class SmartModelRouter(ModelRouter):
         candidates = list(models.values())
         min_quality = self.MIN_QUALITY_THRESHOLDS[complexity]
         
+        # Для SIMPLE задач исключаем проблемные модели
+        if complexity == TaskComplexity.SIMPLE:
+            candidates = [
+                m for m in candidates 
+                if not any(problematic in m.name.lower() for problematic in self.PROBLEMATIC_MODELS)
+            ]
+            if not candidates:
+                # Если все модели в черном списке, используем все доступные
+                logger.warning(
+                    "⚠️ Все модели для SIMPLE задач в черном списке, используем все доступные"
+                )
+                candidates = list(models.values())
+        
         # Фильтруем по минимальному качеству
         suitable = [m for m in candidates if m.estimated_quality >= min_quality]
         
+        # Проверяем, есть ли подходящие модели
+        model_too_small = False
         if not suitable:
-            # Берём лучшую из доступных
+            # Берём лучшую из доступных, но предупредим пользователя
             suitable = candidates
+            model_too_small = True
+            best_available = max(candidates, key=lambda m: m.estimated_quality) if candidates else None
+            if best_available:
+                logger.warning(
+                    f"⚠️ ВНИМАНИЕ: Для {complexity.value} задачи требуется модель с качеством >= {min_quality:.2f}, "
+                    f"но лучшая доступная модель {best_available.name} имеет качество только {best_available.estimated_quality:.2f}. "
+                    f"Результат может быть неудовлетворительным."
+                )
         
         # Для coder задач предпочитаем coder модели
         if prefer_coder:
@@ -703,11 +850,30 @@ class SmartModelRouter(ModelRouter):
             if coder_models:
                 suitable = coder_models
         
-        # Для SIMPLE выбираем минимально подходящую (быстрее)
-        # Для MEDIUM/COMPLEX выбираем лучшую
+        # Для SIMPLE задач выбираем самую легкую рабочую модель
+        # Приоритет: легкие модели (1.5B-4B), которые точно работают
         if complexity == TaskComplexity.SIMPLE:
-            best = min(suitable, key=lambda m: m.estimated_quality)
+            # Сначала пробуем найти легкие модели (1.5B-4B)
+            light_models = [
+                m for m in suitable 
+                if any(size in m.parameter_size.lower() for size in ['1.5b', '2b', '3b', '4b', '1b'])
+            ]
+            if light_models:
+                # Выбираем самую легкую из легких
+                best = min(light_models, key=lambda m: m.estimated_quality)
+                logger.info(
+                    f"✅ Для SIMPLE задачи выбрана легкая модель {best.name} "
+                    f"(размер: {best.parameter_size}, качество: {best.estimated_quality:.2f})"
+                )
+            else:
+                # Если легких нет, выбираем минимально подходящую
+                best = min(suitable, key=lambda m: m.estimated_quality)
+                logger.info(
+                    f"✅ Для SIMPLE задачи выбрана модель {best.name} "
+                    f"(качество: {best.estimated_quality:.2f})"
+                )
         else:
+            # Для MEDIUM/COMPLEX выбираем лучшую
             best = max(suitable, key=lambda m: m.estimated_quality)
         
         return best.name

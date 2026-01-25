@@ -3,6 +3,93 @@ from typing import Optional
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 
 
+# === Константы для валидации ===
+
+# Максимальная длина промпта (архитектурный лимит)
+MAX_PROMPT_LENGTH = 50000
+
+# Подозрительные паттерны для prompt injection (архитектурная защита)
+SUSPICIOUS_PATTERNS = [
+    'ignore previous',
+    'ignore all previous',
+    'disregard',
+    'disregard the above',
+    'disregard all previous',
+    'new instructions',
+    'new instruction',
+    'system:',
+    'system override',
+    'override',
+    'forget all',
+    'forget previous',
+    'you are now',
+    'you must now',
+    'act as if',
+    'pretend to be',
+]
+
+# Опасные паттерны в коде (базовая защита от code injection)
+DANGEROUS_CODE_PATTERNS = [
+    "eval(",
+    "exec(",
+    "__import__",
+    "os.system",
+    "subprocess",
+]
+
+
+# === Общие функции валидации ===
+
+def validate_prompt(prompt: str) -> str:
+    """Валидирует промпт на архитектурном уровне.
+    
+    Выполняет:
+    - Проверку длины
+    - Проверку на опасные паттерны в коде
+    - Проверку на prompt injection паттерны
+    
+    Args:
+        prompt: Текст промпта/задачи
+        
+    Returns:
+        Валидированный текст (stripped)
+        
+    Raises:
+        ValueError: Если промпт не валиден
+    """
+    if not prompt or not prompt.strip():
+        raise ValueError("Промпт не может быть пустым")
+    
+    prompt_stripped = prompt.strip()
+    
+    # Проверка длины (архитектурный лимит)
+    if len(prompt_stripped) > MAX_PROMPT_LENGTH:
+        raise ValueError(
+            f"Промпт слишком длинный: {len(prompt_stripped)} символов "
+            f"(максимум {MAX_PROMPT_LENGTH})"
+        )
+    
+    prompt_lower = prompt_stripped.lower()
+    
+    # Проверка на опасные паттерны в коде (базовая защита от code injection)
+    for pattern in DANGEROUS_CODE_PATTERNS:
+        if pattern in prompt_lower:
+            raise ValueError(
+                f"Промпт содержит опасный паттерн кода: '{pattern}'. "
+                "Пожалуйста, опишите задачу на естественном языке."
+            )
+    
+    # Проверка на prompt injection паттерны (архитектурная защита)
+    for pattern in SUSPICIOUS_PATTERNS:
+        if pattern in prompt_lower:
+            raise ValueError(
+                f"Промпт содержит подозрительный паттерн: '{pattern}'. "
+                "Пожалуйста, опишите задачу более ясно."
+            )
+    
+    return prompt_stripped
+
+
 class TaskRequestV2(BaseModel):
     """Валидированный запрос на выполнение задачи."""
     
@@ -11,7 +98,7 @@ class TaskRequestV2(BaseModel):
     task: str = Field(
         ...,
         min_length=1,
-        max_length=10000,
+        max_length=MAX_PROMPT_LENGTH,
         description="Текст задачи на русском или английском"
     )
     model: str = Field(
@@ -41,6 +128,8 @@ class TaskRequestV2(BaseModel):
     def validate_task(cls, v: str) -> str:
         """Валидирует текст задачи.
         
+        Использует общую функцию validate_prompt() для архитектурной валидации.
+        
         Args:
             v: Текст задачи
             
@@ -50,24 +139,7 @@ class TaskRequestV2(BaseModel):
         Raises:
             ValueError: Если текст не валиден
         """
-        if not v or not v.strip():
-            raise ValueError("Задача не может быть пустой")
-        
-        # Проверяем на опасные паттерны (базовая защита от injection)
-        dangerous_patterns = [
-            "eval(",
-            "exec(",
-            "__import__",
-            "os.system",
-            "subprocess",
-        ]
-        
-        task_lower = v.lower()
-        for pattern in dangerous_patterns:
-            if pattern in task_lower:
-                raise ValueError(f"Задача содержит опасный паттерн: {pattern}")
-        
-        return v.strip()
+        return validate_prompt(v)
     
     @field_validator('model')
     @classmethod

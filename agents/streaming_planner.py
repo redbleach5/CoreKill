@@ -56,11 +56,6 @@ class StreamingPlannerAgent(BaseAgent):
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Генерация плана прервана")
     
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
-    
     async def create_plan_stream(
         self,
         task: str,
@@ -96,14 +91,23 @@ class StreamingPlannerAgent(BaseAgent):
         
         # Быстрый план ТОЛЬКО для очень простых задач (fix, rename, typo)
         # Игры, проекты, приложения — всегда полный план
+        # НО: простые запросы типа "напиши функцию X" тоже должны быть простыми
         complex_keywords = [
-            'файл', 'класс', 'функция', 'модуль', 'test', 'file', 'class', 'function',
-            'игра', 'game', 'приложение', 'app', 'проект', 'project', 'создай', 'напиши',
-            'write', 'create', 'build', 'implement', 'сервис', 'service', 'api', 'бот', 'bot'
+            'игра', 'game', 'приложение', 'app', 'проект', 'project', 
+            'сервис', 'service', 'api', 'бот', 'bot', 'framework', 'библиотека', 'library'
         ]
-        is_complex = any(keyword in task.lower() for keyword in complex_keywords)
+        # Простые ключевые слова, которые не делают задачу сложной
+        simple_patterns = [
+            'напиши функцию', 'write a function', 'создай функцию', 'create a function',
+            'напиши класс', 'write a class', 'создай класс', 'create a class'
+        ]
         
-        if len(task.strip()) < 15 and not is_complex:
+        # Проверяем сначала простые паттерны
+        is_simple_request = any(pattern in task.lower() for pattern in simple_patterns)
+        is_complex = any(keyword in task.lower() for keyword in complex_keywords) and not is_simple_request
+        
+        # Для простых запросов используем упрощенный план
+        if (len(task.strip()) < 50 or is_simple_request) and not is_complex:
             simple_plan = f"""ОСНОВНОЙ ПЛАН:
 1. Проанализировать простую задачу: {task}
 2. Создать минимальную реализацию
@@ -116,10 +120,56 @@ class StreamingPlannerAgent(BaseAgent):
         
         logger.info(f"📋 Создаю полный план (задача сложная: {len(task)} симв., complex={is_complex})")
         
+        # Отправляем thinking о начале планирования
+        from datetime import datetime
+        from infrastructure.reasoning_stream import ThinkingChunk, ThinkingStatus
+        start_time = datetime.now()
+        
+        yield ("thinking", await self.reasoning_manager.create_thinking_event(
+            ThinkingChunk(
+                content=f"Анализирую задачу: '{task[:100]}...' (тип: {intent_type}). Начинаю планирование...",
+                status=ThinkingStatus.IN_PROGRESS,
+                stage=stage,
+                elapsed_ms=0,
+                total_chars=0
+            )
+        ))
+        
         # Получаем рекомендации из памяти
         memory_recommendations = ""
         if self.memory:
+            yield ("thinking", await self.reasoning_manager.create_thinking_event(
+                ThinkingChunk(
+                    content="Проверяю память прошлых задач для рекомендаций...",
+                    status=ThinkingStatus.IN_PROGRESS,
+                    stage=stage,
+                    elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                    total_chars=0
+                )
+            ))
             memory_recommendations = self.memory.get_recommendations(task, intent_type)
+            if memory_recommendations:
+                yield ("thinking", await self.reasoning_manager.create_thinking_event(
+                    ThinkingChunk(
+                        content=f"Найдены рекомендации из памяти ({len(memory_recommendations)} символов). Учитываю их при планировании...",
+                        status=ThinkingStatus.IN_PROGRESS,
+                        stage=stage,
+                        elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                        total_chars=0
+                    )
+                ))
+        
+        # Анализируем контекст
+        if context:
+            yield ("thinking", await self.reasoning_manager.create_thinking_event(
+                ThinkingChunk(
+                    content=f"Анализирую контекст проекта ({len(context)} символов). Учитываю существующую структуру...",
+                    status=ThinkingStatus.IN_PROGRESS,
+                    stage=stage,
+                    elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                    total_chars=0
+                )
+            ))
         
         prompt = self._build_planning_prompt(
             task=task,
@@ -128,6 +178,17 @@ class StreamingPlannerAgent(BaseAgent):
             memory_recommendations=memory_recommendations,
             alternatives_count=alternatives_count
         )
+        
+        # Отправляем thinking о начале генерации плана
+        yield ("thinking", await self.reasoning_manager.create_thinking_event(
+            ThinkingChunk(
+                content="Создаю детальный план реализации с учётом всех требований и контекста...",
+                status=ThinkingStatus.IN_PROGRESS,
+                stage=stage,
+                elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                total_chars=0
+            )
+        ))
         
         config = get_config()
         plan_buffer = ""
@@ -146,6 +207,9 @@ class StreamingPlannerAgent(BaseAgent):
                 
                 if event_type == "thinking":
                     yield ("thinking", data)
+                elif event_type == "progress":
+                    # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                    yield ("progress", data)
                 elif event_type == "content":
                     plan_buffer += data
                     yield ("plan_chunk", data)
@@ -172,25 +236,6 @@ class StreamingPlannerAgent(BaseAgent):
         except Exception as e:
             logger.error(f"❌ Ошибка стриминга плана: {e}", error=e)
             yield ("done", "")
-    
-    # === Синхронный метод для обратной совместимости ===
-    
-    def create_plan(
-        self,
-        task: str,
-        intent_type: str,
-        context: str = "",
-        alternatives_count: int = 2
-    ) -> str:
-        """Синхронное создание плана (для обратной совместимости)."""
-        from agents.planner import PlannerAgent
-        
-        sync_agent = PlannerAgent(
-            model=self.model,
-            temperature=self.temperature,
-            memory_agent=self.memory
-        )
-        return sync_agent.create_plan(task, intent_type, context, alternatives_count)
     
     # === Приватные методы ===
     

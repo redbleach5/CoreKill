@@ -44,6 +44,53 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "unit: юнит-тесты"
     )
+    config.addinivalue_line(
+        "markers", "e2e: end-to-end тесты"
+    )
+    config.addinivalue_line(
+        "markers", "smoke: smoke тесты"
+    )
+    config.addinivalue_line(
+        "markers", "critical: тесты критических ситуаций"
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Автоматическая маркировка тестов по расположению."""
+    for item in items:
+        # Автоматическая маркировка по пути
+        try:
+            path = str(item.fspath)
+        except AttributeError:
+            # Для некоторых версий pytest
+            path = str(item.path)
+        
+        # Уровни тестирования
+        if "test_smoke" in path:
+            item.add_marker(pytest.mark.smoke)
+        elif "test_critical_failures" in path:
+            item.add_marker(pytest.mark.critical)
+        elif "integration" in path.lower() or "e2e" in path.lower():
+            item.add_marker(pytest.mark.integration)
+        else:
+            # По умолчанию - unit тесты
+            item.add_marker(pytest.mark.unit)
+        
+        # Категории модулей
+        if "test_backend" in path:
+            item.add_marker(pytest.mark.backend)
+        elif "test_infrastructure" in path:
+            item.add_marker(pytest.mark.infrastructure)
+        elif "test_agents" in path or "test_coder" in path or "test_planner" in path or "test_reflection" in path or "test_debugger" in path:
+            item.add_marker(pytest.mark.agents)
+        elif "test_utils" in path:
+            item.add_marker(pytest.mark.utils)
+        
+        # Скорость тестов (приблизительно)
+        if "smoke" in path or "critical" in path:
+            item.add_marker(pytest.mark.slow)
+        else:
+            item.add_marker(pytest.mark.fast)
 
 
 @pytest.fixture
@@ -125,3 +172,31 @@ def mock_chromadb():
         mock_instance.get_or_create_collection.return_value = mock_collection
         mock_client.return_value = mock_instance
         yield mock_instance
+
+
+@pytest.fixture(autouse=True)
+def cleanup_event_store():
+    """Автоматическая очистка EventStore перед каждым тестом."""
+    from infrastructure.event_store import EventStore
+    
+    # Очищаем перед тестом
+    EventStore._events.clear()
+    EventStore._instances.clear()
+    EventStore._event_queues.clear()
+    
+    # Отменяем периодическую очистку если она запущена
+    if EventStore._cleanup_task and not EventStore._cleanup_task.done():
+        EventStore._cleanup_task.cancel()
+        EventStore._cleanup_task = None
+    
+    yield
+    
+    # Очищаем после теста
+    EventStore._events.clear()
+    EventStore._instances.clear()
+    EventStore._event_queues.clear()
+    
+    # Отменяем периодическую очистку если она запущена
+    if EventStore._cleanup_task and not EventStore._cleanup_task.done():
+        EventStore._cleanup_task.cancel()
+        EventStore._cleanup_task = None

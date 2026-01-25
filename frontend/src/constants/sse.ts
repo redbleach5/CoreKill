@@ -20,6 +20,8 @@ export const SSE_EVENTS = {
   TOOL_CALL_START: 'tool_call_start',   // Tool/LLM call started
   TOOL_CALL_END: 'tool_call_end',       // Tool/LLM call ended
   METRICS_UPDATE: 'metrics_update',     // Real-time metrics
+  INCREMENTAL_PROGRESS: 'incremental_progress', // Compiler-in-the-Loop progress
+  ADVISOR_SUGGESTION: 'advisor_suggestion',   // FastAdvisor suggestions
   ERROR: 'error',
   WARNING: 'warning',
   COMPLETE: 'complete'

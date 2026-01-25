@@ -2,15 +2,16 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { SSE_EVENTS, AGENT_STAGES } from '../constants/sse'
 import { handleSSEError } from '../utils/apiErrorHandler'
 import { api } from '../services/apiClient'
-import { ValidationResult, ToolValidationResult } from '../types/api'
+import { ValidationResult } from '../types/api'
 import { createSSEEventHandler, createSSEEventHandlerWithTime } from '../utils/sseHelpers'
 
 // Простой logger для frontend
+// ИСПРАВЛЕНИЕ: Поддерживаем несколько аргументов для логирования (как console.warn/error)
 const logger = {
-  debug: (msg: string) => console.debug(msg),
-  info: (msg: string) => console.info(msg),
-  warn: (msg: string) => console.warn(msg),
-  error: (msg: string) => console.error(msg)
+  debug: (...args: unknown[]) => console.debug(...args),
+  info: (...args: unknown[]) => console.info(...args),
+  warn: (...args: unknown[]) => console.warn(...args),
+  error: (...args: unknown[]) => console.error(...args)
 }
 
 // Результат этапа (stage result) — структура зависит от типа этапа
@@ -52,6 +53,8 @@ export interface StageStatus {
   error?: string
   // Рассуждения reasoning модели для этого этапа
   thinking?: ThinkingState
+  // Время начала этапа для расчета elapsed времени
+  startTime?: number
 }
 
 // Результат проверки одного инструмента
@@ -113,6 +116,29 @@ export interface ToolCall {
   status: 'running' | 'success' | 'error'
 }
 
+// Инкрементальный прогресс (Compiler-in-the-Loop)
+export interface IncrementalProgress {
+  function: string
+  status: 'generating' | 'validating' | 'fixing' | 'passed' | 'failed'
+  fix_attempts: number
+  progress: {
+    current: number
+    total: number
+  }
+  error?: string
+  timestamp: string
+}
+
+// Совет от FastAdvisor
+export interface AdvisorSuggestion {
+  advice: string
+  confidence: number
+  priority: 'low' | 'medium' | 'high'
+  model_used: string
+  response_time_ms: number
+  timestamp: string
+}
+
 interface UseAgentStreamReturn {
   stages: Record<string, StageStatus>
   results: AgentResults
@@ -122,6 +148,9 @@ interface UseAgentStreamReturn {
   // Phase 7: Under The Hood
   logs: LogEntry[]
   toolCalls: ToolCall[]
+  // Дополнительные события
+  incrementalProgress: IncrementalProgress[]
+  advisorSuggestions: AdvisorSuggestion[]
   clearLogs: () => void
   startTask: (task: string, options: TaskOptions) => void
   stopTask: () => void
@@ -149,6 +178,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     coding: 0,
     overall: 0
   })
+  const [incrementalProgress, setIncrementalProgress] = useState<IncrementalProgress[]>([])
+  const [advisorSuggestions, setAdvisorSuggestions] = useState<AdvisorSuggestion[]>([])
   const [isRunning, setIsRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const eventSourceRef = useRef<EventSource | null>(null)
@@ -259,9 +290,10 @@ export function useAgentStream(): UseAgentStreamReturn {
       params.set('conversation_id', options.conversationId)
     }
     
-    // Добавляем project_path если указан (для codebase indexing)
-    if (options.projectPath) {
-      params.set('project_path', options.projectPath)
+    // ИСПРАВЛЕНИЕ: Добавляем project_path если указан и не пустой (для codebase indexing)
+    // Пустая строка не считается валидным путем к проекту
+    if (options.projectPath && options.projectPath.trim() !== '') {
+      params.set('project_path', options.projectPath.trim())
     }
     
     // Добавляем file_extensions если указаны
@@ -270,6 +302,8 @@ export function useAgentStream(): UseAgentStreamReturn {
     }
 
     // Используем централизованный API клиент для создания SSE соединения
+    // ИСПРАВЛЕНИЕ: EventSource создается синхронно и не выбрасывает исключения при создании
+    // Ошибки подключения обрабатываются в onerror
     const eventSource = api.stream(params)
     eventSourceRef.current = eventSource
     
@@ -290,8 +324,13 @@ export function useAgentStream(): UseAgentStreamReturn {
         if (timeSinceLastEvent > HEARTBEAT_INTERVAL && !isCompletedRef.current) {
           // Нет событий в течение HEARTBEAT_INTERVAL - проверяем соединение
           if (eventSource.readyState === EventSource.OPEN) {
-            // Соединение открыто, но нет событий - возможно проблема
-            logger.warn('⚠️ Heartbeat timeout: нет событий в течение 30 секунд')
+            // ИСПРАВЛЕНИЕ: Увеличиваем интервал предупреждения до 60 секунд
+            // Backend теперь отправляет heartbeat каждые 15 секунд, поэтому 30 секунд - это нормально
+            if (timeSinceLastEvent > 60000) {
+              logger.warn('⚠️ Heartbeat timeout: нет событий в течение 60 секунд')
+            }
+            // Продолжаем проверку даже если нет событий (workflow может быть долгим)
+            startHeartbeat()
           } else if (eventSource.readyState === EventSource.CLOSED) {
             // Соединение закрыто - пытаемся переподключиться
             handleReconnect(task, options)
@@ -312,11 +351,20 @@ export function useAgentStream(): UseAgentStreamReturn {
       try {
         if (!event.data || event.data.trim() === '') return
         const data = JSON.parse(event.data)
-        // Обновляем время последнего события
+        
+        // ИСПРАВЛЕНИЕ: Обновляем время последнего события для heartbeat
+        // Heartbeat события не обрабатываются как обычные события, но обновляют таймер
         lastEventTimeRef.current = Date.now()
+        
+        // Игнорируем heartbeat события (они только для поддержания соединения)
+        if (data.type === 'heartbeat' || event.type === 'heartbeat') {
+          return
+        }
+        
         handleSSEEvent(data)
-      } catch {
-        // Игнорируем ошибки парсинга некорректных SSE событий
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга SSE события в onmessage:', error, event.data)
       }
     }
 
@@ -328,10 +376,12 @@ export function useAgentStream(): UseAgentStreamReturn {
         updateStage(data.stage, {
           stage: data.stage,
           status: 'start',
-          message: data.message || ''
+          message: data.message || '',
+          startTime: Date.now() // ИСПРАВЛЕНИЕ: Сохраняем время начала этапа
         })
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга STAGE_START:', error, event.data)
       }
     })
 
@@ -346,8 +396,21 @@ export function useAgentStream(): UseAgentStreamReturn {
           message: data.message || '',
           progress: data.progress || 0
         })
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга STAGE_PROGRESS:', error, event.data)
+      }
+    })
+    
+    // ИСПРАВЛЕНИЕ: Обрабатываем heartbeat события для поддержания соединения
+    eventSource.addEventListener('heartbeat', (event: MessageEvent) => {
+      try {
+        if (!event.data || event.data.trim() === '') return
+        // Heartbeat события обновляют таймер, но не обрабатываются как обычные события
+        lastEventTimeRef.current = Date.now()
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга heartbeat (хотя они редки)
+        logger.debug('⚠️ Ошибка парсинга heartbeat:', error)
       }
     })
 
@@ -398,8 +461,9 @@ export function useAgentStream(): UseAgentStreamReturn {
             overall: data.result.overall_score || 0
           })
         }
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга STAGE_END:', error, event.data)
       }
     })
 
@@ -414,15 +478,23 @@ export function useAgentStream(): UseAgentStreamReturn {
           setResults(prev => {
             const chunks = prev.codeChunks || []
             const newChunks = [...chunks, data.chunk]
+            const assembledCode = newChunks.join('') // Собираем полный код из чанков
+            
+            // ИСПРАВЛЕНИЕ: Логируем для диагностики если код собирается
+            if (assembledCode && assembledCode.length > 0) {
+              console.debug(`[CODE_CHUNK] Получен чанк: ${data.chunk.length} символов, всего: ${assembledCode.length} символов`)
+            }
+            
             return {
               ...prev,
               codeChunks: newChunks,
-              code: newChunks.join('') // Собираем полный код из чанков
+              code: assembledCode // Собираем полный код из чанков
             }
           })
         }
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        console.error('[CODE_CHUNK] Ошибка парсинга:', error, event.data)
       }
     })
 
@@ -439,8 +511,9 @@ export function useAgentStream(): UseAgentStreamReturn {
             plan: (prev.plan || '') + data.chunk
           }))
         }
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга PLAN_CHUNK:', error, event.data)
       }
     })
 
@@ -457,8 +530,9 @@ export function useAgentStream(): UseAgentStreamReturn {
             tests: (prev.tests || '') + data.chunk
           }))
         }
-      } catch {
-        // Игнорируем ошибки парсинга
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга для диагностики
+        logger.warn('⚠️ Ошибка парсинга TEST_CHUNK:', error, event.data)
       }
     })
 
@@ -622,6 +696,59 @@ export function useAgentStream(): UseAgentStreamReturn {
       )
     )
 
+    // Metrics update (real-time метрики)
+    eventSource.addEventListener(
+      SSE_EVENTS.METRICS_UPDATE,
+      createSSEEventHandler<Metrics>(
+        (data) => {
+          setMetrics(prev => ({
+            ...prev,
+            ...data
+          }))
+        },
+        'METRICS_UPDATE',
+        []
+      )
+    )
+
+    // Incremental progress (Compiler-in-the-Loop)
+    eventSource.addEventListener(
+      SSE_EVENTS.INCREMENTAL_PROGRESS,
+      createSSEEventHandler<IncrementalProgress>(
+        (data) => {
+          setIncrementalProgress(prev => {
+            const newProgress = [...prev, data]
+            // Ограничиваем количество записей в памяти
+            if (newProgress.length > 100) {
+              return newProgress.slice(-100)
+            }
+            return newProgress
+          })
+        },
+        'INCREMENTAL_PROGRESS',
+        ['function', 'status']
+      )
+    )
+
+    // Advisor suggestion (FastAdvisor)
+    eventSource.addEventListener(
+      SSE_EVENTS.ADVISOR_SUGGESTION,
+      createSSEEventHandler<AdvisorSuggestion>(
+        (data) => {
+          setAdvisorSuggestions(prev => {
+            const newSuggestions = [...prev, data]
+            // Ограничиваем количество советов в памяти
+            if (newSuggestions.length > 50) {
+              return newSuggestions.slice(-50)
+            }
+            return newSuggestions
+          })
+        },
+        'ADVISOR_SUGGESTION',
+        ['advice', 'confidence']
+      )
+    )
+
     // Обработчик кастомного события 'error' от backend (не путать с onerror)
     eventSource.addEventListener(SSE_EVENTS.ERROR, (event: MessageEvent) => {
       try {
@@ -664,21 +791,64 @@ export function useAgentStream(): UseAgentStreamReturn {
           return
         }
         const data = JSON.parse(event.data)
-        // Объединяем с существующими results (сохраняет greeting_message из stage_end)
-        setResults(prev => ({ ...prev, ...(data.results || {}) }))
+        
+        // ИСПРАВЛЕНИЕ: Если в финальных results есть code, но его нет в codeChunks,
+        // используем финальный code из results. Это важно для случаев, когда код
+        // был отправлен не через code_chunk, а через финальный complete event.
+        setResults(prev => {
+          const finalResults = data.results || {}
+          const finalCode = finalResults.code || prev.code || ''
+          
+          // Если есть финальный код, но нет чанков, используем финальный код
+          if (finalCode && (!prev.codeChunks || prev.codeChunks.length === 0)) {
+            console.debug('[COMPLETE] Используем финальный код из results:', finalCode.length, 'символов')
+            return {
+              ...prev,
+              ...finalResults,
+              code: finalCode,
+              codeChunks: [finalCode] // Сохраняем как один чанк для консистентности
+            }
+          }
+          
+          // Иначе объединяем с существующими results (сохраняет codeChunks из стриминга)
+          return {
+            ...prev,
+            ...finalResults,
+            // Сохраняем собранный код из чанков, если он есть
+            code: prev.code || finalCode
+          }
+        })
+        
         setMetrics(data.metrics || metrics)
+        isCompletedRef.current = true
+        setIsRunning(false)
+        
+        // ИСПРАВЛЕНИЕ: Закрываем соединение с небольшой задержкой, чтобы дать время обработать все события
+        // Это предотвращает преждевременное закрытие соединения
+        setTimeout(() => {
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close()
+            eventSourceRef.current = null
+          }
+          // Очищаем heartbeat таймаут
+          if (heartbeatTimeoutRef.current) {
+            clearTimeout(heartbeatTimeoutRef.current)
+            heartbeatTimeoutRef.current = null
+          }
+        }, 100) // Небольшая задержка для обработки всех событий
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга COMPLETE события
+        logger.error('❌ Ошибка парсинга COMPLETE события:', error, event.data)
+        // Все равно завершаем задачу, чтобы не зависнуть
         isCompletedRef.current = true
         setIsRunning(false)
         if (eventSourceRef.current) {
           eventSourceRef.current.close()
           eventSourceRef.current = null
         }
-      } catch {
-        isCompletedRef.current = true
-        setIsRunning(false)
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close()
-          eventSourceRef.current = null
+        if (heartbeatTimeoutRef.current) {
+          clearTimeout(heartbeatTimeoutRef.current)
+          heartbeatTimeoutRef.current = null
         }
       }
     })
@@ -686,10 +856,14 @@ export function useAgentStream(): UseAgentStreamReturn {
     eventSource.addEventListener(SSE_EVENTS.WARNING, (event: MessageEvent) => {
       try {
         if (!event.data || event.data.trim() === '') return
+        const data = JSON.parse(event.data)
+        // ИСПРАВЛЕНИЕ: Логируем предупреждения для диагностики
+        logger.warn('⚠️ Предупреждение от backend:', data.message || data)
         // Предупреждения от backend обрабатываются тихо
         // При необходимости можно добавить отображение в UI
-      } catch {
-        // Игнорируем ошибки парсинга предупреждений
+      } catch (error) {
+        // ИСПРАВЛЕНИЕ: Логируем ошибки парсинга предупреждений
+        logger.warn('⚠️ Ошибка парсинга WARNING события:', error, event.data)
       }
     })
 
@@ -732,7 +906,39 @@ export function useAgentStream(): UseAgentStreamReturn {
       }, RECONNECT_DELAY * reconnectAttemptsRef.current) // Экспоненциальная задержка
     }
     
-    eventSource.onerror = () => {
+    eventSource.onerror = (error: Event) => {
+      const readyState = eventSource.readyState
+      // ИСПРАВЛЕНИЕ: Используем Record для правильной типизации индексации
+      const stateNames: Record<number, string> = {
+        [EventSource.CONNECTING]: 'CONNECTING',
+        [EventSource.OPEN]: 'OPEN',
+        [EventSource.CLOSED]: 'CLOSED'
+      }
+      
+      // ИСПРАВЛЕНИЕ: Если задача уже завершена и соединение закрыто - это нормальное завершение
+      // Не логируем это как ошибку, только как debug информацию
+      if (isCompletedRef.current && readyState === EventSource.CLOSED) {
+        logger.debug(
+          `✅ SSE соединение закрыто после завершения задачи (readyState=${stateNames[readyState]})`
+        )
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close()
+          eventSourceRef.current = null
+        }
+        if (heartbeatTimeoutRef.current) {
+          clearTimeout(heartbeatTimeoutRef.current)
+          heartbeatTimeoutRef.current = null
+        }
+        return
+      }
+      
+      // ИСПРАВЛЕНИЕ: Логируем ошибку только если задача не завершена
+      logger.warn(
+        `⚠️ SSE ошибка: readyState=${stateNames[readyState] || readyState}, ` +
+        `completed=${isCompletedRef.current}, error=`,
+        error
+      )
+      
       // Если задача уже завершена, закрываем соединение
       if (isCompletedRef.current) {
         if (eventSourceRef.current) {
@@ -749,6 +955,7 @@ export function useAgentStream(): UseAgentStreamReturn {
       // Проверяем состояние подключения
       if (eventSource.readyState === EventSource.CLOSED) {
         // Подключение закрыто во время выполнения задачи - пытаемся переподключиться
+        logger.info('🔄 Соединение закрыто, пытаемся переподключиться...')
         handleReconnect(task, options)
       } else if (eventSource.readyState === EventSource.CONNECTING) {
         // Попытка переподключения - предотвращаем если задача завершена
@@ -788,8 +995,11 @@ export function useAgentStream(): UseAgentStreamReturn {
 
   const reset = useCallback(() => {
     // Сбрасываем все состояния для новой задачи
+    // ИСПРАВЛЕНИЕ: Очищаем codeChunks при сбросе, чтобы не было накопления старых чанков
     setStages({})
-    setResults({})
+    setResults({
+      codeChunks: [] // ИСПРАВЛЕНИЕ: Явно очищаем чанки при сбросе
+    })
     setMetrics({
       planning: 0,
       research: 0,
@@ -803,6 +1013,10 @@ export function useAgentStream(): UseAgentStreamReturn {
     // Phase 7: Очищаем логи и tool calls
     setLogs([])
     setToolCalls([])
+    
+    // Очищаем дополнительные события
+    setIncrementalProgress([])
+    setAdvisorSuggestions([])
     
     // Закрываем существующее подключение если есть
     if (eventSourceRef.current) {
@@ -838,6 +1052,9 @@ export function useAgentStream(): UseAgentStreamReturn {
     // Phase 7: Under The Hood
     logs,
     toolCalls,
+    // Дополнительные события
+    incrementalProgress,
+    advisorSuggestions,
     clearLogs,
     startTask,
     stopTask,

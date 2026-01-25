@@ -165,7 +165,8 @@ class TaskCheckpointer:
                 # Пробуем преобразовать в строку
                 try:
                     result[field] = str(value)[:10000]  # Лимит длины
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка сериализации поля {field}: {e}")
                     result[field] = None
         
         return result
@@ -359,7 +360,8 @@ class TaskCheckpointer:
                 with open(metadata_path, "r", encoding="utf-8") as f:
                     metadata_dict = json.load(f)
                 all_tasks.append(TaskMetadata.from_dict(metadata_dict))
-            except Exception:
+            except Exception as e:
+                logger.debug(f"⚠️ Ошибка загрузки метаданных задачи из {metadata_path}: {e}")
                 continue
         
         all_tasks.sort(key=lambda x: x.updated_at, reverse=True)
@@ -486,8 +488,8 @@ class TaskCheckpointer:
                 try:
                     shutil.rmtree(task_dir)
                     removed_count += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка удаления старого checkpoint {task_dir}: {e}")
                 continue
             
             try:
@@ -501,7 +503,8 @@ class TaskCheckpointer:
                     shutil.rmtree(task_dir)
                     removed_count += 1
                     
-            except Exception:
+            except Exception as e:
+                logger.debug(f"⚠️ Ошибка удаления старого checkpoint {task_dir}: {e}")
                 continue
         
         if removed_count > 0:

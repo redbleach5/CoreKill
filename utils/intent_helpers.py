@@ -1,6 +1,37 @@
 """Утилиты для работы с типами intent (намерений).
 
 Устраняет дублирование словарей intent_descriptions в разных модулях.
+Предоставляет единый источник истины для описаний типов намерений.
+
+Примеры использования:
+    ```python
+    from utils.intent_helpers import get_intent_description, get_all_intent_types
+    
+    # Получить описание типа intent
+    short_desc = get_intent_description("create", "short")
+    # "создать новую функцию/класс/модуль"
+    
+    long_desc = get_intent_description("create", "long")
+    # "создание нового кода/функции/класса/модуля"
+    
+    planning_desc = get_intent_description("create", "planning")
+    # "создание нового кода/функции/класса/модуля"
+    
+    # Получить все доступные типы
+    all_types = get_all_intent_types()
+    # ["create", "modify", "debug", "optimize", ...]
+    ```
+
+Зависимости:
+    - typing: для типизации
+
+Связанные утилиты:
+    - agents.intent: использует для описаний типов намерений
+
+Примечания:
+    - Поддерживает форматы: "short", "long", "planning"
+    - Все описания на русском языке
+    - Централизованное хранение предотвращает дублирование
 """
 from typing import Dict, Literal
 

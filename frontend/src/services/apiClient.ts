@@ -230,9 +230,9 @@ export const api = {
      * Получает дерево файлов проекта.
      */
     getFiles: (projectPath: string, fileExtensions?: string) => {
-      const params = new URLSearchParams({ project_path: projectPath })
+      const params = new URLSearchParams({ path: projectPath })
       if (fileExtensions) {
-        params.set('file_extensions', fileExtensions)
+        params.set('extensions', fileExtensions)
       }
       return apiClient.get<ProjectFilesResponse>(`/api/project-files?${params.toString()}`)
     },

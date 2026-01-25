@@ -2,7 +2,7 @@
  * Hook для выполнения кода через backend API
  */
 import { useState, useCallback } from 'react'
-import { CodeExecutionResponse, CodeValidationResponse } from '../types/api'
+import { CodeValidationResponse } from '../types/api'
 import { extractErrorMessage } from '../utils/apiErrorHandler'
 import { api } from '../services/apiClient'
 

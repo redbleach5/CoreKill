@@ -54,11 +54,6 @@ class StreamingTestGeneratorAgent(BaseAgent):
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Генерация тестов прервана")
     
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
-    
     async def generate_tests_stream(
         self,
         plan: str,
@@ -129,6 +124,9 @@ class StreamingTestGeneratorAgent(BaseAgent):
                 
                 if event_type == "thinking":
                     yield ("thinking", data)
+                elif event_type == "progress":
+                    # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                    yield ("progress", data)
                 elif event_type == "content":
                     tests_buffer += data
                     yield ("test_chunk", data)
@@ -145,38 +143,113 @@ class StreamingTestGeneratorAgent(BaseAgent):
             else:
                 cleaned_tests = self._clean_test_code(tests_buffer)
             
+            # ИСПРАВЛЕНИЕ: Проверяем, что тесты действительно сгенерированы
             if cleaned_tests:
                 logger.info(f"✅ Тесты сгенерированы ({len(cleaned_tests)} символов)")
             else:
-                logger.warning("⚠️ Не удалось сгенерировать тесты")
+                # Детальное логирование для диагностики
+                logger.error(
+                    f"❌ Не удалось сгенерировать тесты! "
+                    f"full_response: {len(full_response) if full_response else 0} символов, "
+                    f"tests_buffer: {len(tests_buffer)} символов, "
+                    f"model: {self.model}, stage: {stage}"
+                )
+                # Если есть full_response, логируем его начало для диагностики
+                if full_response and len(full_response) > 0:
+                    preview = full_response[:200].replace('\n', '\\n')
+                    logger.debug(f"🔍 Начало full_response: {preview}...")
             
             yield ("done", cleaned_tests)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка стриминга тестов: {e}", error=e)
-            yield ("done", "")
-    
-    # === Синхронный метод для обратной совместимости ===
-    
-    def generate_tests(
-        self,
-        plan: str,
-        context: str,
-        intent_type: str,
-        user_query: str = "",
-        min_test_cases: int = 3,
-        max_test_cases: int = 5
-    ) -> str:
-        """Синхронная генерация тестов (для обратной совместимости)."""
-        from agents.test_generator import TestGeneratorAgent
-        
-        sync_agent = TestGeneratorAgent(
-            model=self.model,
-            temperature=self.temperature
-        )
-        return sync_agent.generate_tests(
-            plan, context, intent_type, user_query, min_test_cases, max_test_cases
-        )
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при генерации тестов: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="testing",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю генерацию...")
+                    
+                    # ВАЖНО: Пересоздаём промпт после переключения модели
+                    if user_query:
+                        prompt = self.prompt_enhancer.enhance_for_tests(
+                            user_query=user_query,
+                            intent_type=intent_type,
+                            context=context
+                        )
+                    else:
+                        prompt = self._build_test_generation_prompt(
+                            plan=plan,
+                            context=context,
+                            intent_type=intent_type,
+                            min_cases=min_test_cases,
+                            max_cases=max_test_cases
+                        )
+                    
+                    # Повторяем попытку с новой моделью
+                    try:
+                        tests_buffer = ""
+                        full_response = ""
+                        
+                        async for event_type, data in self.reasoning_manager.stream_from_llm(
+                            llm=self.llm,
+                            prompt=prompt,
+                            stage=stage,
+                            num_predict=config.llm_tokens_tests
+                        ):
+                            if self._interrupted:
+                                logger.info("⏹️ Генерация прервана")
+                                break
+                            
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "content":
+                                tests_buffer += data
+                                yield ("test_chunk", data)
+                            elif event_type == "done":
+                                full_response = data
+                        
+                        # Очищаем финальные тесты
+                        if full_response:
+                            if is_reasoning_response(full_response):
+                                tests_only = extract_code_from_reasoning(full_response)
+                                cleaned_tests = self._clean_test_code(tests_only)
+                            else:
+                                cleaned_tests = self._clean_test_code(full_response)
+                        else:
+                            cleaned_tests = self._clean_test_code(tests_buffer)
+                        
+                        if cleaned_tests:
+                            logger.info(f"✅ Тесты сгенерированы с запасной моделью ({len(cleaned_tests)} символов)")
+                        else:
+                            logger.warning("⚠️ Не удалось сгенерировать тесты даже с запасной моделью")
+                        
+                        yield ("done", cleaned_tests)
+                        return
+                        
+                    except Exception as retry_error:
+                        logger.error(
+                            f"❌ Ошибка при повторной попытке с запасной моделью {self.model}: {retry_error}",
+                            error=retry_error
+                        )
+                        yield ("done", "")
+                else:
+                    logger.error(
+                        f"❌ Не удалось переключиться на запасную модель. "
+                        f"Тесты не были сгенерированы."
+                    )
+                    yield ("done", "")
+            else:
+                logger.error(f"❌ Ошибка стриминга тестов: {e}", error=e)
+                yield ("done", "")
     
     # === Приватные методы ===
     

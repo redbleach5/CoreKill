@@ -44,10 +44,6 @@ class AgentState(TypedDict):
     task_id: str  # ID задачи для отслеживания
     enable_sse: bool  # Флаг для включения SSE стриминга (SSEManager - статический класс)
     
-    # SSE события для стриминга (используется когда use_streaming_agents = true)
-    # DEPRECATED: Используйте event_references вместо sse_events
-    sse_events: Optional[List[str]]  # Список SSE событий для отправки (thinking, code_chunk, etc.)
-    
     # Ссылки на события в EventStore (для оптимизации памяти)
     event_references: Optional[List[str]]  # Список ID событий в EventStore
     

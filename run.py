@@ -4,12 +4,15 @@
 Запускает backend и frontend, проверяет их здоровье и логирует ошибки.
 Поддерживает расширение для добавления новых проверок.
 """
+__version__ = "1.0.0"
+
 import sys
 import subprocess
 import signal
 import time
 import shutil
 import os
+import queue
 from pathlib import Path
 from typing import Optional, List, Dict
 import threading
@@ -37,20 +40,50 @@ class ProjectRunner:
     - Переопределите run() для кастомизации последовательности запуска
     """
     
-    def __init__(self) -> None:
-        """Инициализация runner."""
+    def __init__(
+        self,
+        backend_port: int = 8000,
+        frontend_port: int = 5173,
+        no_backend: bool = False,
+        no_frontend: bool = False,
+        skip_checks: bool = False,
+        require_ollama: bool = False
+    ) -> None:
+        """Инициализация runner.
+        
+        Args:
+            backend_port: Порт для backend сервера (по умолчанию 8000)
+            frontend_port: Порт для frontend сервера (по умолчанию 5173)
+            no_backend: Не запускать backend
+            no_frontend: Не запускать frontend
+            skip_checks: Пропустить проверки (не рекомендуется)
+            require_ollama: Требовать наличие Ollama (иначе ошибка)
+        """
+        self.no_backend = no_backend
+        self.no_frontend = no_frontend
+        self.skip_checks = skip_checks
+        self.require_ollama = require_ollama
         self.project_root = Path(__file__).parent.absolute()
-        self.backend_port = 8000
-        self.frontend_port = 5173
+        self.backend_port = backend_port
+        self.frontend_port = frontend_port
         self.backend_url = f"http://localhost:{self.backend_port}"
         self.frontend_url = f"http://localhost:{self.frontend_port}"
         
-        # Определяем Python из виртуального окружения, если оно есть
-        venv_python = self.project_root / ".venv" / "bin" / "python3"
+        # ИСПРАВЛЕНИЕ: Кросс-платформенные пути к виртуальному окружению
+        self.is_windows = sys.platform == "win32"
+        if self.is_windows:
+            venv_python = self.project_root / ".venv" / "Scripts" / "python.exe"
+            venv_pip = self.project_root / ".venv" / "Scripts" / "pip.exe"
+        else:
+            venv_python = self.project_root / ".venv" / "bin" / "python3"
+            venv_pip = self.project_root / ".venv" / "bin" / "pip3"
+        
         if venv_python.exists():
             self.python_executable = str(venv_python)
+            self.pip_executable = str(venv_pip) if venv_pip.exists() else "pip3"
         else:
             self.python_executable = sys.executable
+            self.pip_executable = "pip3" if not self.is_windows else "pip"
         
         self.backend_process: Optional[subprocess.Popen] = None
         self.frontend_process: Optional[subprocess.Popen] = None
@@ -162,7 +195,7 @@ class ProjectRunner:
     
     def check_dependencies(self) -> bool:
         """Проверяет и устанавливает зависимости."""
-        # Создаём виртуальное окружение если его нет
+            # Создаём виртуальное окружение если его нет
         venv_path = self.project_root / ".venv"
         if venv_path.exists():
             self.print_info(f"Виртуальное окружение найдено: {venv_path}")
@@ -175,22 +208,25 @@ class ProjectRunner:
                 )
                 if result.returncode == 0:
                     self.print_success("Виртуальное окружение создано: .venv")
-                    # Обновляем путь к Python
-                    self.python_executable = str(venv_path / "bin" / "python3")
+                    # ИСПРАВЛЕНИЕ: Обновляем путь к Python с учётом платформы
+                    if self.is_windows:
+                        self.python_executable = str(venv_path / "Scripts" / "python.exe")
+                        self.pip_executable = str(venv_path / "Scripts" / "pip.exe")
+                    else:
+                        self.python_executable = str(venv_path / "bin" / "python3")
+                        self.pip_executable = str(venv_path / "bin" / "pip3")
                 else:
                     self.print_warning("Не удалось создать venv, продолжаю с системным Python")
             except Exception as e:
                 self.print_warning(f"Ошибка создания venv: {e}")
         
-        # Проверяем Python зависимости используя правильный Python
-        pip_cmd = str(Path(self.python_executable).parent / "pip3")
-        if not Path(pip_cmd).exists():
-            pip_cmd = "pip3"
+        # ИСПРАВЛЕНИЕ: Используем правильный pip для платформы
+        pip_cmd = self.pip_executable
         
         try:
-            # Пробуем импортировать с помощью правильного Python
+            # Пробуем импортировать с помощью правильного Python (включая langgraph)
             result = subprocess.run(
-                [self.python_executable, "-c", "import fastapi, uvicorn, ollama, chromadb"],
+                [self.python_executable, "-c", "import fastapi, uvicorn, ollama, chromadb, langgraph"],
                 capture_output=True,
                 text=True,
                 timeout=10
@@ -243,7 +279,7 @@ class ProjectRunner:
         return True
     
     def _kill_process_on_port(self, port: int) -> bool:
-        """Убивает процесс, занимающий указанный порт.
+        """Убивает процесс, занимающий указанный порт (кросс-платформенно).
         
         Args:
             port: Номер порта
@@ -255,36 +291,94 @@ class ProjectRunner:
             # Получаем PID текущего процесса и его родителя (чтобы не убить себя)
             current_pid = os.getpid()
             parent_pid = os.getppid()
-            safe_pids = {str(current_pid), str(parent_pid)}
+            safe_pids = {current_pid, parent_pid}
             
-            # Получаем PID процесса на порту
-            result = subprocess.run(
-                ["lsof", "-ti", f":{port}"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            # ИСПРАВЛЕНИЕ: Кросс-платформенное получение PID процесса на порту
+            pids = []
             
-            if result.returncode != 0 or not result.stdout.strip():
-                # Порт свободен или lsof не нашёл процесс
+            if self.is_windows:
+                # Windows: используем netstat для поиска PID
+                try:
+                    result = subprocess.run(
+                        ["netstat", "-ano"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0:
+                        for line in result.stdout.split('\n'):
+                            if f":{port}" in line and "LISTENING" in line:
+                                parts = line.split()
+                                if parts:
+                                    pid = parts[-1]
+                                    try:
+                                        pid_int = int(pid)
+                                        if pid_int not in safe_pids:
+                                            pids.append(pid_int)
+                                    except ValueError:
+                                        pass
+                except FileNotFoundError:
+                    # Пробуем использовать psutil если доступен
+                    try:
+                        import psutil
+                        for conn in psutil.net_connections(kind='inet'):
+                            if conn.laddr.port == port and conn.pid and conn.pid not in safe_pids:
+                                pids.append(conn.pid)
+                    except ImportError:
+                        self.print_warning("psutil не установлен, не могу освободить порт на Windows")
+                        return False
+            else:
+                # Unix/Linux/macOS: используем lsof
+                try:
+                    result = subprocess.run(
+                        ["lsof", "-ti", f":{port}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        for pid_str in result.stdout.strip().split('\n'):
+                            try:
+                                pid_int = int(pid_str.strip())
+                                if pid_int not in safe_pids:
+                                    pids.append(pid_int)
+                            except ValueError:
+                                pass
+                except FileNotFoundError:
+                    # Пробуем использовать psutil если доступен
+                    try:
+                        import psutil
+                        for conn in psutil.net_connections(kind='inet'):
+                            if conn.laddr.port == port and conn.pid and conn.pid not in safe_pids:
+                                pids.append(conn.pid)
+                    except ImportError:
+                        self.print_warning("lsof не найден, не могу освободить порт")
+                        return False
+            
+            if not pids:
+                # Порт свободен
                 return True
             
-            pids = result.stdout.strip().split('\n')
+            # Убиваем процессы
             killed_any = False
-            
             for pid in pids:
-                pid = pid.strip()
-                if pid and pid not in safe_pids:
-                    try:
+                try:
+                    if self.is_windows:
                         subprocess.run(
-                            ["kill", "-9", pid],
+                            ["taskkill", "/F", "/PID", str(pid)],
                             capture_output=True,
                             timeout=5
                         )
-                        self.print_info(f"Процесс {pid} на порту {port} остановлен")
-                        killed_any = True
-                    except Exception:
-                        pass
+                    else:
+                        subprocess.run(
+                            ["kill", "-9", str(pid)],
+                            capture_output=True,
+                            timeout=5
+                        )
+                    self.print_info(f"Процесс {pid} на порту {port} остановлен")
+                    killed_any = True
+                except Exception:
+                    pass
             
             # Даём время на освобождение порта только если что-то убили
             if killed_any:
@@ -294,6 +388,154 @@ class ProjectRunner:
         except Exception as e:
             self.print_warning(f"Не удалось освободить порт {port}: {e}")
             return False
+    
+    def check_python_syntax(self) -> bool:
+        """Проверяет синтаксис всех Python файлов в проекте.
+        
+        Использует py_compile для быстрой проверки синтаксиса без импорта модулей.
+        
+        Returns:
+            True если синтаксис корректен, False если найдены ошибки
+        """
+        import py_compile
+        import ast
+        
+        self.print_info("Проверка синтаксиса Python файлов...")
+        
+        # Директории для проверки
+        check_dirs = [
+            "agents",
+            "backend",
+            "infrastructure",
+            "utils",
+            "scripts"
+        ]
+        
+        errors = []
+        checked_files = 0
+        
+        for dir_name in check_dirs:
+            dir_path = self.project_root / dir_name
+            if not dir_path.exists():
+                continue
+            
+            # Находим все .py файлы
+            for py_file in dir_path.rglob("*.py"):
+                # Пропускаем __pycache__ и .venv
+                if "__pycache__" in str(py_file) or ".venv" in str(py_file):
+                    continue
+                
+                checked_files += 1
+                try:
+                    # Проверяем синтаксис через py_compile
+                    py_compile.compile(str(py_file), doraise=True)
+                    
+                    # Дополнительная проверка через AST (более строгая)
+                    with open(py_file, "r", encoding="utf-8") as f:
+                        source = f.read()
+                    ast.parse(source, filename=str(py_file))
+                    
+                except py_compile.PyCompileError as e:
+                    errors.append(f"{py_file.relative_to(self.project_root)}: {e.msg}")
+                except SyntaxError as e:
+                    errors.append(f"{py_file.relative_to(self.project_root)}:{e.lineno}: {e.msg}")
+                except Exception as e:
+                    errors.append(f"{py_file.relative_to(self.project_root)}: {e}")
+        
+        # Проверяем основной run.py
+        try:
+            py_compile.compile(str(self.project_root / "run.py"), doraise=True)
+            with open(self.project_root / "run.py", "r", encoding="utf-8") as f:
+                ast.parse(f.read(), filename="run.py")
+            checked_files += 1
+        except Exception as e:
+            errors.append(f"run.py: {e}")
+        
+        if errors:
+            self.print_error(f"Найдено {len(errors)} синтаксических ошибок в Python файлах:")
+            for error in errors[:10]:  # Показываем первые 10 ошибок
+                self.print_error(f"  ❌ {error}")
+            if len(errors) > 10:
+                self.print_error(f"  ... и ещё {len(errors) - 10} ошибок")
+            return False
+        
+        self.print_success(f"Синтаксис Python корректен ({checked_files} файлов проверено)")
+        return True
+    
+    def check_typescript_syntax(self) -> bool:
+        """Проверяет синтаксис TypeScript файлов в frontend.
+        
+        Использует tsc --noEmit для проверки без компиляции.
+        
+        Returns:
+            True если синтаксис корректен, False если найдены ошибки
+        """
+        frontend_dir = self.project_root / "frontend"
+        if not frontend_dir.exists():
+            self.print_warning("Директория frontend не найдена, пропускаю проверку TypeScript")
+            return True
+        
+        self.print_info("Проверка синтаксиса TypeScript файлов...")
+        
+        try:
+            # ИСПРАВЛЕНИЕ: Пробуем npm run type-check, если нет - используем npx tsc напрямую
+            try:
+                result = subprocess.run(
+                    ["npm", "run", "type-check"],
+                    cwd=frontend_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            except FileNotFoundError:
+                # Если npm не найден, пробуем напрямую через npx
+                self.print_info("npm не найден, пробую npx tsc --noEmit...")
+                result = subprocess.run(
+                    ["npx", "tsc", "--noEmit"],
+                    cwd=frontend_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            
+            if result.returncode == 0:
+                self.print_success("Синтаксис TypeScript корректен")
+                return True
+            else:
+                # Показываем ошибки
+                error_output = result.stderr or result.stdout
+                error_lines = error_output.split("\n")
+                
+                # Фильтруем только ошибки (не предупреждения)
+                errors = [line for line in error_lines if "error TS" in line]
+                
+                if errors:
+                    self.print_error(f"Найдено {len(errors)} ошибок TypeScript:")
+                    for error in errors[:10]:  # Показываем первые 10 ошибок
+                        self.print_error(f"  ❌ {error}")
+                    if len(errors) > 10:
+                        self.print_error(f"  ... и ещё {len(errors) - 10} ошибок")
+                else:
+                    # Если только предупреждения, показываем их как warning
+                    warnings = [line for line in error_lines if "warning" in line.lower()]
+                    if warnings:
+                        self.print_warning(f"Найдено {len(warnings)} предупреждений TypeScript (не критично)")
+                        return True
+                    else:
+                        self.print_error("Ошибка проверки TypeScript (см. вывод выше)")
+                
+                return False
+                
+        except FileNotFoundError:
+            self.print_warning("npm не найден, пропускаю проверку TypeScript")
+            return True
+        except subprocess.TimeoutExpired:
+            self.print_error("Таймаут при проверке TypeScript (более 60 секунд)")
+            return False
+        except Exception as e:
+            self.print_warning(f"Ошибка при проверке TypeScript: {e}")
+            # Не критично, продолжаем
+            return True
     
     def check_ports(self) -> bool:
         """Проверяет и при необходимости освобождает порты."""
@@ -337,7 +579,11 @@ class ProjectRunner:
         return ports_ok
     
     def start_backend(self) -> bool:
-        """Запускает backend сервер."""
+        """Запускает backend сервер с проверкой что процесс запустился.
+        
+        Returns:
+            True если backend успешно запущен, False в случае ошибки
+        """
         self.print_info("Запускаю backend...")
         
         try:
@@ -360,33 +606,130 @@ class ProjectRunner:
                 bufsize=1
             )
             
+            # Проверяем что процесс запустился (не завершился сразу)
+            time.sleep(0.5)  # Даём время на запуск
+            if self.backend_process.poll() is not None:
+                # Процесс уже завершился - ошибка
+                error_output = ""
+                try:
+                    if self.backend_process.stdout:
+                        # Пробуем прочитать доступный вывод (неблокирующий способ)
+                        # Используем threading для кроссплатформенности
+                        output_queue: queue.Queue[str] = queue.Queue()
+                        
+                        def read_output():
+                            try:
+                                for line in iter(self.backend_process.stdout.readline, ''):
+                                    if line:
+                                        output_queue.put(line)
+                            except Exception:
+                                pass
+                        
+                        reader_thread = threading.Thread(target=read_output, daemon=True)
+                        reader_thread.start()
+                        reader_thread.join(timeout=0.2)  # Ждём максимум 200ms
+                        
+                        # Собираем доступный вывод
+                        while not output_queue.empty():
+                            error_output += output_queue.get()
+                except Exception:
+                    pass
+                
+                if error_output:
+                    error_preview = error_output[:500].replace('\n', ' ')
+                    self.print_error(
+                        f"Backend процесс завершился сразу после запуска: {error_preview}"
+                    )
+                else:
+                    self.print_error(
+                        f"Backend процесс завершился сразу после запуска "
+                        f"(код возврата: {self.backend_process.returncode})"
+                    )
+                return False
+            
             # Запускаем поток для чтения логов
             threading.Thread(
                 target=self._read_backend_logs,
                 daemon=True
             ).start()
             
-            self.print_success(f"Backend запущен на порту {self.backend_port}")
+            self.print_success(f"Backend процесс запущен на порту {self.backend_port}")
             return True
         except Exception as e:
             self.print_error(f"Ошибка при запуске backend: {e}")
             return False
     
     def start_frontend(self) -> bool:
-        """Запускает frontend сервер."""
+        """Запускает frontend сервер с проверкой что процесс запустился.
+        
+        Returns:
+            True если frontend успешно запущен, False в случае ошибки
+        """
         self.print_info("Запускаю frontend...")
         
         frontend_dir = self.project_root / "frontend"
         
+        # Проверяем что node_modules установлены
+        node_modules = frontend_dir / "node_modules"
+        if not node_modules.exists():
+            self.print_error("node_modules не найдены. Запустите: cd frontend && npm install")
+            return False
+        
         try:
+            # Используем переменные окружения для указания порта Vite и backend URL
+            env = os.environ.copy()
+            env["PORT"] = str(self.frontend_port)
+            env["VITE_BACKEND_URL"] = self.backend_url
+            
             self.frontend_process = subprocess.Popen(
                 ["npm", "run", "dev"],
                 cwd=frontend_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1
+                bufsize=1,
+                env=env
             )
+            
+            # Проверяем что процесс запустился
+            time.sleep(0.5)  # Даём время на запуск
+            if self.frontend_process.poll() is not None:
+                # Процесс уже завершился - ошибка
+                error_output = ""
+                try:
+                    if self.frontend_process.stdout:
+                        # Пробуем прочитать доступный вывод (неблокирующий способ)
+                        output_queue: queue.Queue[str] = queue.Queue()
+                        
+                        def read_output():
+                            try:
+                                for line in iter(self.frontend_process.stdout.readline, ''):
+                                    if line:
+                                        output_queue.put(line)
+                            except Exception:
+                                pass
+                        
+                        reader_thread = threading.Thread(target=read_output, daemon=True)
+                        reader_thread.start()
+                        reader_thread.join(timeout=0.2)  # Ждём максимум 200ms
+                        
+                        # Собираем доступный вывод
+                        while not output_queue.empty():
+                            error_output += output_queue.get()
+                except Exception:
+                    pass
+                
+                if error_output:
+                    error_preview = error_output[:500].replace('\n', ' ')
+                    self.print_error(
+                        f"Frontend процесс завершился сразу после запуска: {error_preview}"
+                    )
+                else:
+                    self.print_error(
+                        f"Frontend процесс завершился сразу после запуска "
+                        f"(код возврата: {self.frontend_process.returncode})"
+                    )
+                return False
             
             # Запускаем поток для чтения логов
             threading.Thread(
@@ -394,7 +737,7 @@ class ProjectRunner:
                 daemon=True
             ).start()
             
-            self.print_success(f"Frontend запущен на порту {self.frontend_port}")
+            self.print_success(f"Frontend процесс запущен на порту {self.frontend_port}")
             return True
         except Exception as e:
             self.print_error(f"Ошибка при запуске frontend: {e}")
@@ -445,7 +788,16 @@ class ProjectRunner:
                     print(f"{Colors.CYAN}[Frontend {timestamp}]{Colors.RESET} {line}")
     
     def check_backend_health(self, max_retries: int = 15) -> bool:
-        """Проверяет здоровье backend."""
+        """Проверяет здоровье backend с валидацией статуса.
+        
+        Проверяет не только HTTP доступность, но и статус сервисов через /health endpoint.
+        
+        Args:
+            max_retries: Максимальное количество попыток
+            
+        Returns:
+            True если backend здоров и готов к работе
+        """
         endpoints_to_try = ["/health", "/"]  # Пробуем оба endpoint
         
         for i in range(max_retries):
@@ -456,8 +808,43 @@ class ProjectRunner:
                         timeout=3
                     )
                     if response.status_code == 200:
-                        self.print_success("Backend health check пройден")
-                        return True
+                        # Если это /health endpoint, проверяем статус сервисов
+                        if endpoint == "/health":
+                            try:
+                                health_data = response.json()
+                                status = health_data.get("status", "unknown")
+                                services = health_data.get("services", {})
+                                
+                                if status == "ok":
+                                    self.print_success("Backend health check пройден (все сервисы OK)")
+                                    return True
+                                elif status == "degraded":
+                                    # Backend работает, но некоторые сервисы недоступны
+                                    degraded_services = [
+                                        name for name, svc_status in services.items()
+                                        if svc_status not in ["ok", "unknown"]
+                                    ]
+                                    if degraded_services:
+                                        self.print_warning(
+                                            f"Backend работает в degraded режиме. "
+                                            f"Проблемы с: {', '.join(degraded_services)}"
+                                        )
+                                    else:
+                                        self.print_warning("Backend работает в degraded режиме")
+                                    # Разрешаем запуск, но предупреждаем
+                                    return True
+                                else:
+                                    self.print_error(f"Backend health check не пройден: статус {status}")
+                                    return False
+                            except (ValueError, KeyError) as e:
+                                # Не удалось распарсить JSON, но HTTP 200 - считаем OK
+                                self.print_warning(f"Не удалось распарсить health check ответ: {e}")
+                                self.print_success("Backend доступен (HTTP 200)")
+                                return True
+                        else:
+                            # Для корневого endpoint просто проверяем доступность
+                            self.print_success("Backend доступен")
+                            return True
                 except requests.exceptions.ConnectionError:
                     # Продолжаем попытки
                     break
@@ -477,7 +864,15 @@ class ProjectRunner:
                         f"{self.backend_url}/health",
                         timeout=3
                     )
-                    self.print_error(f"Backend health check не пройден: статус {response.status_code}")
+                    if response.status_code == 200:
+                        try:
+                            health_data = response.json()
+                            status = health_data.get("status", "unknown")
+                            self.print_error(f"Backend health check не пройден: статус {status}")
+                        except (ValueError, KeyError):
+                            self.print_error(f"Backend health check не пройден: статус {response.status_code}")
+                    else:
+                        self.print_error(f"Backend health check не пройден: статус {response.status_code}")
                 except requests.exceptions.ConnectionError as e:
                     self.print_error(f"Backend health check не пройден: не удалось подключиться")
                     self.print_info(f"Проверьте, что backend запущен на {self.backend_url}")
@@ -488,6 +883,48 @@ class ProjectRunner:
                 return False
         
         return False
+    
+    def _wait_for_backend_ready(self, max_wait: int = 30) -> bool:
+        """Ожидает готовности backend с адаптивным polling.
+        
+        Использует экспоненциальный backoff для оптимизации времени ожидания.
+        
+        Args:
+            max_wait: Максимальное время ожидания в секундах
+            
+        Returns:
+            True если backend готов, False если превышено время ожидания
+        """
+        wait_time = 1  # Начинаем с 1 секунды
+        elapsed = 0
+        
+        while elapsed < max_wait:
+            try:
+                response = requests.get(f"{self.backend_url}/health", timeout=2)
+                if response.status_code == 200:
+                    try:
+                        health_data = response.json()
+                        status = health_data.get("status", "unknown")
+                        if status in ["ok", "degraded"]:
+                            if elapsed > 0:
+                                self.print_success(f"Backend готов через {elapsed:.1f}с")
+                            return True
+                    except (ValueError, KeyError):
+                        # Если не удалось распарсить, но HTTP 200 - считаем готовым
+                        if elapsed > 0:
+                            self.print_success(f"Backend доступен через {elapsed:.1f}с")
+                        return True
+            except requests.exceptions.RequestException:
+                # Backend ещё не готов, продолжаем ожидание
+                pass
+            
+            time.sleep(wait_time)
+            elapsed += wait_time
+            # Экспоненциальный backoff: 1s -> 1.5s -> 2.25s -> ... (макс 5s)
+            wait_time = min(wait_time * 1.5, 5)
+        
+        # Последняя попытка с детальной проверкой
+        return self.check_backend_health(max_retries=3)
     
     def check_frontend_health(self, max_retries: int = 15) -> bool:
         """Проверяет здоровье frontend."""
@@ -567,10 +1004,12 @@ class ProjectRunner:
         """Запускает весь проект.
         
         Последовательность:
-        1. Проверка окружения (команды, версии, зависимости, порты)
-        2. Запуск сервисов (backend, frontend)
-        3. Проверка здоровья сервисов
-        4. Мониторинг ошибок
+        1. Проверка окружения (команды, версии, зависимости)
+        2. Проверка синтаксиса (Python и TypeScript файлы)
+        3. Проверка и освобождение портов
+        4. Запуск сервисов (backend, frontend)
+        5. Проверка здоровья сервисов
+        6. Мониторинг ошибок
         
         Для расширения добавьте новые проверки в соответствующие секции.
         
@@ -598,12 +1037,25 @@ class ProjectRunner:
         if not self.check_node_version():
             checks_passed = False
         
-        # Проверяем Ollama (не критично, но желательно)
-        self.check_ollama()
+        # Проверяем Ollama
+        ollama_ok = self.check_ollama()
+        if self.require_ollama and not ollama_ok:
+            self.print_error("Ollama требуется, но недоступен. Используйте --require-ollama для строгой проверки.")
+            checks_passed = False
         
         # Проверяем зависимости
         if not self.check_dependencies():
             checks_passed = False
+        
+        # Проверяем синтаксис кода (если не пропущено)
+        if not self.skip_checks:
+            self.print_header("🔍 Проверка синтаксиса")
+            if not self.check_python_syntax():
+                checks_passed = False
+            if not self.check_typescript_syntax():
+                checks_passed = False
+        else:
+            self.print_warning("Проверка синтаксиса пропущена (--skip-checks)")
         
         # Проверяем и освобождаем порты
         if not self.check_ports():
@@ -617,41 +1069,59 @@ class ProjectRunner:
         # Шаг 2: Запуск сервисов
         self.print_header("🚀 Запуск сервисов")
         
-        if not self.start_backend():
-            return 1
+        if not self.no_backend:
+            if not self.start_backend():
+                return 1
+            # Даём backend время на запуск
+            time.sleep(2)
+        else:
+            self.print_info("Backend пропущен (--no-backend)")
         
-        # Даём backend время на запуск
-        time.sleep(2)
-        
-        if not self.start_frontend():
-            self.cleanup()
-            return 1
+        if not self.no_frontend:
+            if not self.start_frontend():
+                self.cleanup()
+                return 1
+        else:
+            self.print_info("Frontend пропущен (--no-frontend)")
         
         # Шаг 3: Проверка здоровья
         self.print_header("🏥 Проверка здоровья сервисов")
         
-        # Даём сервисам больше времени на запуск (особенно backend с инициализацией агентов)
-        self.print_info("Ожидание готовности сервисов...")
-        time.sleep(5)  # Увеличено время ожидания для инициализации агентов
+        backend_ok = True
+        frontend_ok = True
         
-        backend_ok = self.check_backend_health()
-        frontend_ok = self.check_frontend_health()
+        if not self.no_backend:
+            # Адаптивное ожидание готовности backend с экспоненциальным backoff
+            self.print_info("Ожидание готовности backend...")
+            backend_ok = self._wait_for_backend_ready(max_wait=30)
+            
+            if not backend_ok:
+                self.print_error("Backend не готов после ожидания")
+                self.cleanup()
+                return 1
         
-        if not backend_ok or not frontend_ok:
-            self.print_error("Некоторые сервисы не прошли health check")
-            self.cleanup()
-            return 1
+        if not self.no_frontend:
+            # Проверяем frontend (обычно быстрее запускается)
+            self.print_info("Ожидание готовности frontend...")
+            frontend_ok = self.check_frontend_health()
+            
+            if not frontend_ok:
+                self.print_error("Frontend не прошёл health check")
+                self.cleanup()
+                return 1
         
         # Шаг 4: Информация для пользователя
         self.print_header("✅ Проект запущен успешно!")
         
-        print(f"\n{Colors.GREEN}{Colors.BOLD}Backend:{Colors.RESET}")
-        print(f"  URL: {self.backend_url}")
-        print(f"  API Docs: {self.backend_url}/docs")
-        print(f"  Health: {self.backend_url}/health")
+        if not self.no_backend:
+            print(f"\n{Colors.GREEN}{Colors.BOLD}Backend:{Colors.RESET}")
+            print(f"  URL: {self.backend_url}")
+            print(f"  API Docs: {self.backend_url}/docs")
+            print(f"  Health: {self.backend_url}/health")
         
-        print(f"\n{Colors.CYAN}{Colors.BOLD}Frontend:{Colors.RESET}")
-        print(f"  URL: {self.frontend_url}")
+        if not self.no_frontend:
+            print(f"\n{Colors.CYAN}{Colors.BOLD}Frontend:{Colors.RESET}")
+            print(f"  URL: {self.frontend_url}")
         
         print(f"\n{Colors.YELLOW}Нажмите Ctrl+C для остановки{Colors.RESET}\n")
         
@@ -669,9 +1139,113 @@ class ProjectRunner:
         return 0
 
 
+def parse_args() -> tuple[int, int, bool, bool, bool, bool]:
+    """Парсит аргументы командной строки.
+    
+    Returns:
+        tuple[backend_port, frontend_port, no_backend, no_frontend, skip_checks, require_ollama]
+    """
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Запускает Cursor Killer проект с проверками и мониторингом",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Примеры использования:
+  python run.py --backend-port 8080 # Изменить порт backend
+  python run.py --frontend-port 3000 # Изменить порт frontend
+  python run.py --backend-port 8080 --frontend-port 3000 # Оба порта
+  python run.py --no-frontend # Запустить только backend
+  python run.py --no-backend # Запустить только frontend
+  python run.py --skip-checks # Пропустить проверки (не рекомендуется)
+  python run.py --require-ollama # Требовать наличие Ollama
+        """
+    )
+    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}"
+    )
+    
+    parser.add_argument(
+        "--backend-port",
+        type=int,
+        default=8000,
+        help="Порт для backend сервера (по умолчанию: 8000)"
+    )
+    
+    parser.add_argument(
+        "--frontend-port",
+        type=int,
+        default=5173,
+        help="Порт для frontend сервера (по умолчанию: 5173)"
+    )
+    
+    parser.add_argument(
+        "--no-backend",
+        action="store_true",
+        help="Не запускать backend сервер"
+    )
+    
+    parser.add_argument(
+        "--no-frontend",
+        action="store_true",
+        help="Не запускать frontend сервер"
+    )
+    
+    parser.add_argument(
+        "--skip-checks",
+        action="store_true",
+        help="Пропустить проверки синтаксиса (не рекомендуется)"
+    )
+    
+    parser.add_argument(
+        "--require-ollama",
+        action="store_true",
+        help="Требовать наличие Ollama (иначе ошибка)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Валидация портов
+    if not (1024 <= args.backend_port <= 65535):
+        print(f"❌ Ошибка: backend-port должен быть в диапазоне 1024-65535")
+        sys.exit(1)
+    
+    if not (1024 <= args.frontend_port <= 65535):
+        print(f"❌ Ошибка: frontend-port должен быть в диапазоне 1024-65535")
+        sys.exit(1)
+    
+    if args.backend_port == args.frontend_port:
+        print(f"❌ Ошибка: backend и frontend не могут использовать один порт")
+        sys.exit(1)
+    
+    if args.no_backend and args.no_frontend:
+        print(f"❌ Ошибка: нельзя отключить и backend, и frontend одновременно")
+        sys.exit(1)
+    
+    return (
+        args.backend_port,
+        args.frontend_port,
+        args.no_backend,
+        args.no_frontend,
+        args.skip_checks,
+        args.require_ollama
+    )
+
+
 def main() -> int:
     """Точка входа."""
-    runner = ProjectRunner()
+    backend_port, frontend_port, no_backend, no_frontend, skip_checks, require_ollama = parse_args()
+    runner = ProjectRunner(
+        backend_port=backend_port,
+        frontend_port=frontend_port,
+        no_backend=no_backend,
+        no_frontend=no_frontend,
+        skip_checks=skip_checks,
+        require_ollama=require_ollama
+    )
     return runner.run()
 
 

@@ -24,7 +24,7 @@ dmypy.json
 
 # Output & Artifacts
 output/
-logs/*.jsonl
+logs/
 temp/
 
 # Frontend
@@ -64,3 +64,6 @@ generated_tests.py
 
 # Context Engine Cache
 .context_cache/
+
+# Test Results
+test_results/

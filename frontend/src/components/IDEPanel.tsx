@@ -9,7 +9,6 @@ import {
   File, Folder, PanelLeftClose, PanelLeft
 } from 'lucide-react'
 import { CodeEditor } from './CodeEditor'
-import { IndexProjectResponse, ProjectFilesResponse, FileContentResponse, BrowseFolderResponse } from '../types/api'
 import { extractErrorMessage } from '../utils/apiErrorHandler'
 import { api } from '../services/apiClient'
 import { useLocalStorage, useLocalStorageString } from '../hooks/useLocalStorage'
@@ -39,15 +38,7 @@ interface FileTreeNode {
   error?: string
 }
 
-interface ProjectFilesResponse {
-  tree: FileTreeNode
-  stats: {
-    total_files: number
-    total_directories: number
-    root_path: string
-  }
-  error?: string
-}
+// ProjectFilesResponse определен в types/api.ts
 
 interface IDEPanelProps {
   initialCode?: string
@@ -204,13 +195,15 @@ export function IDEPanel({
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [newFileName, setNewFileName] = useState('script.py')
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [sidebarWidth, setSidebarWidth] = useState(240)
-  const [isResizing, setIsResizing] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
   
   // Resize constraints
+  const DEFAULT_SIDEBAR_WIDTH = 240
   const MIN_SIDEBAR_WIDTH = 150
   const MAX_SIDEBAR_WIDTH = 500
+  
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH)
+  const [isResizing, setIsResizing] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
   
   // Project state
   const [showProjectModal, setShowProjectModal] = useState(false)
@@ -242,8 +235,11 @@ export function IDEPanel({
   const [savedSidebarOpen, setSavedSidebarOpen] = useLocalStorage<boolean>('ideSidebarOpen', true)
   const [savedSidebarWidth, setSavedSidebarWidth] = useLocalStorage<number>('ideSidebarWidth', DEFAULT_SIDEBAR_WIDTH)
   
-  // Sync with props and localStorage
+  // Initialize from localStorage only once on mount
+  const isInitialized = useRef(false)
   useEffect(() => {
+    if (isInitialized.current) return
+    
     if (savedProjectPath && !projectPath && onProjectPathChange) {
       onProjectPathChange(savedProjectPath)
       setTempPath(savedProjectPath)
@@ -252,31 +248,48 @@ export function IDEPanel({
       onFileExtensionsChange(savedFileExtensions)
       setTempExtensions(savedFileExtensions)
     }
-    setSidebarOpen(savedSidebarOpen)
-    if (savedSidebarWidth >= MIN_SIDEBAR_WIDTH && savedSidebarWidth <= MAX_SIDEBAR_WIDTH) {
+    if (savedSidebarOpen !== sidebarOpen) {
+      setSidebarOpen(savedSidebarOpen)
+    }
+    if (savedSidebarWidth >= MIN_SIDEBAR_WIDTH && savedSidebarWidth <= MAX_SIDEBAR_WIDTH && savedSidebarWidth !== sidebarWidth) {
       setSidebarWidth(savedSidebarWidth)
     }
-  }, [savedProjectPath, savedFileExtensions, savedSidebarOpen, savedSidebarWidth, projectPath, fileExtensions, onProjectPathChange, onFileExtensionsChange])
+    
+    isInitialized.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Run only once on mount - dependencies intentionally omitted to prevent loops
   
-  // Save to localStorage when changed
+  // Save to localStorage when changed (but avoid infinite loops by checking if value actually changed)
+  const prevProjectPath = useRef(projectPath)
   useEffect(() => {
-    if (projectPath) {
+    if (projectPath && projectPath !== prevProjectPath.current) {
+      prevProjectPath.current = projectPath
       setSavedProjectPath(projectPath)
     }
   }, [projectPath, setSavedProjectPath])
   
+  const prevFileExtensions = useRef(fileExtensions)
   useEffect(() => {
-    if (fileExtensions) {
+    if (fileExtensions && fileExtensions !== prevFileExtensions.current) {
+      prevFileExtensions.current = fileExtensions
       setSavedFileExtensions(fileExtensions)
     }
   }, [fileExtensions, setSavedFileExtensions])
   
+  const prevSidebarOpen = useRef(sidebarOpen)
   useEffect(() => {
-    setSavedSidebarOpen(sidebarOpen)
+    if (sidebarOpen !== prevSidebarOpen.current) {
+      prevSidebarOpen.current = sidebarOpen
+      setSavedSidebarOpen(sidebarOpen)
+    }
   }, [sidebarOpen, setSavedSidebarOpen])
   
+  const prevSidebarWidth = useRef(sidebarWidth)
   useEffect(() => {
-    setSavedSidebarWidth(sidebarWidth)
+    if (sidebarWidth !== prevSidebarWidth.current) {
+      prevSidebarWidth.current = sidebarWidth
+      setSavedSidebarWidth(sidebarWidth)
+    }
   }, [sidebarWidth, setSavedSidebarWidth])
 
   // Resize handlers
@@ -341,7 +354,17 @@ export function IDEPanel({
         setExpandedDirs(new Set([data.tree.path]))
       }
     } catch (error) {
-      console.error('Ошибка загрузки дерева файлов:', extractErrorMessage(error))
+      const errorMessage = extractErrorMessage(error)
+      // ИСПРАВЛЕНИЕ: Не показываем ошибку 403 многократно, если она уже была показана
+      // Это предотвращает засорение консоли повторяющимися ошибками
+      if (errorMessage.includes('Доступ запрещён') || errorMessage.includes('403')) {
+        // Логируем только один раз для 403 ошибок
+        if (!fileTree) {
+          console.warn('⚠️ Доступ к директории запрещён (вне проекта):', projectPath)
+        }
+      } else {
+        console.error('Ошибка загрузки дерева файлов:', errorMessage)
+      }
       setFileTree(null)
     } finally {
       setIsLoadingTree(false)
@@ -352,7 +375,7 @@ export function IDEPanel({
     if (projectPath) {
       loadFileTree(projectPath, fileExtensions)
     }
-  }, [projectPath, loadFileTree])
+  }, [projectPath, fileExtensions, loadFileTree])
 
   // ============================================================================
   // Handlers

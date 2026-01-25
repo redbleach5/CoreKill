@@ -49,6 +49,9 @@ class BaseAgent(ABC):
             stage: Этап workflow (для выбора модели и конфигурации)
             llm: LLM для использования (для тестирования, по умолчанию создаётся автоматически)
         """
+        # Вызываем super().__init__() для правильной инициализации ABC
+        super().__init__()
+        
         if llm is not None:
             self.llm = llm
             self.model = getattr(llm, 'model', model) or "unknown"
@@ -94,6 +97,83 @@ class BaseAgent(ABC):
         )
         
         return model, llm
+    
+    def reset(self) -> None:
+        """Сбрасывает состояние агента.
+        
+        Общий метод для всех стриминговых агентов.
+        Сбрасывает флаг прерывания и состояние reasoning менеджера.
+        """
+        self._interrupted = False
+        if hasattr(self, 'reasoning_manager') and self.reasoning_manager:
+            self.reasoning_manager.reset()
+    
+    def _switch_to_fallback_model(
+        self,
+        failed_model: str,
+        task_type: str = "coding",
+        complexity: Optional[Any] = None
+    ) -> bool:
+        """Переключается на запасную модель при ошибке основной.
+        
+        Args:
+            failed_model: Модель которая не сработала
+            task_type: Тип задачи (coding, testing, planning, etc.)
+            complexity: Сложность задачи (если известна)
+            
+        Returns:
+            True если переключение успешно, False если запасной модели нет
+        """
+        from utils.model_checker import TaskComplexity
+        
+        router = get_model_router()
+        
+        # Преобразуем complexity в TaskComplexity если нужно
+        task_complexity = None
+        if complexity:
+            if isinstance(complexity, TaskComplexity):
+                task_complexity = complexity
+            elif isinstance(complexity, str):
+                try:
+                    task_complexity = TaskComplexity[complexity.upper()]
+                except KeyError:
+                    pass
+        
+        # Получаем запасную модель
+        fallback_selection = router.get_fallback_model(
+            failed_model=failed_model,
+            task_type=task_type,
+            complexity=task_complexity
+        )
+        
+        if not fallback_selection:
+            logger.error(f"❌ Нет доступных запасных моделей для {failed_model}")
+            return False
+        
+        new_model = fallback_selection.model
+        logger.info(
+            f"🔄 Переключаюсь с {failed_model} на {new_model} "
+            f"(причина: {fallback_selection.reason})"
+        )
+        
+        # Пересоздаём LLM с новой моделью
+        self.model = new_model
+        try:
+            self.llm = create_llm_for_stage(
+                stage=self.stage,
+                model=new_model,
+                temperature=self.temperature,
+                top_p=0.9
+            )
+            # Проверяем доступность новой модели перед переключением
+            from utils.model_checker import check_model_available
+            if not check_model_available(new_model):
+                logger.error(f"❌ Запасная модель {new_model} также недоступна")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка при переключении на модель {new_model}: {e}")
+            return False
     
     def _clean_code(self, raw_code: str) -> str:
         """Очищает сгенерированный код от markdown и лишних элементов.

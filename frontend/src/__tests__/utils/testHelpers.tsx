@@ -3,7 +3,7 @@
  */
 import { ReactElement } from 'react'
 import { render, RenderOptions } from '@testing-library/react'
-import { setupTestMocks, cleanupTestMocks } from './mocks'
+import { setupTestMocks } from './mocks'
 
 /**
  * Обертка для render с автоматической настройкой моков.
@@ -63,4 +63,24 @@ export async function waitForAsync(callback: () => Promise<void>, timeout = 5000
   }
   
   throw new Error(`Timeout waiting for async operation (${timeout}ms)`)
+}
+
+/**
+ * Создает мок для window.location.
+ */
+export function createLocationMock(overrides: Partial<Location> = {}): Location {
+  const defaultLocation: Partial<Location> = {
+    href: 'http://localhost:5173',
+    protocol: 'http:',
+    host: 'localhost:5173',
+    hostname: 'localhost',
+    port: '5173',
+    pathname: '/',
+    search: '',
+    hash: '',
+    origin: 'http://localhost:5173',
+    ...overrides,
+  }
+  
+  return defaultLocation as Location
 }

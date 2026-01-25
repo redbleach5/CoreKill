@@ -223,11 +223,8 @@ class IntentAgent:
         Returns:
             Код языка ('ru' или 'en')
         """
-        # Проверяем наличие кириллических символов
-        has_cyrillic = any('\u0400' <= char <= '\u04FF' for char in query)
-        
-        # Если есть кириллица - русский, иначе английский
-        return "ru" if has_cyrillic else "en"
+        from utils.helpers import detect_language
+        return detect_language(query)
     
     def _get_prompt(self, query: str, is_structured: bool = True) -> str:
         """Создаёт промпт для классификации намерения.
@@ -661,33 +658,11 @@ JSON:"""
     def _is_greeting(self, query: str) -> bool:
         """Проверяет, является ли запрос приветствием.
         
-        Использует единую логику с is_greeting_fast, но с дополнительной проверкой
-        на ключевые слова кода для более длинных запросов.
-        
         Args:
             query: Запрос пользователя
             
         Returns:
             True если это приветствие, False иначе
         """
-        if not query:
-            return False
-        
-        query_lower = query.strip().lower()
-        words = query_lower.split()
-        
-        # Если есть ключевые слова кода — это НЕ приветствие
-        for word in words:
-            if word in self.CODE_KEYWORDS:
-                return False
-        
-        # Для коротких запросов используем быструю проверку
-        if len(words) <= 3:
-            return self.is_greeting_fast(query)
-        
-        # Для длинных запросов проверяем начало фразы
-        for greeting in self.GREETINGS:
-            if query_lower.startswith(greeting + " "):
-                return True
-        
-        return False
+        from utils.helpers import is_greeting
+        return is_greeting(query)

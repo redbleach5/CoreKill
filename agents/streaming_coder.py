@@ -23,14 +23,18 @@
             final_code = data
     ```
 """
-from typing import Optional, Dict, Any, AsyncGenerator
+from typing import Optional, Dict, Any, AsyncGenerator, TYPE_CHECKING
 from infrastructure.local_llm import create_llm_for_stage, StreamChunk
 from infrastructure.prompt_enhancer import get_prompt_enhancer
 from infrastructure.reasoning_stream import get_reasoning_stream_manager
+from infrastructure.coder_prompt_builder import get_coder_prompt_builder
 from utils.logger import get_logger
 from utils.config import get_config
 from utils.intent_helpers import get_intent_description
 from agents.base import BaseAgent
+
+if TYPE_CHECKING:
+    from infrastructure.coder_prompt_builder import CoderPromptBuilder
 
 logger = get_logger()
 
@@ -68,6 +72,7 @@ class StreamingCoderAgent(BaseAgent):
         
         self.user_query = user_query
         self.prompt_enhancer = get_prompt_enhancer()
+        self.prompt_builder = get_coder_prompt_builder()
         self.reasoning_manager = get_reasoning_stream_manager()
         self._interrupted = False
     
@@ -76,11 +81,6 @@ class StreamingCoderAgent(BaseAgent):
         self._interrupted = True
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Генерация кода прервана")
-    
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
     
     async def generate_code_stream(
         self,
@@ -126,6 +126,34 @@ class StreamingCoderAgent(BaseAgent):
             yield ("done", "")
             return
         
+        # Отправляем thinking о начале анализа
+        from datetime import datetime
+        from infrastructure.reasoning_stream import ThinkingChunk, ThinkingStatus
+        start_time = datetime.now()
+        
+        yield ("thinking", await self.reasoning_manager.create_thinking_event(
+            ThinkingChunk(
+                content="Начинаю анализ задачи и подготовку к генерации кода...",
+                status=ThinkingStatus.IN_PROGRESS,
+                stage=stage,
+                elapsed_ms=0,
+                total_chars=0
+            )
+        ))
+        
+        # Анализируем контекст и отправляем thinking
+        if context:
+            context_preview = context[:200] + "..." if len(context) > 200 else context
+            yield ("thinking", await self.reasoning_manager.create_thinking_event(
+                ThinkingChunk(
+                    content=f"Анализирую контекст проекта ({len(context)} символов): {context_preview}",
+                    status=ThinkingStatus.IN_PROGRESS,
+                    stage=stage,
+                    elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                    total_chars=0
+                )
+            ))
+        
         # Строим промпт
         query = user_query or self.user_query
         if query:
@@ -137,12 +165,25 @@ class StreamingCoderAgent(BaseAgent):
                 context=context
             )
         else:
-            prompt = self._build_code_generation_prompt(
+            # ИСПРАВЛЕНИЕ: Используем prompt_builder вместо удаленного метода
+            prompt = self.prompt_builder.build_generation_prompt(
                 plan=plan,
                 tests=tests,
                 context=context,
-                intent_type=intent_type
+                intent_type=intent_type,
+                user_query=query
             )
+        
+        # Отправляем thinking о начале генерации
+        yield ("thinking", await self.reasoning_manager.create_thinking_event(
+            ThinkingChunk(
+                content=f"Начинаю генерацию кода для задачи типа '{intent_type}'. План содержит {len(plan.split(chr(10)))} шагов.",
+                status=ThinkingStatus.IN_PROGRESS,
+                stage=stage,
+                elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                total_chars=0
+            )
+        ))
         
         config = get_config()
         code_buffer = ""
@@ -163,6 +204,10 @@ class StreamingCoderAgent(BaseAgent):
                 if event_type == "thinking":
                     # Пробрасываем SSE событие для thinking
                     yield ("thinking", data)
+                    
+                elif event_type == "progress":
+                    # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                    yield ("progress", data)
                     
                 elif event_type == "content":
                     # Накапливаем код и отправляем чанк
@@ -186,8 +231,106 @@ class StreamingCoderAgent(BaseAgent):
             yield ("done", cleaned_code)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка стриминга кода: {e}", error=e)
-            yield ("done", "")
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при генерации кода: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="coding",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю генерацию...")
+                    
+                    # ВАЖНО: Пересоздаём промпт после переключения модели
+                    # (модель могла измениться, промпт должен быть актуальным)
+                    query = user_query or self.user_query
+                    if query:
+                        prompt = self.prompt_enhancer.enhance_for_coding(
+                            user_query=query,
+                            intent_type=intent_type,
+                            plan=plan,
+                            tests=tests,
+                            context=context
+                        )
+                    else:
+                        # ИСПРАВЛЕНИЕ: Используем prompt_builder вместо удаленного метода
+                        prompt = self.prompt_builder.build_generation_prompt(
+                            plan=plan,
+                            tests=tests,
+                            context=context,
+                            intent_type=intent_type,
+                            user_query=query
+                        )
+                    
+                    # Отправляем thinking о переключении модели
+                    yield ("thinking", await self.reasoning_manager.create_thinking_event(
+                        ThinkingChunk(
+                            content=f"Переключился на модель {self.model}. Продолжаю генерацию кода...",
+                            status=ThinkingStatus.IN_PROGRESS,
+                            stage=stage,
+                            elapsed_ms=int((datetime.now() - start_time).total_seconds() * 1000),
+                            total_chars=0
+                        )
+                    ))
+                    
+                    # Повторяем попытку с новой моделью
+                    try:
+                        code_buffer = ""
+                        full_response = ""
+                        
+                        async for event_type, data in self.reasoning_manager.stream_from_llm(
+                            llm=self.llm,
+                            prompt=prompt,
+                            stage=stage,
+                            num_predict=config.llm_tokens_code
+                        ):
+                            if self._interrupted:
+                                logger.info("⏹️ Генерация прервана пользователем")
+                                break
+                            
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "content":
+                                code_buffer += data
+                                yield ("code_chunk", data)
+                            elif event_type == "done":
+                                full_response = data
+                        
+                        # Очищаем финальный код
+                        if full_response:
+                            cleaned_code = self._clean_code_from_reasoning(full_response)
+                        else:
+                            cleaned_code = self._clean_code(code_buffer)
+                        
+                        if cleaned_code:
+                            logger.info(f"✅ Код сгенерирован с запасной моделью ({len(cleaned_code)} символов)")
+                        else:
+                            logger.warning("⚠️ Не удалось сгенерировать валидный код даже с запасной моделью")
+                        
+                        yield ("done", cleaned_code)
+                        return
+                        
+                    except Exception as retry_error:
+                        logger.error(
+                            f"❌ Ошибка при повторной попытке с запасной моделью {self.model}: {retry_error}",
+                            error=retry_error
+                        )
+                        yield ("done", "")
+                else:
+                    logger.error(
+                        f"❌ Не удалось переключиться на запасную модель. "
+                        f"Код не был сгенерирован."
+                    )
+                    yield ("done", "")
+            else:
+                logger.error(f"❌ Ошибка стриминга кода: {e}", error=e)
+                yield ("done", "")
     
     async def fix_code_stream(
         self,
@@ -218,7 +361,8 @@ class StreamingCoderAgent(BaseAgent):
             yield ("done", code)
             return
         
-        prompt = self._build_fix_prompt(
+        # ИСПРАВЛЕНИЕ: Используем prompt_builder вместо удаленного метода
+        prompt = self.prompt_builder.build_fix_prompt(
             code=code,
             instructions=instructions,
             tests=tests,
@@ -262,147 +406,81 @@ class StreamingCoderAgent(BaseAgent):
             yield ("done", cleaned_code)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка стриминга исправления: {e}", error=e)
-            yield ("done", code)
-    
-    # === Синхронные методы для обратной совместимости ===
-    
-    def generate_code(
-        self,
-        plan: str,
-        tests: str,
-        context: str,
-        intent_type: str,
-        user_query: str = ""
-    ) -> str:
-        """Синхронная генерация кода (для обратной совместимости).
-        
-        Использует существующий CoderAgent под капотом.
-        """
-        from agents.coder import CoderAgent
-        
-        sync_agent = CoderAgent(
-            model=self.model,
-            temperature=self.temperature,
-            user_query=user_query or self.user_query
-        )
-        return sync_agent.generate_code(plan, tests, context, intent_type, user_query)
-    
-    def fix_code(
-        self,
-        code: str,
-        instructions: str,
-        tests: str,
-        validation_results: Dict[str, Any]
-    ) -> str:
-        """Синхронное исправление кода (для обратной совместимости)."""
-        from agents.coder import CoderAgent
-        
-        sync_agent = CoderAgent(
-            model=self.model,
-            temperature=self.temperature
-        )
-        return sync_agent.fix_code(code, instructions, tests, validation_results)
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при исправлении кода: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="fixing",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю исправление...")
+                    
+                    # Повторяем попытку с новой моделью
+                    try:
+                        code_buffer = ""
+                        full_response = ""
+                        
+                        async for event_type, data in self.reasoning_manager.stream_from_llm(
+                            llm=self.llm,
+                            prompt=prompt,
+                            stage=stage,
+                            num_predict=config.llm_tokens_code
+                        ):
+                            if self._interrupted:
+                                break
+                            
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "content":
+                                code_buffer += data
+                                yield ("code_chunk", data)
+                            elif event_type == "done":
+                                full_response = data
+                        
+                        # Очищаем код
+                        if full_response:
+                            cleaned_code = self._clean_code_from_reasoning(full_response)
+                        else:
+                            cleaned_code = self._clean_code(code_buffer)
+                        
+                        if not cleaned_code:
+                            logger.warning("⚠️ Не удалось исправить код даже с запасной моделью, возвращаю исходный")
+                            cleaned_code = code
+                        else:
+                            logger.info(f"✅ Код исправлен с запасной моделью ({len(cleaned_code)} символов)")
+                        
+                        yield ("done", cleaned_code)
+                        return
+                        
+                    except Exception as retry_error:
+                        logger.error(
+                            f"❌ Ошибка при повторной попытке с запасной моделью {self.model}: {retry_error}",
+                            error=retry_error
+                        )
+                        yield ("done", code)
+                else:
+                    logger.error(
+                        f"❌ Не удалось переключиться на запасную модель. "
+                        f"Возвращаю исходный код."
+                    )
+                    yield ("done", code)
+            else:
+                logger.error(f"❌ Ошибка стриминга исправления: {e}", error=e)
+                yield ("done", code)
     
     # === Приватные методы (общие с CoderAgent) ===
     
-    def _build_code_generation_prompt(
-        self,
-        plan: str,
-        tests: str,
-        context: str,
-        intent_type: str
-    ) -> str:
-        """Строит промпт для генерации кода."""
-        # Используем унифицированную функцию для получения описания intent
-        intent_desc = get_intent_description(intent_type, format="short") or "выполнить задачу"
-        
-        context_section = ""
-        if context.strip():
-            context_section = f"""
-Контекст из базы знаний:
-{context}
-"""
-        
-        prompt = f"""Ты - эксперт по написанию чистого Python кода. Реализуй код, который пройдёт следующие тесты.
-
-Тип задачи: {intent_desc}
-
-План реализации:
-{plan}
-{context_section}
-Тесты, которые должен пройти код:
-{tests}
-
-Требования к коду:
-1. Код должен проходить ВСЕ предоставленные тесты
-2. Используй type hints для всех функций и методов
-3. Добавь docstrings на русском языке для всех публичных функций/классов/методов
-4. Следуй PEP8 и лучшим практикам Python
-5. Код должен быть читаемым и понятным
-6. Обрабатывай ошибки там, где это необходимо
-7. Используй понятные имена переменных (snake_case)
-8. Импортируй все необходимые модули
-
-Верни ТОЛЬКО код на Python, без объяснений и markdown разметки. Начни сразу с import statements.
-
-Код:
-"""
-        return prompt
-    
-    def _build_fix_prompt(
-        self,
-        code: str,
-        instructions: str,
-        tests: str,
-        validation_results: Dict[str, Any]
-    ) -> str:
-        """Строит промпт для исправления кода."""
-        error_summary = []
-        if not validation_results.get("pytest", {}).get("success", True):
-            pytest_output = validation_results.get("pytest", {}).get("output", "")
-            error_summary.append(f"pytest errors: {pytest_output[:300]}")
-        if not validation_results.get("mypy", {}).get("success", True):
-            mypy_errors = validation_results.get("mypy", {}).get("errors", "")
-            error_summary.append(f"mypy errors: {mypy_errors[:300]}")
-        if not validation_results.get("bandit", {}).get("success", True):
-            bandit_issues = validation_results.get("bandit", {}).get("issues", "")
-            error_summary.append(f"bandit issues: {bandit_issues[:300]}")
-        
-        errors_context = "\n".join(error_summary) if error_summary else "No specific error details"
-        
-        prompt = f"""You are an expert Python code fixer. Fix the code according to the specific instructions from Debugger Agent.
-
-Current code (with errors):
-```python
-{code}
-```
-
-Tests:
-```python
-{tests[:1000]}
-```
-
-Validation errors:
-{errors_context}
-
-FIX INSTRUCTIONS (from Debugger Agent):
-{instructions}
-
-IMPORTANT RULES:
-1. Follow the fix instructions EXACTLY
-2. Make MINIMAL changes
-3. Keep all existing functionality
-4. Maintain type hints and docstrings
-5. Return ONLY the fixed Python code, no explanations
-
-Fixed code:
-"""
-        return prompt
-    
+    # _build_code_generation_prompt и _build_fix_prompt удалены в пользу CoderPromptBuilder
 
 
-# === Factory функция ===
+    # === Factory функция ===
 
 def get_streaming_coder_agent(
     model: Optional[str] = None,

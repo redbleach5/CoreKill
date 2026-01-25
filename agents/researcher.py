@@ -1,5 +1,5 @@
 """Агент для сбора контекста (RAG + веб-поиск + память + codebase indexing)."""
-from typing import Optional
+from typing import Optional, Any
 from pathlib import Path
 from infrastructure.rag import RAGSystem
 from infrastructure.web_search import web_search
@@ -47,7 +47,8 @@ class ResearcherAgent:
         max_web_results: int = 3,
         disable_web_search: bool = False,
         project_path: Optional[str] = None,
-        file_extensions: Optional[list[str]] = None
+        file_extensions: Optional[list[str]] = None,
+        complexity: Optional[Any] = None
     ) -> str:
         """Собирает релевантный контекст для запроса.
         
@@ -58,6 +59,7 @@ class ResearcherAgent:
             disable_web_search: Отключить веб-поиск даже если RAG не нашёл контекст
             project_path: Путь к проекту для индексации кодовой базы (ContextEngine)
             file_extensions: Расширения файлов для индексации (по умолчанию ['.py'])
+            complexity: Сложность задачи (для ограничения контекста для простых задач)
             
         Returns:
             Объединённый контекстный блок с информацией из codebase, RAG, памяти и веб-поиска
@@ -65,20 +67,44 @@ class ResearcherAgent:
         if not query.strip():
             return ""
         
-        # Не ищем контекст для приветствий
+        # ИСПРАВЛЕНИЕ: Для приветствий с вопросами всё равно используем веб-поиск
+        # если запрос содержит вопросы о фактах
         if intent_type == "greeting":
-            logger.info("ℹ️ Пропущен поиск контекста для приветствия")
-            return ""
+            # Проверяем, есть ли в запросе вопросы (не просто "привет")
+            has_question = any(indicator in query.lower() for indicator in ["?", "знаешь", "do you know", "what", "who", "when", "where"])
+            if not has_question or len(query.split()) <= 3:
+                logger.info("ℹ️ Пропущен поиск контекста для простого приветствия")
+                return ""
+            else:
+                logger.info("ℹ️ Приветствие содержит вопрос - используем веб-поиск для ответа")
         
         logger.info(f"🔍 Ищу контекст для: {query[:60]}...")
         
         context_parts: list[str] = []
         
         # Шаг 0: Если указан project_path — ищем в кодовой базе через ContextEngine
-        if project_path:
+        # Для create+simple задач ограничиваем или пропускаем контекст из codebase
+        # чтобы не засорять промпт посторонним кодом
+        should_limit_codebase = (
+            intent_type == "create" and 
+            complexity is not None and 
+            hasattr(complexity, 'value') and 
+            complexity.value == "simple"
+        )
+        
+        if project_path and not should_limit_codebase:
             codebase_context = self._search_codebase(query, project_path, file_extensions)
             if codebase_context:
                 context_parts.append("[Контекст кодовой базы]")
+                context_parts.append(codebase_context)
+                context_parts.append("")  # Пустая строка для разделения
+        elif project_path and should_limit_codebase:
+            # Для create+simple используем сильно ограниченный контекст
+            codebase_context = self._search_codebase(
+                query, project_path, file_extensions, max_context_tokens=500
+            )
+            if codebase_context:
+                context_parts.append("[Контекст кодовой базы (ограничен для простой задачи)]")
                 context_parts.append(codebase_context)
                 context_parts.append("")  # Пустая строка для разделения
         
@@ -169,21 +195,27 @@ class ResearcherAgent:
             return 0.0
         
         # Если есть результаты, берём минимальное расстояние
-        # ChromaDB возвращает косинусное расстояние (меньше = лучше)
+        # ChromaDB с cosine distance возвращает значения где:
+        # - 0.0 = идентичные векторы (максимальная схожесть)
+        # - 1.0 = ортогональные векторы (нет схожести)
+        # - 2.0 = противоположные векторы (максимальная несхожесть)
+        # Для cosine distance: меньше = лучше (больше схожесть)
         min_distance = min((r.get("distance", 1.0) for r in results), default=1.0)
         
-        # Преобразуем расстояние в уверенность
-        # Косинусное расстояние обычно в диапазоне [0, 2]
-        # Для близких результатов (distance < 0.5) → высокая уверенность
-        # Для далёких результатов (distance > 1.0) → низкая уверенность
-        if min_distance < 0.3:
-            base_confidence = 0.9
+        # Преобразуем cosine distance в уверенность
+        # Cosine distance в диапазоне [0, 2], но обычно для похожих документов < 0.5
+        # Для близких результатов (distance < 0.2) → очень высокая уверенность
+        # Для далёких результатов (distance > 0.8) → низкая уверенность
+        if min_distance < 0.2:
+            base_confidence = 0.95  # Очень похожие документы
+        elif min_distance < 0.3:
+            base_confidence = 0.85  # Похожие документы
         elif min_distance < 0.5:
-            base_confidence = 0.75
+            base_confidence = 0.7   # Умеренно похожие
         elif min_distance < 0.7:
-            base_confidence = 0.6
+            base_confidence = 0.5   # Слабо похожие
         else:
-            base_confidence = 0.4
+            base_confidence = 0.3   # Не очень релевантные
         
         # Учитываем количество результатов
         count_factor = min(len(results) / 4.0, 1.0)
@@ -195,7 +227,8 @@ class ResearcherAgent:
         self,
         query: str,
         project_path: str,
-        file_extensions: Optional[list[str]] = None
+        file_extensions: Optional[list[str]] = None,
+        max_context_tokens: Optional[int] = None
     ) -> str:
         """Ищет релевантный контекст в кодовой базе проекта.
         
@@ -203,6 +236,7 @@ class ResearcherAgent:
             query: Поисковый запрос
             project_path: Путь к проекту
             file_extensions: Расширения файлов для поиска (по умолчанию ['.py'])
+            max_context_tokens: Максимальное количество токенов в контексте (опционально)
             
         Returns:
             Контекст из кодовой базы или пустая строка
@@ -223,7 +257,8 @@ class ResearcherAgent:
             codebase_context = self.context_engine.get_context(
                 query=query,
                 project_path=project_path,
-                extensions=extensions
+                extensions=extensions,
+                max_context_tokens=max_context_tokens
             )
             
             if codebase_context:

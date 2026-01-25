@@ -3,10 +3,14 @@
  * 
  * Проверяет, что все используемые функции/хуки имеют соответствующие импорты.
  */
-import { describe, it, expect } from 'vitest'
-import { readFileSync, existsSync } from 'fs'
-import { join } from 'path'
-import { readdirSync, statSync } from 'fs'
+import { describe, it } from 'vitest'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Получаем __dirname для ES modules
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
 const FRONTEND_SRC = join(__dirname, '..')
 const COMPONENTS_DIR = join(FRONTEND_SRC, 'components')
@@ -101,7 +105,7 @@ function checkFile(filePath: string): Array<{ pattern: string; line: number }> {
       
       if (!hasImport) {
         // Находим строку с использованием
-        const lineIndex = lines.findIndex(line => usage.test(line))
+        const lineIndex = lines.findIndex((line: string) => usage.test(line))
         if (lineIndex !== -1) {
           issues.push({ pattern: name, line: lineIndex + 1 })
         }

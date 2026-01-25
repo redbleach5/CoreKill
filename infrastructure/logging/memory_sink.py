@@ -54,9 +54,10 @@ class MemoryLoggerSink(LoggerSink):
             for callback in self._callbacks:
                 try:
                     callback(event)
-                except Exception:
-                    # Игнорируем ошибки в callback-ах
-                    pass
+                except Exception as e:
+                    # Используем sys.stderr чтобы избежать рекурсии при логировании ошибок логирования
+                    import sys
+                    sys.stderr.write(f"⚠️ MemoryLoggerSink: ошибка в callback: {e}\n")
     
     def subscribe(self, callback: Callable[[LogEvent], None]) -> None:
         """Подписывает callback на новые события.

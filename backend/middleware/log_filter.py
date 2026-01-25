@@ -14,29 +14,8 @@ from urllib.parse import unquote, parse_qs, urlencode
 
 def _is_greeting(task: str) -> bool:
     """Проверяет, является ли task приветствием (та же логика что в IntentAgent)."""
-    if not task:
-        return False
-    
-    task_lower = task.strip().lower()
-    greetings = [
-        "привет", "здравствуй", "здравствуйте", "добрый день",
-        "добрый вечер", "доброе утро", "доброй ночи", "хай", "хей", "салют",
-        "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
-        "good evening", "good night", "howdy", "sup"
-    ]
-    
-    # Проверяем точное совпадение или начало фразы
-    is_greeting = any(
-        task_lower == greeting or task_lower.startswith(greeting + " ")
-        for greeting in greetings
-    )
-    
-    # Проверяем короткие запросы (1-2 слова)
-    if not is_greeting and len(task_lower.split()) <= 2:
-        words = task_lower.split()
-        is_greeting = any(greeting in words for greeting in greetings)
-    
-    return is_greeting
+    from utils.helpers import is_greeting
+    return is_greeting(task)
 
 
 # AccessLogMiddleware не нужен - фильтр логов работает на уровне logging.Filter
@@ -55,7 +34,10 @@ class GreetingLogFilter(logging.Filter):
         # Сначала пробуем получить через getMessage, если нет - используем msg напрямую
         try:
             msg = record.getMessage() if hasattr(record, "getMessage") else str(record.msg)
-        except Exception:
+        except Exception as e:
+            # Используем sys.stderr чтобы избежать циклических вызовов логгера
+            import sys
+            sys.stderr.write(f"GreetingLogFilter: ошибка получения сообщения: {e}\n")
             msg = str(record.msg) if hasattr(record, "msg") else ""
         
         # Проверяем, содержит ли сообщение /api/stream и model
@@ -98,7 +80,7 @@ class GreetingLogFilter(logging.Filter):
                                         for i, arg in enumerate(args_list):
                                             if isinstance(arg, str) and old_query_part in arg:
                                                 args_list[i] = arg.replace(old_query_part, new_query_part)
-                                        record.args = tuple(args_list) if isinstance(record.args, tuple) else args_list  # type: ignore[assignment]
+                                        record.args = tuple(args_list) if isinstance(record.args, tuple) else args_list  # type: ignore[assignment]  # LogRecord.args может быть tuple или list, мы нормализуем тип
             except Exception as e:
                 # Логируем ошибку для отладки (но не через наш логгер, чтобы не было циклических вызовов)
                 import sys
@@ -128,6 +110,6 @@ def setup_log_filter() -> None:
     for handler in root_logger.handlers:
         # Проверяем, что это handler для uvicorn.access (по имени или классу)
         handler_name = getattr(handler, 'name', '')
-        if 'uvicorn' in handler_name.lower() or 'access' in handler_name.lower():
+        if handler_name and ('uvicorn' in handler_name.lower() or 'access' in handler_name.lower()):
             handler.filters = [f for f in handler.filters if not isinstance(f, GreetingLogFilter)]
             handler.addFilter(GreetingLogFilter())

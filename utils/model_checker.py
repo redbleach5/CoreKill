@@ -4,6 +4,56 @@
 - Динамическое сканирование моделей при каждом запросе
 - Анализ размера моделей (параметры, VRAM)
 - Выбор оптимальной модели по сложности задачи
+
+Примеры использования:
+    ```python
+    from utils.model_checker import (
+        get_coder_model,
+        get_reasoning_model,
+        get_best_model_for_complexity,
+        scan_available_models,
+        TaskComplexity
+    )
+    
+    # Получить лучшую модель для генерации кода
+    model = get_coder_model(min_quality=0.7)
+    
+    # Получить reasoning модель
+    reasoning_model = get_reasoning_model(min_quality=0.8)
+    
+    # Выбрать модель по сложности задачи
+    model = get_best_model_for_complexity(
+        TaskComplexity.COMPLEX,
+        prefer_coder=True
+    )
+    
+    # Сканировать все доступные модели
+    models = scan_available_models()
+    for name, info in models.items():
+        # {name}: {info.estimated_quality}, {info.parameter_size}
+    
+    # Проверить доступность модели
+    from utils.model_checker import check_model_available
+    if check_model_available("qwen2.5-coder:7b"):
+        # Модель доступна
+    ```
+
+Зависимости:
+    - ollama: для работы с Ollama API
+    - re: для парсинга названий моделей
+    - dataclasses: для ModelInfo
+    - enum: для TaskComplexity
+    - utils.logger: для логирования
+
+Связанные утилиты:
+    - infrastructure.model_router: использует эту утилиту для выбора моделей
+    - utils.config: конфигурация моделей
+
+Примечания:
+    - Кэширует результаты сканирования моделей
+    - Используйте invalidate_models_cache() для принудительного обновления
+    - Автоматически определяет reasoning модели (DeepSeek-R1, QwQ, o1)
+    - Оценивает качество моделей на основе размера и специализации
 """
 import re
 import ollama
@@ -91,12 +141,39 @@ class ModelInfo:
 # Кэш информации о моделях (обновляется при каждом сканировании)
 _models_cache: Dict[str, ModelInfo] = {}
 _cache_valid: bool = False
+_cache_ollama_host: str | None = None
+
+
+def _current_ollama_host() -> str | None:
+    """Возвращает текущий хост Ollama, влияющий на список моделей.
+    
+    Нужен для корректной инвалидации кэша при переключении localhost ↔ remote.
+    """
+    import os
+    # Сначала проверяем переменные окружения (высший приоритет)
+    env_host = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST")
+    if env_host:
+        return env_host
+    
+    # Затем проверяем конфиг
+    try:
+        from utils.config import get_config
+        config = get_config()
+        host = config.ollama_host
+        if host:
+            return host
+    except Exception as e:
+        logger.debug(f"⚠️ Ошибка получения Ollama хоста из конфига: {e}")
+    
+    # Дефолт
+    return "http://localhost:11434"
 
 
 def invalidate_models_cache() -> None:
     """Инвалидирует кэш моделей для принудительного пересканирования."""
-    global _cache_valid
+    global _cache_valid, _cache_ollama_host
     _cache_valid = False
+    _cache_ollama_host = None
 
 
 def check_ollama_api_available() -> bool:
@@ -456,29 +533,44 @@ def get_light_model() -> Optional[str]:
     
     Использует scan_available_models() для динамического выбора.
     Приоритет: модели до 4B параметров.
+    Исключает проблемные модели (stable-code и т.д.).
     
     Returns:
         Название легкой модели или None если ничего не найдено
     """
+    # Черный список проблемных моделей
+    PROBLEMATIC_MODELS = {"stable-code:latest", "stable-code"}
+    
     models = scan_available_models()
     if not models:
         return None
     
-    # Фильтруем embed модели и находим легкие (до 4B)
+    # Фильтруем embed модели и проблемные модели, находим легкие (до 4B)
     light_models = [
         m for m in models.values()
-        if 'embed' not in m.name.lower() and m.param_billions <= 4.0 and m.param_billions > 0
+        if ('embed' not in m.name.lower() 
+            and m.param_billions <= 4.0 
+            and m.param_billions > 0
+            and not any(problematic in m.name.lower() for problematic in PROBLEMATIC_MODELS))
     ]
     
     if not light_models:
-        # Если легких нет, берём любую не-embed модель
-        candidates = [m for m in models.values() if 'embed' not in m.name.lower()]
+        # Если легких нет, берём любую не-embed модель (исключая проблемные)
+        candidates = [
+            m for m in models.values() 
+            if 'embed' not in m.name.lower()
+            and not any(problematic in m.name.lower() for problematic in PROBLEMATIC_MODELS)
+        ]
         if candidates:
             # Предпочитаем coder модели
             coder = [m for m in candidates if m.is_coder]
             if coder:
                 return min(coder, key=lambda m: m.param_billions or 999).name
             return min(candidates, key=lambda m: m.param_billions or 999).name
+        # Крайний случай: любая модель кроме embed
+        non_embed = [m for m in models.values() if 'embed' not in m.name.lower()]
+        if non_embed:
+            return non_embed[0].name
         return list(models.keys())[0]
     
     # Предпочитаем coder модели среди лёгких
@@ -541,7 +633,15 @@ def scan_available_models(force_refresh: bool = False) -> Dict[str, ModelInfo]:
     Returns:
         Словарь {имя_модели: ModelInfo}
     """
-    global _models_cache, _cache_valid
+    global _models_cache, _cache_valid, _cache_ollama_host
+    
+    # Если поменяли хост Ollama (localhost ↔ remote), кэш надо сбросить
+    current_host = _current_ollama_host()
+    if _cache_ollama_host is not None and current_host != _cache_ollama_host:
+        _cache_valid = False
+    
+    # Обновляем хост (даже если None) — чтобы следующая проверка была корректной
+    _cache_ollama_host = current_host
     
     if _cache_valid and not force_refresh:
         return _models_cache

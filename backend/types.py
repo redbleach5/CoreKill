@@ -5,8 +5,9 @@
 """
 from enum import Enum
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime, timezone
+from backend.validators import validate_prompt
 
 
 class InteractionMode(str, Enum):
@@ -92,6 +93,27 @@ class TaskRequest(BaseModel):
     max_iterations: int = Field(default=3, ge=1, le=5, description="Максимальное количество итераций")
     conversation_id: Optional[str] = Field(default=None, description="ID диалога для сохранения контекста")
     
+    @field_validator('task')
+    @classmethod
+    def validate_task(cls, v: str) -> str:
+        """Валидирует текст задачи на архитектурном уровне.
+        
+        Использует общую функцию validate_prompt() для проверки:
+        - Длины промпта
+        - Опасных паттернов в коде
+        - Prompt injection паттернов
+        
+        Args:
+            v: Текст задачи
+            
+        Returns:
+            Валидированный текст
+            
+        Raises:
+            ValueError: Если текст не валиден
+        """
+        return validate_prompt(v)
+    
     class Config:
         use_enum_values = True
 
@@ -133,6 +155,27 @@ class StreamQueryParams(BaseModel):
     conversation_id: Optional[str] = Field(default=None, description="ID диалога для сохранения контекста")
     project_path: Optional[str] = Field(default=None, description="Путь к проекту для индексации")
     file_extensions: Optional[str] = Field(default=None, description="Расширения файлов через запятую (например: .py,.js)")
+    
+    @field_validator('task')
+    @classmethod
+    def validate_task(cls, v: str) -> str:
+        """Валидирует текст задачи на архитектурном уровне.
+        
+        Использует общую функцию validate_prompt() для проверки:
+        - Длины промпта
+        - Опасных паттернов в коде
+        - Prompt injection паттернов
+        
+        Args:
+            v: Текст задачи
+            
+        Returns:
+            Валидированный текст
+            
+        Raises:
+            ValueError: Если текст не валиден
+        """
+        return validate_prompt(v)
     
     class Config:
         use_enum_values = True

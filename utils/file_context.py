@@ -1,4 +1,47 @@
-"""Утилита для работы с файлами при режимах modify/debug."""
+"""Утилита для работы с файлами при режимах modify/debug.
+
+Извлекает пути к файлам из задач и читает их содержимое для контекста.
+Используется в workflow для работы с существующими файлами.
+
+Примеры использования:
+    ```python
+    from utils.file_context import (
+        extract_file_path_from_task,
+        read_file_context,
+        prepare_modify_context
+    )
+    
+    # Извлечь путь к файлу из задачи
+    task = "Исправить ошибку в файле: src/main.py"
+    file_path = extract_file_path_from_task(task)
+    if file_path:
+        # Найден файл: {file_path}
+    
+    # Прочитать контекст файла
+    context = read_file_context("src/main.py", max_lines=1000)
+    if context:
+        # Контекст: {context[:100]}...
+    
+    # Подготовить контекст для режима modify/debug
+    existing_code = read_file_context("src/main.py")
+    modify_context = prepare_modify_context(
+        task="Добавить функцию валидации",
+        existing_file_content=existing_code
+    )
+    ```
+
+Зависимости:
+    - pathlib: для работы с путями
+
+Связанные утилиты:
+    - agents.coder: использует для работы с существующими файлами
+    - infrastructure.workflow_state: использует для контекста
+
+Примечания:
+    - Ограничивает чтение больших файлов (max_lines по умолчанию 1000)
+    - Поддерживает различные форматы указания файлов в задачах
+    - Безопасно обрабатывает несуществующие файлы (возвращает None)
+"""
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -74,7 +117,10 @@ def read_file_context(file_path: str, max_lines: int = 1000) -> Optional[str]:
                     return '\n'.join(lines) + f"\n\n... (файл обрезан, всего {max_lines} строк) ...\n"
                 lines.append(line.rstrip())
             return '\n'.join(lines)
-    except Exception:
+    except Exception as e:
+        # Используем print так как logger может быть недоступен в этом модуле
+        import sys
+        sys.stderr.write(f"⚠️ Ошибка чтения файла {file_path}: {e}\n")
         return None
 
 

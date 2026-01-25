@@ -60,7 +60,6 @@ def create_agent_state(**overrides) -> AgentState:
         "project_path": None,
         "file_extensions": None,
         "critic_report": None,
-        "sse_events": None,
         "event_references": None,
     }
     default.update(overrides)

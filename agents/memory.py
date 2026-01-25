@@ -162,7 +162,10 @@ class MemoryAgent:
             document = result.get("document", "")
             distance = result.get("distance", 1.0)
             
-            # Проверяем схожесть (distance < 0.15 означает очень высокую схожесть)
+            # Преобразуем cosine distance в similarity
+            # ChromaDB с cosine distance возвращает: distance = 1 - cosine_similarity
+            # Поэтому: similarity = 1 - distance
+            # distance < 0.15 означает очень высокую схожесть (similarity > 0.85)
             similarity = 1.0 - distance
             if similarity < similarity_threshold:
                 continue

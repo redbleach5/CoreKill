@@ -1,4 +1,48 @@
-"""Утилита для автоматического сохранения артефактов задачи."""
+"""Утилита для автоматического сохранения артефактов задачи.
+
+Сохраняет код, тесты, рефлексию и метрики в структурированные директории
+с timestamp для каждой задачи.
+
+Примеры использования:
+    ```python
+    from utils.artifact_saver import ArtifactSaver
+    
+    # Создать экземпляр
+    saver = ArtifactSaver(base_output_dir="output")
+    
+    # Создать директорию для задачи
+    task_dir = saver.create_task_directory("Создать калькулятор")
+    
+    # Сохранить отдельные артефакты
+    saver.save_code(code, "calculator.py")
+    saver.save_tests(tests, "test_calculator.py")
+    saver.save_reflection(reflection_data, "reflection.md")
+    saver.save_metrics(metrics, "metrics.json")
+    
+    # Или сохранить все сразу
+    saver.save_all_artifacts(
+        task="Создать калькулятор",
+        code=code,
+        tests=tests,
+        reflection_data=reflection_data,
+        metrics=metrics
+    )
+    ```
+
+Зависимости:
+    - pathlib: для работы с путями
+    - json: для сохранения метрик
+    - datetime: для timestamp в именах директорий
+
+Связанные утилиты:
+    - cli.py: использует для сохранения результатов
+    - backend.workflow_streamer: использует для сохранения артефактов
+
+Примечания:
+    - Создаёт директории с timestamp: YYYYMMDD_HHMMSS_task_name
+    - Безопасно обрабатывает имена задач (удаляет недопустимые символы)
+    - Автоматически создаёт необходимые директории
+"""
 import json
 from datetime import datetime
 from pathlib import Path

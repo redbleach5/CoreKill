@@ -56,8 +56,8 @@ def _get_tavily_api_key() -> Optional[str]:
                     line = line.strip()
                     if line.startswith("TAVILY_API_KEY="):
                         return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"⚠️ Ошибка чтения .env файла для TAVILY_API_KEY: {e}")
     
     return None
 

@@ -28,11 +28,13 @@ interface MessageListProps {
 // Рендер сообщения пользователя
 function UserMessage({ msg }: { msg: ChatMessage }) {
   return (
-    <div key={msg.id} className="flex gap-3 justify-end">
-      <div className="max-w-[80%] bg-gradient-to-br from-blue-600 to-violet-600 rounded-2xl rounded-tr-sm px-4 py-3">
-        <p className="text-white whitespace-pre-wrap">{msg.content}</p>
+    <div key={msg.id} className="flex gap-3 justify-end group">
+      <div className="max-w-[80%] bg-gradient-to-br from-blue-600 to-violet-600 rounded-2xl rounded-tr-sm px-4 py-3
+                      shadow-lg shadow-blue-500/20 group-hover:shadow-blue-500/30 transition-shadow">
+        <p className="text-white whitespace-pre-wrap leading-relaxed">{msg.content}</p>
       </div>
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center">
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-blue-500/20 flex items-center justify-center
+                      border border-blue-500/20 shadow-sm shadow-blue-500/10 group-hover:shadow-blue-500/20 transition-shadow">
         <User className="w-4 h-4 text-blue-400" />
       </div>
     </div>
@@ -123,11 +125,13 @@ const markdownComponents = {
 // Рендер текстового ответа (greeting/help/chat) с markdown
 function TextMessage({ msg }: { msg: ChatMessage }) {
   return (
-    <div key={msg.id} className="flex gap-3">
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center">
+    <div key={msg.id} className="flex gap-3 group">
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center 
+                      border border-emerald-500/20 shadow-sm shadow-emerald-500/10 group-hover:shadow-emerald-500/20 transition-shadow">
         <Bot className="w-4 h-4 text-emerald-400" />
       </div>
-      <div className="max-w-[85%] bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm px-5 py-4">
+      <div className="max-w-[85%] bg-white/5 border border-white/10 rounded-2xl rounded-tl-sm px-5 py-4
+                      hover:bg-white/[0.07] hover:border-white/15 transition-all duration-200 shadow-sm">
         <div className="text-gray-200 prose prose-invert prose-sm max-w-none">
           <ReactMarkdown 
             remarkPlugins={[remarkGfm]}
@@ -276,7 +280,7 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
     ? (completedStages > 0 ? 100 : 50) // Для chat: либо в процессе (50%), либо готово (100%)
     : Math.min(100, Math.round((completedStages / totalStages) * 100))
   
-  // Расчёт оставшегося времени (использует адаптивные метрики)
+  // Расчёт оставшегося времени (использует реальное время выполнения)
   const estimatedTimeLeft = useMemo(() => {
     // Для простых chat-запросов не показываем оставшееся время
     if (isSimpleChat) return null
@@ -284,17 +288,47 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
     let remainingSeconds = 0
     const workflowStages = ['intent', 'planning', 'research', 'testing', 'coding', 'validation', 'reflection', 'critic']
     
+    const stageCalculations: Record<string, { duration: number; elapsed: number; remaining: number }> = {}
+    
     for (const stage of workflowStages) {
       const status = stageData[stage]
       const stageDuration = getStageDuration(stage)
+      let elapsedSeconds = 0
+      let stageRemaining = 0
       
       if (!status || status.status === 'idle') {
+        // Будущий этап — используем оценку из метрик
+        stageRemaining = stageDuration
         remainingSeconds += stageDuration
-      } else if (status.status === 'start' || status.status === 'progress') {
-        // Текущий этап — добавляем половину времени
-        remainingSeconds += stageDuration / 2
+      } else if (status && (status.status === 'start' || status.status === 'progress')) {
+        // Текущий этап — используем реальное прошедшее время + оценку оставшегося
+        
+        // ИСПРАВЛЕНИЕ: Используем реальное время из thinking.elapsedMs если есть,
+        // иначе используем время с начала этапа (startTime)
+        if (status.thinking?.elapsedMs) {
+          elapsedSeconds = status.thinking.elapsedMs / 1000
+        } else if (status.startTime) {
+          // Используем время с начала этапа если thinking.elapsedMs недоступно
+          elapsedSeconds = (Date.now() - status.startTime) / 1000
+        }
+        
+        // Если этап уже выполняется дольше оценки, используем реальное время
+        // Иначе используем оценку оставшегося времени
+        if (elapsedSeconds > stageDuration) {
+          // Этап идет дольше ожидаемого — добавляем еще половину оценки
+          stageRemaining = stageDuration / 2
+          remainingSeconds += stageDuration / 2
+        } else {
+          // Этап идет нормально — добавляем оставшееся время
+          stageRemaining = Math.max(0, stageDuration - elapsedSeconds)
+          remainingSeconds += stageRemaining
+        }
+      } else if (status && status.status === 'end') {
+        // Завершённый этап — не учитываем, но можем использовать для калибровки
+        // (пока не реализовано)
       }
-      // Завершённые этапы не учитываем
+      
+      stageCalculations[stage] = { duration: stageDuration, elapsed: elapsedSeconds, remaining: stageRemaining }
     }
     
     if (remainingSeconds < 5) return null
@@ -411,16 +445,33 @@ function ProgressMessage({ msg, stages }: { msg: ChatMessage; stages: Record<str
                         }`}>
                           {stageConfig.label}
                         </span>
-                        {isError && stageStatus?.message && (
+                        {/* ИСПРАВЛЕНИЕ: Показываем сообщение о прогрессе для активных этапов (non-reasoning модели) */}
+                        {isActive && stageStatus && stageStatus.message && (
+                          <div className="text-[10px] text-blue-400/80 truncate mt-0.5">
+                            {stageStatus.message}
+                          </div>
+                        )}
+                        {isError && stageStatus && stageStatus.message && (
                           <div className="text-[10px] text-red-400/80 truncate mt-0.5">
                             {stageStatus.message}
                           </div>
                         )}
                       </div>
                       
-                      {/* Время этапа (адаптивное) или статус ошибки */}
+                      {/* Время этапа (реальное или оценка) или статус ошибки */}
                       <span className={`text-[10px] ml-auto ${isError ? 'text-red-400' : 'text-gray-600'}`}>
-                        {isError ? 'таймаут' : `~${Math.round(getStageDuration(stage))}с`}
+                        {isError ? (
+                          'таймаут'
+                        ) : stageStatus && stageStatus.status === 'end' && stageStatus.thinking?.elapsedMs ? (
+                          // ИСПРАВЛЕНИЕ: Показываем реальное время для завершенных этапов
+                          `${Math.round(stageStatus.thinking.elapsedMs / 1000)}с`
+                        ) : stageStatus && stageStatus.status === 'progress' && stageStatus.thinking?.elapsedMs ? (
+                          // Для текущего этапа показываем прошедшее время
+                          `${Math.round(stageStatus.thinking.elapsedMs / 1000)}с`
+                        ) : (
+                          // Для будущих этапов показываем оценку
+                          `~${Math.round(getStageDuration(stage))}с`
+                        )}
                       </span>
                     </div>
                     

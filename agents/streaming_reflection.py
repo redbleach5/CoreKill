@@ -10,6 +10,7 @@ from typing import Dict, Optional, Any, AsyncGenerator
 from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.reasoning_stream import get_reasoning_stream_manager
 from infrastructure.reasoning_utils import is_reasoning_response
+from agents.base import BaseAgent
 from utils.logger import get_logger
 from utils.config import get_config
 from infrastructure.model_router import get_model_router
@@ -30,7 +31,7 @@ class ReflectionResult:
     should_retry: bool  # Нужно ли попробовать другую альтернативу
 
 
-class StreamingReflectionAgent:
+class StreamingReflectionAgent(BaseAgent):
     """Агент для рефлексии с real-time стримингом.
     
     Расширяет функциональность ReflectionAgent:
@@ -65,11 +66,6 @@ class StreamingReflectionAgent:
         self._interrupted = True
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Рефлексия прервана")
-    
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
     
     async def reflect_stream(
         self,
@@ -133,6 +129,9 @@ class StreamingReflectionAgent:
                 
                 if event_type == "thinking":
                     yield ("thinking", data)
+                elif event_type == "progress":
+                    # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                    yield ("progress", data)
                 elif event_type == "content":
                     reflection_buffer += data
                     yield ("reflection_chunk", data)
@@ -152,37 +151,105 @@ class StreamingReflectionAgent:
             yield ("done", reflection_result)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка стриминга рефлексии: {e}", error=e)
-            yield ("done", ReflectionResult(
-                planning_score=0.5,
-                research_score=0.5,
-                testing_score=0.5,
-                coding_score=0.5,
-                overall_score=0.5,
-                analysis="Ошибка анализа",
-                improvements=str(e),
-                should_retry=True
-            ))
-    
-    # === Синхронный метод для обратной совместимости ===
-    
-    def reflect(
-        self,
-        task: str,
-        plan: str,
-        context: str,
-        tests: str,
-        code: str,
-        validation_results: Dict[str, Any]
-    ) -> ReflectionResult:
-        """Синхронная рефлексия (для обратной совместимости)."""
-        from agents.reflection import ReflectionAgent
-        
-        sync_agent = ReflectionAgent(
-            model=self.model,
-            temperature=self.temperature
-        )
-        return sync_agent.reflect(task, plan, context, tests, code, validation_results)  # type: ignore[return-value]
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при рефлексии: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="reflection",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю рефлексию...")
+                    
+                    # Повторяем попытку с новой моделью
+                    try:
+                        reflection_buffer = ""
+                        full_response = ""
+                        
+                        async for event_type, data in self.reasoning_manager.stream_from_llm(
+                            llm=self.llm,
+                            prompt=prompt,
+                            stage=stage,
+                            num_predict=config.llm_tokens_analysis
+                        ):
+                            if self._interrupted:
+                                logger.info("⏹️ Рефлексия прервана")
+                                break
+                            
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "progress":
+                                # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                                yield ("progress", data)
+                            elif event_type == "content":
+                                reflection_buffer += data
+                                yield ("reflection_chunk", data)
+                            elif event_type == "done":
+                                full_response = data
+                        
+                        # Парсим результат
+                        response_to_parse = full_response if full_response else reflection_buffer
+                        reflection_result = self._parse_reflection_response(
+                            response_to_parse,
+                            base_scores,
+                            validation_results
+                        )
+                        
+                        logger.info(f"✅ Рефлексия завершена с запасной моделью. Оценка: {reflection_result.overall_score:.2f}")
+                        
+                        yield ("done", reflection_result)
+                        return
+                        
+                    except Exception as retry_error:
+                        logger.error(
+                            f"❌ Ошибка при повторной попытке с запасной моделью {self.model}: {retry_error}",
+                            error=retry_error
+                        )
+                        # Возвращаем базовый результат
+                        logger.error(f"❌ Ошибка рефлексии: {retry_error}", error=retry_error)
+                        yield ("done", ReflectionResult(
+                            planning_score=0.5,
+                            research_score=0.5,
+                            testing_score=0.5,
+                            coding_score=0.5,
+                            overall_score=0.5,
+                            analysis="Ошибка анализа",
+                            improvements=str(retry_error),
+                            should_retry=True
+                        ))
+                else:
+                    logger.error(
+                        f"❌ Не удалось переключиться на запасную модель. "
+                        f"Возвращаю базовый результат."
+                    )
+                    yield ("done", ReflectionResult(
+                        planning_score=0.5,
+                        research_score=0.5,
+                        testing_score=0.5,
+                        coding_score=0.5,
+                        overall_score=0.5,
+                        analysis="Ошибка анализа",
+                        improvements=str(e),
+                        should_retry=True
+                    ))
+            else:
+                logger.error(f"❌ Ошибка стриминга рефлексии: {e}", error=e)
+                yield ("done", ReflectionResult(
+                    planning_score=0.5,
+                    research_score=0.5,
+                    testing_score=0.5,
+                    coding_score=0.5,
+                    overall_score=0.5,
+                    analysis="Ошибка анализа",
+                    improvements=str(e),
+                    should_retry=True
+                ))
     
     # === Приватные методы ===
     

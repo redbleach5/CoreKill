@@ -41,6 +41,9 @@ def _configure_ollama_host() -> None:
     
     Устанавливает переменную окружения OLLAMA_HOST которую
     использует ollama Python SDK.
+    
+    Просто использует host из конфига. Если host = "http://localhost:11434" - локальный,
+    иначе - удалённый.
     """
     # Не перезаписываем если уже установлено вручную
     if os.environ.get("OLLAMA_HOST"):
@@ -51,11 +54,17 @@ def _configure_ollama_host() -> None:
         config = get_config()
         host = config.ollama_host
         
-        if host and host != "http://localhost:11434":
+        if host:
             os.environ["OLLAMA_HOST"] = host
-            logger.info(f"🌐 Ollama хост: {host}")
-    except Exception:
-        pass  # Используем дефолт
+            if host == "http://localhost:11434":
+                logger.info("🌐 Ollama хост: http://localhost:11434 (локальный)")
+            else:
+                logger.info(f"🌐 Ollama хост: {host} (удалённый)")
+        else:
+            logger.info("🌐 Ollama хост: http://localhost:11434 (дефолт)")
+    except Exception as e:
+        logger.debug(f"⚠️ Ошибка конфигурации Ollama хоста, используем дефолт: {e}")
+        # Используем дефолт
 
 
 # Настраиваем при импорте модуля
@@ -65,6 +74,18 @@ _configure_ollama_host()
 class LLMTimeoutError(Exception):
     """Исключение для таймаута LLM запроса."""
     pass
+
+
+class LLMModelUnavailableError(Exception):
+    """Исключение когда модель недоступна или постоянно падает.
+    
+    Это исключение сигнализирует о том, что модель не работает
+    и нужно переключиться на другую модель.
+    """
+    def __init__(self, message: str, model: str, original_error: Optional[Exception] = None):
+        super().__init__(message)
+        self.model = model
+        self.original_error = original_error
 
 
 class StructuredOutputError(Exception):
@@ -254,7 +275,7 @@ class LocalLLM:
                 # Вызов с timeout через общий ThreadPoolExecutor (работает в любом потоке)
                 executor = self._get_executor()
                 future = executor.submit(
-                    ollama.generate,  # type: ignore[arg-type]
+                    ollama.generate,  # type: ignore[arg-type]  # ollama.generate принимает **kwargs, mypy не может проверить сигнатуру
                     **generate_kwargs
                 )
                 
@@ -333,7 +354,7 @@ class LocalLLM:
                 # Вызов с timeout через общий ThreadPoolExecutor
                 executor = self._get_executor()
                 future = executor.submit(
-                    ollama.chat,  # type: ignore[arg-type]
+                    ollama.chat,  # type: ignore[arg-type]  # ollama.chat принимает **kwargs, mypy не может проверить сигнатуру
                     model=self.model,
                     messages=messages,
                     options=options,
@@ -405,9 +426,9 @@ class LocalLLM:
             
             response = llm.generate_structured(
                 "Classify: напиши функцию",
-                IntentResponse
-            )
-            print(response.intent)  # "create"
+            IntentResponse
+        )
+        # response.intent будет "create"
         """
         schema = response_model.model_json_schema()
         schema_str = json.dumps(schema, indent=2)
@@ -652,123 +673,209 @@ JSON:"""
         full_response = ""
         in_thinking = False
         
-        try:
-            # Ollama streaming API
-            # Запускаем в отдельном потоке чтобы не блокировать event loop
-            import queue
-            import threading
-            
-            chunk_queue: queue.Queue = queue.Queue()
-            error_holder: list = []
-            
-            def stream_worker():
-                try:
-                    for chunk in ollama.generate(**generate_kwargs):
-                        chunk_queue.put(chunk)
-                    chunk_queue.put(None)  # Сигнал завершения
-                except Exception as e:
-                    error_holder.append(e)
-                    chunk_queue.put(None)
-            
-            thread = threading.Thread(target=stream_worker, daemon=True)
-            thread.start()
-            
-            wait_count = 0
-            last_log_time = asyncio.get_event_loop().time()
-            
-            stream_start_time = time.time()
-            max_stream_time = self.timeout * 2  # Максимум 2x timeout для стриминга
-            
-            while True:
-                # Проверяем общий timeout стриминга
-                elapsed_stream = time.time() - stream_start_time
-                if elapsed_stream > max_stream_time:
-                    logger.error(
-                        f"❌ Превышен общий timeout стриминга: {elapsed_stream:.1f}с "
-                        f"(максимум: {max_stream_time}с)"
-                    )
-                    # Добавляем ошибку в список (если список пуст, создаём его)
-                    if not error_holder:
-                        error_holder.append(LLMTimeoutError(
-                            f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
-                        ))
-                    else:
-                        error_holder[0] = LLMTimeoutError(
-                            f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
-                        )
-                    chunk_queue.put(None)  # Сигнал завершения
-                    break
+        # Retry логика для стриминга
+        last_error: Optional[Exception] = None
+        max_retries = min(self.max_retries, 2)  # Для стриминга меньше retry (2 вместо 3)
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Ollama streaming API
+                # Запускаем в отдельном потоке чтобы не блокировать event loop
+                import queue
+                import threading
                 
-                try:
-                    # Неблокирующее ожидание с таймаутом
-                    chunk = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: chunk_queue.get(timeout=0.5)
-                    )
-                    wait_count = 0  # Reset on successful get
-                except queue.Empty:
-                    wait_count += 1
-                    # Логируем каждые 10 секунд ожидания
-                    current_time = asyncio.get_event_loop().time()
-                    if current_time - last_log_time > 10:
-                        elapsed_total = time.time() - stream_start_time
-                        logger.info(
-                            f"⏳ Ожидаю ответ от LLM... "
-                            f"(ожидание: {wait_count * 0.5:.0f}с, всего: {elapsed_total:.0f}с)"
-                        )
-                        last_log_time = current_time
-                    continue
+                chunk_queue: queue.Queue = queue.Queue()
+                error_holder: list = []
                 
-                if chunk is None:
-                    # Стриминг завершён
-                    if error_holder and error_holder[0]:
-                        elapsed_total = time.time() - stream_start_time
+                def stream_worker():
+                    try:
+                        for chunk in ollama.generate(**generate_kwargs):
+                            chunk_queue.put(chunk)
+                        chunk_queue.put(None)  # Сигнал завершения
+                    except Exception as e:
+                        logger.debug(f"⚠️ Ошибка в stream_worker для модели {self.model}: {e}")
+                        error_holder.append(e)
+                        chunk_queue.put(None)
+                
+                thread = threading.Thread(target=stream_worker, daemon=True)
+                thread.start()
+                
+                wait_count = 0
+                last_log_time = asyncio.get_event_loop().time()
+                
+                stream_start_time = time.time()
+                # Для reasoning моделей увеличиваем таймаут (они генерируют <think> блоки)
+                # Используем правильную функцию проверки reasoning моделей
+                from utils.model_checker import _is_reasoning_model
+                is_reasoning = _is_reasoning_model(self.model)
+                # Для reasoning моделей даём больше времени (3x), для обычных - 2x
+                timeout_multiplier = 3 if is_reasoning else 2
+                max_stream_time = self.timeout * timeout_multiplier
+                
+                is_done = False
+                stream_success = False
+                
+                while True:
+                    # Проверяем общий timeout стриминга
+                    elapsed_stream = time.time() - stream_start_time
+                    if elapsed_stream > max_stream_time:
                         logger.error(
-                            f"❌ Ошибка стриминга после {elapsed_total:.1f}с: {error_holder[0]}"
+                            f"❌ Превышен общий timeout стриминга: {elapsed_stream:.1f}с "
+                            f"(максимум: {max_stream_time}с)"
                         )
-                        raise error_holder[0]
-                    break
-                
-                content = chunk.get("response", "")
-                is_done = chunk.get("done", False)
-                
-                if content:
-                    full_response += content
+                        # Добавляем ошибку в список (если список пуст, создаём его)
+                        if not error_holder:
+                            error_holder.append(LLMTimeoutError(
+                                f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
+                            ))
+                        else:
+                            error_holder[0] = LLMTimeoutError(
+                                f"Превышен общий timeout стриминга: {elapsed_stream:.1f}с"
+                            )
+                        chunk_queue.put(None)  # Сигнал завершения
+                        break
                     
-                    # Определяем находимся ли внутри <think> блока
-                    # Простая эвристика: считаем открывающие/закрывающие теги
-                    think_opens = full_response.lower().count("<think>")
-                    think_closes = full_response.lower().count("</think>")
-                    in_thinking = think_opens > think_closes
+                    try:
+                        # Неблокирующее ожидание с таймаутом
+                        chunk = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: chunk_queue.get(timeout=0.5)
+                        )
+                        wait_count = 0  # Reset on successful get
+                    except queue.Empty:
+                        wait_count += 1
+                        # Логируем каждые 10 секунд ожидания
+                        current_time = asyncio.get_event_loop().time()
+                        if current_time - last_log_time > 10:
+                            elapsed_total = time.time() - stream_start_time
+                            logger.info(
+                                f"⏳ Ожидаю ответ от LLM... "
+                                f"(ожидание: {wait_count * 0.5:.0f}с, всего: {elapsed_total:.0f}с)"
+                            )
+                            last_log_time = current_time
+                        continue
                     
-                    yield StreamChunk(
-                        content=content,
-                        is_thinking=in_thinking,
-                        is_done=is_done,
-                        full_response=full_response
+                    if chunk is None:
+                        # Стриминг завершён
+                        if error_holder and error_holder[0]:
+                            elapsed_total = time.time() - stream_start_time
+                            error = error_holder[0]
+                            error_msg = str(error)
+                            
+                            # Проверяем, можно ли повторить попытку
+                            is_retryable = (
+                                "model runner has unexpectedly stopped" in error_msg or
+                                "resource limitations" in error_msg.lower() or
+                                "internal error" in error_msg.lower() or
+                                "status code: 500" in error_msg
+                            )
+                            
+                            if is_retryable and attempt < max_retries:
+                                backoff = self._calculate_backoff(attempt)
+                                logger.warning(
+                                    f"⚠️ Ошибка стриминга после {elapsed_total:.1f}с: {error_msg[:100]}... "
+                                    f"Повторная попытка {attempt + 1}/{max_retries} через {backoff:.1f}с"
+                                )
+                                await asyncio.sleep(backoff)
+                                last_error = error
+                                break  # Выходим из внутреннего цикла для retry
+                            
+                            # Если не можем повторить или достигли лимита
+                            # Проверяем, не падает ли модель постоянно
+                            if attempt >= max_retries:
+                                logger.error(
+                                    f"❌ Модель {self.model} постоянно падает после {max_retries + 1} попыток. "
+                                    f"Рекомендуется переключиться на другую модель."
+                                )
+                                # Поднимаем специальное исключение для переключения модели
+                                raise LLMModelUnavailableError(
+                                    f"Модель {self.model} недоступна после {max_retries + 1} попыток: {error_msg}",
+                                    model=self.model,
+                                    original_error=error
+                                )
+                            raise error
+                        # Успешное завершение без ошибок
+                        stream_success = True
+                        break
+                    
+                    content = chunk.get("response", "")
+                    is_done = chunk.get("done", False)
+                    
+                    if content:
+                        full_response += content
+                        
+                        # Определяем находимся ли внутри <think> блока
+                        # Простая эвристика: считаем открывающие/закрывающие теги
+                        think_opens = full_response.lower().count("<think>")
+                        think_closes = full_response.lower().count("</think>")
+                        in_thinking = think_opens > think_closes
+                        
+                        yield StreamChunk(
+                            content=content,
+                            is_thinking=in_thinking,
+                            is_done=is_done,
+                            full_response=full_response
+                        )
+                    
+                    if is_done:
+                        # Успешное завершение - выходим из retry цикла
+                        stream_success = True
+                        break
+                
+                # Если успешно завершили, выходим из retry цикла
+                if stream_success:
+                    # Финальный чанк
+                    if full_response:
+                        yield StreamChunk(
+                            content="",
+                            is_thinking=False,
+                            is_done=True,
+                            full_response=full_response
+                        )
+                    return  # Успешное завершение
+                    
+            except Exception as e:
+                # Обрабатываем ошибки, которые не были обработаны выше
+                error_msg = str(e)
+                is_retryable = (
+                    "model runner has unexpectedly stopped" in error_msg or
+                    "resource limitations" in error_msg.lower() or
+                    "internal error" in error_msg.lower() or
+                    "status code: 500" in error_msg
+                )
+                
+                if is_retryable and attempt < max_retries:
+                    backoff = self._calculate_backoff(attempt)
+                    logger.warning(
+                        f"⚠️ Ошибка стриминга: {error_msg[:100]}... "
+                        f"Повторная попытка {attempt + 1}/{max_retries} через {backoff:.1f}с"
+                    )
+                    await asyncio.sleep(backoff)
+                    last_error = e
+                    continue  # Повторяем попытку
+                
+                # Финальная ошибка
+                # Если это ошибка недоступности модели, поднимаем специальное исключение
+                if attempt >= max_retries and is_retryable:
+                    logger.error(
+                        f"❌ Модель {self.model} постоянно падает после {max_retries + 1} попыток. "
+                        f"Рекомендуется переключиться на другую модель."
+                    )
+                    raise LLMModelUnavailableError(
+                        f"Модель {self.model} недоступна после {max_retries + 1} попыток: {error_msg}",
+                        model=self.model,
+                        original_error=e
                     )
                 
-                if is_done:
-                    break
-            
-            # Финальный чанк
-            if full_response:
+                logger.error(f"❌ Ошибка стриминга LLM: {e}", error=e)
+                # Yield пустой финальный чанк при ошибке
                 yield StreamChunk(
                     content="",
                     is_thinking=False,
                     is_done=True,
                     full_response=full_response
                 )
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка стриминга LLM: {e}", error=e)
-            # Yield пустой финальный чанк при ошибке
-            yield StreamChunk(
-                content="",
-                is_thinking=False,
-                is_done=True,
-                full_response=full_response
-            )
+                return
     
     # === ASYNC МЕТОДЫ ===
     # Используют asyncio.to_thread() для совместимости с существующим синхронным кодом
@@ -968,8 +1075,20 @@ def create_llm_for_stage(
     config = get_config()
     timeout = config.get_stage_timeout(stage)
     
-    # Используем дефолтную модель если не указана
-    resolved_model = model or "qwen2.5-coder:7b"
+    # Используем дефолтную модель из конфига если не указана
+    # Если модель не указана, используем ModelRouter для автоматического выбора
+    if model is None:
+        from infrastructure.model_router import get_model_router
+        router = get_model_router()
+        # Выбираем модель для соответствующего этапа
+        model_selection = router.select_model(
+            task_type="coding",  # Большинство этапов связаны с кодом
+            preferred_model=None,
+            context={"stage": stage}
+        )
+        resolved_model = model_selection.model
+    else:
+        resolved_model = model
     
     return LocalLLM(
         model=resolved_model,

@@ -29,7 +29,7 @@ export function createSSEEventHandler<T = unknown>(
       const data = JSON.parse(event.data) as T
 
       // Проверяем обязательные поля
-      if (requiredFields.length > 0) {
+      if (requiredFields.length > 0 && typeof data === 'object' && data !== null) {
         const missingFields = requiredFields.filter(field => !(field in data))
         if (missingFields.length > 0) {
           console.warn(`⚠️ ${eventName}: отсутствуют обязательные поля:`, missingFields, data)

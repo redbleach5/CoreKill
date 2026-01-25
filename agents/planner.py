@@ -71,21 +71,36 @@ class PlannerAgent(BaseAgent):
         
         # Быстрый план ТОЛЬКО для очень простых задач (fix, rename, typo)
         # Игры, проекты, приложения — всегда полный план
+        # НО: простые запросы типа "напиши функцию X" тоже должны быть простыми
         complex_keywords = [
-            'файл', 'класс', 'функция', 'модуль', 'test', 'file', 'class', 'function',
-            'игра', 'game', 'приложение', 'app', 'проект', 'project', 'создай', 'напиши',
-            'write', 'create', 'build', 'implement', 'сервис', 'service', 'api', 'бот', 'bot'
+            'игра', 'game', 'приложение', 'app', 'проект', 'project', 
+            'сервис', 'service', 'api', 'бот', 'bot', 'framework', 'библиотека', 'library'
         ]
-        is_complex = any(keyword in task.lower() for keyword in complex_keywords)
+        # Простые ключевые слова, которые не делают задачу сложной
+        simple_patterns = [
+            'напиши функцию', 'write a function', 'создай функцию', 'create a function',
+            'напиши класс', 'write a class', 'создай класс', 'create a class'
+        ]
         
-        if len(task.strip()) < 15 and not is_complex:
+        # Проверяем сначала простые паттерны
+        is_simple_request = any(pattern in task.lower() for pattern in simple_patterns)
+        is_complex = any(keyword in task.lower() for keyword in complex_keywords) and not is_simple_request
+        
+        # Для простых запросов используем упрощенный план
+        if (len(task.strip()) < 50 or is_simple_request) and not is_complex:
+            # Пытаемся извлечь предполагаемое имя функции из запроса
+            suggested_name = self._extract_function_name_from_task(task)
+            signature_hint = ""
+            if suggested_name:
+                signature_hint = f"\nПредполагаемое имя функции: {suggested_name}\nПредполагаемая сигнатура: def {suggested_name}(...)\n"
+            
             simple_plan = f"""ОСНОВНОЙ ПЛАН:
 1. Проанализировать простую задачу: {task}
-2. Создать минимальную реализацию
+{signature_hint}2. Создать минимальную реализацию
 3. Добавить базовые тесты
 4. Проверить работоспособность
 """
-            logger.info("✅ Использован упрощённый план (простая задача < 15 символов)")
+            logger.info("✅ Использован упрощённый план (простая задача)")
             return simple_plan
         
         logger.info(f"📋 Создаю полный план (задача сложная: {len(task)} симв., complex={is_complex})")
@@ -184,3 +199,65 @@ class PlannerAgent(BaseAgent):
             cleaned = f"ОСНОВНОЙ ПЛАН:\n{cleaned}"
         
         return cleaned
+    
+    def _extract_function_name_from_task(self, task: str) -> Optional[str]:
+        """Извлекает предполагаемое имя функции из запроса пользователя.
+        
+        Пытается найти имя функции в запросах вида:
+        - "напиши функцию сортировки" -> "sort" или "sorting"
+        - "создай функцию add" -> "add"
+        - "write a function to calculate" -> "calculate"
+        
+        Args:
+            task: Текст задачи
+            
+        Returns:
+            Предполагаемое имя функции в snake_case или None
+        """
+        import re
+        
+        task_lower = task.lower()
+        
+        # Паттерны для поиска имени функции
+        patterns = [
+            r'(?:напиши|создай|write|create)\s+(?:функцию|function)\s+(?:для|to|that|which)?\s*([a-z_][a-z0-9_]*)',  # "напиши функцию add"
+            r'(?:напиши|создай|write|create)\s+(?:функцию|function)\s+(?:для|to)?\s*([а-яё]+)',  # "напиши функцию сортировки"
+            r'функция\s+([a-z_][a-z0-9_]*)',  # "функция add"
+            r'function\s+([a-z_][a-z0-9_]*)',  # "function add"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, task_lower)
+            if match:
+                name = match.group(1)
+                # Преобразуем в snake_case если нужно
+                name = name.replace(' ', '_').replace('-', '_')
+                # Ограничиваем длину
+                if len(name) > 50:
+                    name = name[:50]
+                return name
+        
+        # Если не нашли явное имя, пытаемся извлечь ключевое слово из задачи
+        # Для "напиши функцию сортировки" -> "sort"
+        keyword_map = {
+            'сортировк': 'sort',
+            'sorting': 'sort',
+            'сложени': 'add',
+            'addition': 'add',
+            'вычитани': 'subtract',
+            'subtraction': 'subtract',
+            'умножени': 'multiply',
+            'multiplication': 'multiply',
+            'делени': 'divide',
+            'division': 'divide',
+            'поиск': 'search',
+            'search': 'search',
+            'фильтрац': 'filter',
+            'filter': 'filter',
+        }
+        
+        for keyword, func_name in keyword_map.items():
+            if keyword in task_lower:
+                return func_name
+        
+        return None

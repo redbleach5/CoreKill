@@ -6,7 +6,6 @@ import {
   Zap, 
   TrendingUp, 
   CheckCircle2, 
-  XCircle, 
   AlertTriangle,
   RefreshCw,
   Activity,
@@ -21,35 +20,7 @@ import { LoadingState } from './ui/LoadingState'
 import { ErrorState } from './ui/ErrorState'
 import { EmptyState } from './ui/EmptyState'
 
-interface GenerationMetrics {
-  total_generations: number
-  successful: number
-  failed: number
-  avg_time_ms: number
-  avg_iterations: number
-  success_rate: number
-}
-
-interface StageMetrics {
-  stage: string
-  avg_time_ms: number
-  calls: number
-  errors: number
-}
-
-interface ModelMetrics {
-  model: string
-  calls: number
-  avg_tokens: number
-  avg_time_ms: number
-}
-
-interface DashboardData {
-  generation: GenerationMetrics
-  stages: StageMetrics[]
-  models: ModelMetrics[]
-  last_updated: string
-}
+// Типы из API используются через useApi hook
 
 interface MetricCardProps {
   title: string
@@ -191,8 +162,24 @@ export function MetricsDashboard() {
     return <EmptyState message="Нет данных" />
   }
 
-  const gen = data.generation
-  const maxStageTime = Math.max(...data.stages.map(s => s.avg_time_ms), 1)
+  // Преобразуем stages из Record в массив для отображения
+  const stagesArray = Object.entries(data.stages).map(([stage, metrics]) => ({
+    stage,
+    avgTime: metrics.average_time,
+    calls: metrics.count,
+    errors: 0, // В API нет информации об ошибках
+    estimatedTime: metrics.estimated_time
+  }))
+
+  const maxStageTime = stagesArray.length > 0 
+    ? Math.max(...stagesArray.map(s => s.avgTime), 1)
+    : 1
+
+  // Вычисляем общие метрики из stages
+  const totalCalls = stagesArray.reduce((sum, s) => sum + s.calls, 0)
+  const avgTime = stagesArray.length > 0
+    ? stagesArray.reduce((sum, s) => sum + s.avgTime, 0) / stagesArray.length
+    : 0
 
   return (
     <div className="p-6 space-y-6">
@@ -204,9 +191,11 @@ export function MetricsDashboard() {
           </div>
           <div>
             <h2 className="text-lg font-semibold text-white">Метрики генерации</h2>
-            <p className="text-xs text-gray-500">
-              Обновлено: {new Date(data.last_updated).toLocaleTimeString('ru-RU')}
-            </p>
+            {data.benchmark && (
+              <p className="text-xs text-gray-500">
+                Модель: {data.benchmark.model_used} | {data.benchmark.tokens_per_second.toFixed(1)} токенов/с
+              </p>
+            )}
           </div>
         </div>
         <button
@@ -225,47 +214,47 @@ export function MetricsDashboard() {
       {/* Основные метрики */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <MetricCard
-          title="Всего генераций"
-          value={gen.total_generations}
+          title="Всего вызовов"
+          value={totalCalls}
           icon={<Zap className="w-5 h-5" />}
           color="purple"
         />
         <MetricCard
-          title="Успешных"
-          value={gen.successful}
-          subtitle={`${(gen.success_rate * 100).toFixed(0)}%`}
+          title="Этапов"
+          value={stagesArray.length}
           icon={<CheckCircle2 className="w-5 h-5" />}
           color="green"
-          trend={gen.success_rate > 0.7 ? 'up' : 'down'}
-        />
-        <MetricCard
-          title="Ошибок"
-          value={gen.failed}
-          icon={<XCircle className="w-5 h-5" />}
-          color={gen.failed > 0 ? 'red' : 'green'}
         />
         <MetricCard
           title="Среднее время"
-          value={`${(gen.avg_time_ms / 1000).toFixed(1)}с`}
-          subtitle={`~${gen.avg_iterations.toFixed(1)} итераций`}
+          value={`${(avgTime / 1000).toFixed(1)}с`}
           icon={<Clock className="w-5 h-5" />}
           color="blue"
         />
+        {data.benchmark && (
+          <MetricCard
+            title="Производительность"
+            value={`${data.benchmark.performance_multiplier.toFixed(1)}x`}
+            subtitle={`${data.benchmark.tokens_per_second.toFixed(0)} ток/с`}
+            icon={<Cpu className="w-5 h-5" />}
+            color="yellow"
+          />
+        )}
       </div>
 
       {/* Метрики по этапам */}
-      {data.stages.length > 0 && (
+      {stagesArray.length > 0 && (
         <div className="bg-gray-800/40 rounded-xl p-5 border border-gray-700/50">
           <h3 className="text-sm font-medium text-gray-300 mb-4 flex items-center gap-2">
             <Activity className="w-4 h-4 text-purple-400" />
             Время по этапам
           </h3>
           <div className="space-y-4">
-            {data.stages.map((stage) => (
+            {stagesArray.map((stage) => (
               <StageBar
                 key={stage.stage}
                 stage={stage.stage}
-                avgTime={stage.avg_time_ms}
+                avgTime={stage.avgTime}
                 calls={stage.calls}
                 errors={stage.errors}
                 maxTime={maxStageTime}
@@ -275,27 +264,16 @@ export function MetricsDashboard() {
         </div>
       )}
 
-      {/* Метрики по моделям */}
-      {data.models.length > 0 && (
+      {/* Информация о системе */}
+      {data.system_info && (
         <div className="bg-gray-800/40 rounded-xl p-5 border border-gray-700/50">
           <h3 className="text-sm font-medium text-gray-300 mb-4 flex items-center gap-2">
             <Cpu className="w-4 h-4 text-purple-400" />
-            Использование моделей
+            Информация о системе
           </h3>
-          <div className="space-y-3">
-            {data.models.map((model) => (
-              <div key={model.model} className="flex items-center justify-between p-3 bg-gray-900/50 rounded-lg">
-                <div className="flex items-center gap-3">
-                  <Brain className="w-4 h-4 text-purple-400" />
-                  <span className="text-sm text-white font-mono">{model.model}</span>
-                </div>
-                <div className="flex items-center gap-4 text-xs text-gray-400">
-                  <span>{model.calls} вызовов</span>
-                  <span>~{Math.round(model.avg_tokens)} токенов</span>
-                  <span>{(model.avg_time_ms / 1000).toFixed(1)}с</span>
-                </div>
-              </div>
-            ))}
+          <div className="space-y-2 text-sm text-gray-400">
+            <div>Платформа: {data.system_info.platform}</div>
+            <div>Python: {data.system_info.python_version}</div>
           </div>
         </div>
       )}

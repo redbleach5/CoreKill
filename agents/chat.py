@@ -114,6 +114,9 @@ class ChatAgent:
         )
         self.max_tokens = max_tokens
         self.temperature = temperature
+        self.model = model
+        # Кэш для результатов определения необходимости веб-поиска
+        self._web_search_cache: Dict[str, bool] = {}
         logger.info(f"✅ ChatAgent инициализирован (модель: {model or 'auto'})")
     
     def _get_cache_key(self, message: str, history_len: int) -> str:
@@ -147,7 +150,8 @@ class ChatAgent:
         message: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         system_prompt: Optional[str] = None,
-        use_cache: bool = True
+        use_cache: bool = True,
+        disable_web_search: bool = False
     ) -> ChatResponse:
         """Отправляет сообщение и получает ответ.
         
@@ -181,10 +185,13 @@ class ChatAgent:
                         finish_reason="cached"
                     )
         
-        # Если запрос требует актуальной информации — делаем веб-поиск
+        # ИСПРАВЛЕНИЕ: Если запрос требует актуальной информации — делаем веб-поиск
+        # (если веб-поиск не отключен явно)
         web_context = ""
-        if needs_realtime:
+        if needs_realtime and not disable_web_search:
             web_context = self._fetch_realtime_context(message)
+        elif needs_realtime and disable_web_search:
+            logger.info("ℹ️ Веб-поиск отключен пользователем, пропускаем")
         
         # Формируем сообщения в нативном формате для ollama.chat()
         messages = self._build_messages(
@@ -270,37 +277,66 @@ class ChatAgent:
         return messages
     
     def _needs_realtime_info(self, message: str) -> bool:
-        """Определяет, требует ли запрос актуальной информации из интернета.
+        """Определяет, требует ли запрос информации из интернета.
         
-        Запросы о новостях, событиях, погоде, курсах валют и т.д.
-        требуют веб-поиска, так как LLM не имеет актуальных данных.
+        ИСПРАВЛЕНИЕ: Упрощенная логика без медленных LLM вызовов.
+        Использует быструю эвристику, которая покрывает большинство случаев.
         
         Args:
             message: Сообщение пользователя
             
         Returns:
-            True если нужен веб-поиск для актуальной информации
+            True если нужен веб-поиск
         """
-        message_lower = message.lower()
+        if not message or not message.strip():
+            return False
         
-        # Ключевые слова, указывающие на запрос актуальной информации
-        realtime_keywords_ru = [
+        message_lower = message.lower().strip()
+        words = message_lower.split()
+        
+        # 1. Быстрая проверка для явных случаев актуальной информации (новости, погода)
+        realtime_keywords = [
             "новост", "событи", "сегодня", "вчера", "сейчас", "последн",
-            "актуальн", "свежи", "текущ", "погод", "курс валют", "курс доллар",
-            "курс евро", "биткоин", "криптовалют", "акци", "биржа", "индекс",
-            "что происходит", "что случилось", "что нового"
+            "актуальн", "свежи", "текущ", "погод", "курс валют", "биткоин",
+            "news", "today", "yesterday", "current", "latest", "weather", "stock"
         ]
         
-        realtime_keywords_en = [
-            "news", "today", "yesterday", "current", "latest", "recent",
-            "weather", "stock", "bitcoin", "crypto", "exchange rate",
-            "what's happening", "what happened", "breaking"
-        ]
-        
-        # Проверяем наличие ключевых слов
-        for keyword in realtime_keywords_ru + realtime_keywords_en:
+        for keyword in realtime_keywords:
             if keyword in message_lower:
-                logger.info(f"🌐 Обнаружен запрос актуальной информации (ключевое слово: {keyword})")
+                logger.info(f"🌐 Обнаружен запрос актуальной информации: {keyword}")
+                return True
+        
+        # 2. Проверяем, является ли это запросом о коде - если да, веб-поиск не нужен
+        code_keywords = [
+            "код", "функция", "класс", "модуль", "скрипт", "программа", "алгоритм",
+            "code", "function", "class", "module", "script", "program", "algorithm",
+            "напиши", "создай", "сделай", "write", "create", "make", "build",
+            "def ", "import", "print", "return", "async", "await", "python", "javascript"
+        ]
+        
+        has_code_keyword = any(kw in message_lower for kw in code_keywords)
+        if has_code_keyword:
+            return False
+        
+        # 3. Проверяем, является ли это вопросом или командой рассказать/описать
+        question_indicators = ["?", "знаешь", "расскажи", "что такое", "кто такой", 
+                              "когда", "где", "какой", "do you know", "tell me", 
+                              "what is", "who is", "when", "where", "which", "how"]
+        
+        tell_commands = ["расскажи", "опиши", "объясни", "tell", "describe", "explain"]
+        
+        has_question = any(indicator in message_lower for indicator in question_indicators)
+        has_tell_command = any(cmd in message_lower for cmd in tell_commands)
+        
+        # 4. Если это вопрос или команда рассказать БЕЗ ключевых слов кода,
+        # и запрос не слишком короткий (больше 2 слов) - нужен веб-поиск
+        if (has_question or has_tell_command) and len(words) > 2:
+            # Исключаем простые приветствия с вопросами "как дела"
+            simple_greeting_questions = ["как дела", "how are you", "как поживаешь", "what's up", "как жизнь"]
+            is_simple_greeting = any(greeting in message_lower for greeting in simple_greeting_questions)
+            
+            if not is_simple_greeting:
+                logger.info(f"🌐 Обнаружен вопрос/команда рассказать (не о коде, {len(words)} слов) - включаем веб-поиск")
                 return True
         
         return False

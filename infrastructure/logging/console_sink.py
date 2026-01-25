@@ -59,7 +59,9 @@ class ConsoleLoggerSink(LoggerSink):
         parts = [emoji]
         
         # Время (только время, не дата для компактности)
-        time_str = event.timestamp.strftime("%H:%M:%S")
+        # ИСПРАВЛЕНИЕ: Конвертируем UTC время в локальный часовой пояс для удобства
+        local_time = event.timestamp.astimezone()
+        time_str = local_time.strftime("%H:%M:%S")
         parts.append(f"[{time_str}]")
         
         # Уровень
@@ -107,16 +109,17 @@ class ConsoleLoggerSink(LoggerSink):
             formatted = self._format_event(event)
             self.stream.write(formatted + "\n")
             self.stream.flush()
-        except Exception:
-            # Игнорируем ошибки вывода, чтобы не сломать приложение
-            pass
+        except Exception as e:
+            # Используем sys.stderr чтобы избежать рекурсии при логировании ошибок логирования
+            sys.stderr.write(f"⚠️ ConsoleLoggerSink: ошибка вывода события: {e}\n")
     
     def flush(self) -> None:
         """Сбрасывает буфер потока."""
         try:
             self.stream.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            # Используем sys.stderr чтобы избежать рекурсии при логировании ошибок логирования
+            sys.stderr.write(f"⚠️ ConsoleLoggerSink: ошибка flush: {e}\n")
     
     def close(self) -> None:
         """Закрывает sink (для консоли ничего не делаем)."""

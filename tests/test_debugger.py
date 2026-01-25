@@ -62,10 +62,16 @@ class TestDebuggerAgent:
             "all_passed": False
         }
     
+    @pytest.mark.agents
+
+    
     def test_init(self, debugger_agent):
         """Тест инициализации DebuggerAgent."""
         assert debugger_agent is not None
         assert debugger_agent.llm is not None
+    
+    @pytest.mark.agents
+
     
     def test_extract_error_details_pytest(self, debugger_agent, validation_results_pytest_fail):
         """Тест извлечения деталей ошибок pytest."""
@@ -77,6 +83,9 @@ class TestDebuggerAgent:
         assert details["mypy"] == ""
         assert details["bandit"] == ""
     
+    @pytest.mark.agents
+
+    
     def test_extract_error_details_mypy(self, debugger_agent, validation_results_mypy_fail):
         """Тест извлечения деталей ошибок mypy."""
         details = debugger_agent._extract_error_details(validation_results_mypy_fail)
@@ -87,6 +96,9 @@ class TestDebuggerAgent:
         assert details["pytest"] == ""
         assert details["bandit"] == ""
     
+    @pytest.mark.agents
+
+    
     def test_extract_error_details_multiple(self, debugger_agent, validation_results_multiple_fail):
         """Тест извлечения деталей при множественных ошибках."""
         details = debugger_agent._extract_error_details(validation_results_multiple_fail)
@@ -96,20 +108,32 @@ class TestDebuggerAgent:
         assert "FAILED" in details["pytest"] or "AssertionError" in details["pytest"]
         assert "error:" in details["mypy"]
     
+    @pytest.mark.agents
+
+    
     def test_determine_error_type_pytest(self, debugger_agent, validation_results_pytest_fail):
         """Тест определения типа ошибки (pytest)."""
         error_type = debugger_agent._determine_error_type(validation_results_pytest_fail)
         assert error_type == "pytest"
+    
+    @pytest.mark.agents
+
     
     def test_determine_error_type_mypy(self, debugger_agent, validation_results_mypy_fail):
         """Тест определения типа ошибки (mypy)."""
         error_type = debugger_agent._determine_error_type(validation_results_mypy_fail)
         assert error_type == "mypy"
     
+    @pytest.mark.agents
+
+    
     def test_determine_error_type_multiple(self, debugger_agent, validation_results_multiple_fail):
         """Тест определения типа ошибки (multiple)."""
         error_type = debugger_agent._determine_error_type(validation_results_multiple_fail)
         assert error_type == "multiple"
+    
+    @pytest.mark.agents
+
     
     def test_build_analysis_prompt(self, debugger_agent, validation_results_pytest_fail):
         """Тест построения промпта для анализа."""
@@ -128,6 +152,9 @@ class TestDebuggerAgent:
         assert "def add" in prompt
         assert "pytest ошибки" in prompt or "pytest" in prompt.lower()
         assert "ИНСТРУКЦИИ_ДЛЯ_ИСПРАВЛЕНИЯ" in prompt or "ИНСТРУКЦИИ" in prompt
+    
+    @pytest.mark.agents
+
     
     def test_analyze_errors(self, validation_results_pytest_fail):
         """Тест анализа ошибок через LLM."""
@@ -171,6 +198,9 @@ Fix the add function to return 5 instead of 3 when called with (1, 2)
                     assert len(result.fix_instructions) > 0
                     assert "Fix" in result.fix_instructions or "fix" in result.fix_instructions.lower()
     
+    @pytest.mark.agents
+
+    
     def test_parse_analysis_response(self, debugger_agent):
         """Тест парсинга ответа от LLM."""
         response = """
@@ -200,6 +230,9 @@ Fix the function to return correct value
         assert result.confidence == 0.85
         assert result.error_type == "pytest"
     
+    @pytest.mark.agents
+
+    
     def test_parse_analysis_response_malformed(self, debugger_agent):
         """Тест парсинга некорректного ответа от LLM (fallback)."""
         response = "Some random text without structure"
@@ -221,6 +254,9 @@ Fix the function to return correct value
 
 class TestDebugResult:
     """Тесты для DebugResult dataclass."""
+    
+    @pytest.mark.agents
+
     
     def test_debug_result_creation(self):
         """Тест создания DebugResult."""

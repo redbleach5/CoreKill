@@ -15,7 +15,7 @@
 Использование:
     coder = IncrementalCoder(model="qwen2.5-coder:7b")
     async for step in coder.generate_with_feedback(plan, tests, context):
-        print(f"Функция {step.function_name}: {'✅' if step.tests_passed else '❌'}")
+        logger.info(f"Функция {step.function_name}: {'✅' if step.tests_passed else '❌'}")
 """
 import asyncio
 import json
@@ -97,7 +97,8 @@ class IncrementalCoder:
         self,
         plan: str,
         tests: str,
-        context: str = ""
+        context: str = "",
+        user_query: str = ""
     ) -> AsyncGenerator[GenerationStep, None]:
         """Генерирует код инкрементально с обратной связью.
         
@@ -105,17 +106,18 @@ class IncrementalCoder:
             plan: План реализации
             tests: Сгенерированные тесты
             context: Дополнительный контекст
+            user_query: Оригинальный запрос пользователя (для уточнения сути задачи)
             
         Yields:
             GenerationStep для каждой функции
         """
         # Разбираем план на функции
-        functions = await self._parse_plan_to_functions(plan)
+        functions = await self._parse_plan_to_functions(plan, user_query)
         
         if not functions:
             logger.warning("⚠️ Не удалось разобрать план на функции, генерирую весь код")
             # Fallback — генерируем весь код как одну функцию
-            full_code = await self._generate_full_code(plan, tests, context)
+            full_code = await self._generate_full_code(plan, tests, context, user_query)
             yield GenerationStep(
                 function_name="main",
                 code=full_code,
@@ -136,7 +138,8 @@ class IncrementalCoder:
                 func_spec=func_spec,
                 existing_code=generated_code,
                 tests=tests,
-                context=context
+                context=context,
+                user_query=user_query
             )
             
             # Сразу валидируем
@@ -144,7 +147,8 @@ class IncrementalCoder:
                 func_spec=func_spec,
                 func_code=func_code,
                 existing_code=generated_code,
-                tests=tests
+                tests=tests,
+                user_query=user_query
             )
             
             generated_code.append(step.code)
@@ -152,17 +156,20 @@ class IncrementalCoder:
         
         logger.info(f"✅ Генерация завершена: {len(generated_code)} функций")
     
-    async def _parse_plan_to_functions(self, plan: str) -> List[FunctionSpec]:
+    async def _parse_plan_to_functions(self, plan: str, user_query: str = "") -> List[FunctionSpec]:
         """Извлекает функции из плана через LLM.
         
         Args:
             plan: Текстовый план реализации
+            user_query: Оригинальный запрос пользователя (для уточнения намерения)
             
         Returns:
             Список спецификаций функций
         """
+        user_request_section = f"\nUSER REQUEST: {user_query}\n" if user_query else ""
+        
         prompt = f"""Extract functions from this implementation plan.
-
+{user_request_section}
 PLAN:
 {plan[:2000]}
 
@@ -227,7 +234,8 @@ JSON:"""
         func_spec: FunctionSpec,
         existing_code: List[str],
         tests: str,
-        context: str
+        context: str,
+        user_query: str = ""
     ) -> str:
         """Генерирует одну функцию.
         
@@ -236,6 +244,7 @@ JSON:"""
             existing_code: Уже сгенерированный код
             tests: Тесты
             context: Контекст
+            user_query: Оригинальный запрос пользователя
             
         Returns:
             Код функции
@@ -245,7 +254,10 @@ JSON:"""
         # Извлекаем релевантные тесты для этой функции
         relevant_tests = self._extract_relevant_tests(tests, func_spec.name)
         
+        user_request_section = f"\nUSER REQUEST: {user_query}\n" if user_query else ""
+        
         prompt = f"""Generate ONLY the function: {func_spec.name}
+{user_request_section}
 
 SIGNATURE: {func_spec.signature}
 DESCRIPTION: {func_spec.description}
@@ -356,7 +368,8 @@ CODE:"""
         func_spec: FunctionSpec,
         func_code: str,
         existing_code: List[str],
-        tests: str
+        tests: str,
+        user_query: str = ""
     ) -> GenerationStep:
         """Валидирует и исправляет функцию.
         
@@ -394,7 +407,7 @@ CODE:"""
             logger.warning(f"❌ {func_spec.name} попытка {attempt+1}: {error[:100]}")
             
             # Исправляем с контекстом ошибки (контекст свежий!)
-            func_code = await self._fix_function(func_spec, func_code, error)
+            func_code = await self._fix_function(func_spec, func_code, error, user_query)
         
         # Не удалось исправить за MAX_FIX_ATTEMPTS попыток
         return GenerationStep(
@@ -410,7 +423,8 @@ CODE:"""
         self,
         func_spec: FunctionSpec,
         func_code: str,
-        error: str
+        error: str,
+        user_query: str = ""
     ) -> str:
         """Исправляет функцию на основе ошибки.
         
@@ -418,12 +432,15 @@ CODE:"""
             func_spec: Спецификация функции
             func_code: Текущий код функции
             error: Текст ошибки
+            user_query: Оригинальный запрос пользователя (для контекста)
             
         Returns:
             Исправленный код функции
         """
+        user_request_section = f"\nUSER REQUEST: {user_query}\n" if user_query else ""
+        
         prompt = f"""Fix this Python function based on the error.
-
+{user_request_section}
 FUNCTION: {func_spec.name}
 
 CURRENT CODE:
@@ -449,7 +466,8 @@ FIXED CODE:"""
         self,
         plan: str,
         tests: str,
-        context: str
+        context: str,
+        user_query: str = ""
     ) -> str:
         """Генерирует весь код (fallback когда не удалось разбить на функции).
         
@@ -457,12 +475,15 @@ FIXED CODE:"""
             plan: План реализации
             tests: Тесты
             context: Контекст
+            user_query: Оригинальный запрос пользователя
             
         Returns:
             Полный код
         """
+        user_request_section = f"\nUSER REQUEST: {user_query}\n" if user_query else ""
+        
         prompt = f"""Generate Python code based on this plan.
-
+{user_request_section}
 PLAN:
 {plan[:1500]}
 

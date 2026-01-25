@@ -44,21 +44,22 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   availableModels
 }) => {
   const [settings, setSettings] = useLocalStorage<Settings>('appSettings', DEFAULT_SETTINGS)
-  const [advancedSettings, setAdvancedSettings] = useLocalStorage<Partial<Settings>>('advancedSettings', {})
   const [hasChanges, setHasChanges] = useState(false)
 
-  // Загружаем расширенные настройки при открытии
-  useEffect(() => {
-    if (isOpen && Object.keys(advancedSettings).length > 0) {
-      setSettings(prev => ({ ...prev, ...advancedSettings }))
-    }
-  }, [isOpen, advancedSettings, setSettings])
-
-  // Очищаем старые поля при загрузке
+  // Очищаем старые поля при загрузке (если они есть в localStorage)
   useEffect(() => {
     if (isOpen) {
-      const { projectPath, fileExtensions, ...cleanSettings } = settings
-      if (projectPath !== undefined || fileExtensions !== undefined) {
+      const cleanSettings = { ...settings }
+      // Удаляем несуществующие поля из типа Settings
+      if ('projectPath' in cleanSettings) {
+        delete (cleanSettings as any).projectPath
+      }
+      if ('fileExtensions' in cleanSettings) {
+        delete (cleanSettings as any).fileExtensions
+      }
+      // Проверяем, были ли изменения
+      const hasOldFields = 'projectPath' in settings || 'fileExtensions' in settings
+      if (hasOldFields) {
         setSettings(cleanSettings as Settings)
       }
     }
@@ -110,7 +111,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
               <Code className="w-4 h-4 text-gray-400" />
               Модель LLM
               {settings.model && isReasoningModelSync(settings.model) && (
-                <Zap className="w-3.5 h-3.5 text-yellow-500" title="Reasoning модель" />
+                <span title="Reasoning модель">
+                  <Zap className="w-3.5 h-3.5 text-yellow-500" />
+                </span>
               )}
             </label>
             <div className="relative">

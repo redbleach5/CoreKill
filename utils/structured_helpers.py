@@ -5,9 +5,12 @@
 - Feature flag проверку из config.toml
 - Логирование и метрики
 
-Использование:
+Примеры использования:
+    ```python
     from utils.structured_helpers import generate_with_fallback
+    from models.agent_responses import IntentResponse
     
+    # Синхронная версия
     response = generate_with_fallback(
         llm=self.llm,
         prompt=prompt,
@@ -15,6 +18,40 @@
         fallback_fn=lambda: self._classify_legacy(query),
         agent_name="intent"
     )
+    
+    # Асинхронная версия
+    from utils.structured_helpers import generate_with_fallback_async
+    
+    response = await generate_with_fallback_async(
+        llm=self.llm,
+        prompt=prompt,
+        response_model=IntentResponse,
+        fallback_fn=lambda: self._classify_legacy(query),
+        agent_name="intent"
+    )
+    
+    # Проверка включён ли structured output
+    from utils.structured_helpers import is_structured_output_enabled
+    
+    if is_structured_output_enabled("intent"):
+        print("Structured output включён для intent агента")
+    ```
+
+Зависимости:
+    - pydantic: для валидации structured output
+    - infrastructure.local_llm: для генерации
+    - utils.logger: для логирования
+    - utils.config: для feature flags
+
+Связанные утилиты:
+    - agents.intent: использует для structured output
+    - agents.debugger: использует для structured output
+    - agents.reflection: использует для structured output
+
+Примечания:
+    - Автоматически проверяет feature flag из config.toml
+    - При ошибке structured output использует fallback функцию
+    - Fallback можно отключить в config.toml (fallback_to_manual_parsing)
 """
 from typing import TypeVar, Type, Callable, Optional, TYPE_CHECKING
 from pydantic import BaseModel
@@ -50,7 +87,8 @@ def is_structured_output_enabled(agent_name: str) -> bool:
         # Проверяем список включённых агентов
         enabled_agents = structured_config.get("enabled_agents", [])
         return agent_name in enabled_agents
-    except Exception:
+    except Exception as e:
+        logger.debug(f"⚠️ Ошибка проверки enabled_agents для {agent_name}: {e}")
         return False
 
 

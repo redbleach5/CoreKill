@@ -142,6 +142,44 @@ class DependencyContainer:
         return cls._agents_cache[cache_key]
     
     @classmethod
+    def _get_agent_with_params(
+        cls,
+        agent_type: str,
+        agent_module: str,
+        agent_class_name: str,
+        model: Optional[str] = None,
+        temperature: float = 0.25,
+        **extra_kwargs: Any
+    ) -> Any:
+        """Generic метод для получения агента с параметрами model и temperature.
+        
+        Args:
+            agent_type: Тип агента (для логирования)
+            agent_module: Модуль агента (например, 'agents.intent')
+            agent_class_name: Имя класса агента (например, 'IntentAgent')
+            model: Модель для агента
+            temperature: Температура генерации
+            **extra_kwargs: Дополнительные параметры для инициализации
+            
+        Returns:
+            Экземпляр агента
+        """
+        cache_key = f"{agent_type.lower()}_{model}_{temperature}"
+        if cache_key not in cls._agents_cache:
+            with cls._agents_lock:
+                if cache_key not in cls._agents_cache:
+                    # Динамический импорт
+                    module = __import__(agent_module, fromlist=[agent_class_name])
+                    agent_class = getattr(module, agent_class_name)
+                    cls._agents_cache[cache_key] = agent_class(
+                        model=model,
+                        temperature=temperature,
+                        **extra_kwargs
+                    )
+                    logger.debug(f"✅ {agent_type} инициализирован (cache_key: {cache_key})")
+        return cls._agents_cache[cache_key]
+    
+    @classmethod
     def get_intent_agent(cls, model: Optional[str] = None, temperature: float = 0.2) -> 'IntentAgent':
         """Возвращает IntentAgent, создавая его при необходимости.
         
@@ -152,12 +190,10 @@ class DependencyContainer:
         Returns:
             Экземпляр IntentAgent
         """
-        from agents.intent import IntentAgent
-        cache_key = f"intent_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="IntentAgent",
-            agent_class=IntentAgent,
-            cache_key=cache_key,
+            agent_module="agents.intent",
+            agent_class_name="IntentAgent",
             model=model,
             temperature=temperature
         )
@@ -181,12 +217,10 @@ class DependencyContainer:
         """
         if memory_agent is None:
             memory_agent = cls.get_memory_agent()
-        from agents.planner import PlannerAgent
-        cache_key = f"planner_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="PlannerAgent",
-            agent_class=PlannerAgent,
-            cache_key=cache_key,
+            agent_module="agents.planner",
+            agent_class_name="PlannerAgent",
             model=model,
             temperature=temperature,
             memory_agent=memory_agent
@@ -204,14 +238,14 @@ class DependencyContainer:
         """
         if memory_agent is None:
             memory_agent = cls.get_memory_agent()
-        from agents.researcher import ResearcherAgent
         cache_key = "researcher"
-        return cls._get_agent(
-            agent_type="ResearcherAgent",
-            agent_class=ResearcherAgent,
-            cache_key=cache_key,
-            memory_agent=memory_agent
-        )
+        if cache_key not in cls._agents_cache:
+            with cls._agents_lock:
+                if cache_key not in cls._agents_cache:
+                    from agents.researcher import ResearcherAgent
+                    cls._agents_cache[cache_key] = ResearcherAgent(memory_agent=memory_agent)
+                    logger.debug(f"✅ ResearcherAgent инициализирован (cache_key: {cache_key})")
+        return cls._agents_cache[cache_key]
     
     @classmethod
     def get_test_generator_agent(
@@ -228,12 +262,10 @@ class DependencyContainer:
         Returns:
             Экземпляр TestGeneratorAgent
         """
-        from agents.test_generator import TestGeneratorAgent
-        cache_key = f"test_generator_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="TestGeneratorAgent",
-            agent_class=TestGeneratorAgent,
-            cache_key=cache_key,
+            agent_module="agents.test_generator",
+            agent_class_name="TestGeneratorAgent",
             model=model,
             temperature=temperature
         )
@@ -253,12 +285,10 @@ class DependencyContainer:
         Returns:
             Экземпляр CoderAgent
         """
-        from agents.coder import CoderAgent
-        cache_key = f"coder_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="CoderAgent",
-            agent_class=CoderAgent,
-            cache_key=cache_key,
+            agent_module="agents.coder",
+            agent_class_name="CoderAgent",
             model=model,
             temperature=temperature
         )
@@ -278,12 +308,10 @@ class DependencyContainer:
         Returns:
             Экземпляр DebuggerAgent
         """
-        from agents.debugger import DebuggerAgent
-        cache_key = f"debugger_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="DebuggerAgent",
-            agent_class=DebuggerAgent,
-            cache_key=cache_key,
+            agent_module="agents.debugger",
+            agent_class_name="DebuggerAgent",
             model=model,
             temperature=temperature
         )
@@ -303,12 +331,10 @@ class DependencyContainer:
         Returns:
             Экземпляр ReflectionAgent
         """
-        from agents.reflection import ReflectionAgent
-        cache_key = f"reflection_{model}_{temperature}"
-        return cls._get_agent(
+        return cls._get_agent_with_params(
             agent_type="ReflectionAgent",
-            agent_class=ReflectionAgent,
-            cache_key=cache_key,
+            agent_module="agents.reflection",
+            agent_class_name="ReflectionAgent",
             model=model,
             temperature=temperature
         )
@@ -358,6 +384,44 @@ class DependencyContainer:
         return cls._streaming_agents_cache[cache_key]
     
     @classmethod
+    def _get_streaming_agent_with_params(
+        cls,
+        agent_type: str,
+        agent_module: str,
+        agent_class_name: str,
+        model: Optional[str] = None,
+        temperature: float = 0.25,
+        **extra_kwargs: Any
+    ) -> Any:
+        """Generic метод для получения стримингового агента с параметрами model и temperature.
+        
+        Args:
+            agent_type: Тип агента (для логирования)
+            agent_module: Модуль агента (например, 'agents.streaming_coder')
+            agent_class_name: Имя класса агента (например, 'StreamingCoderAgent')
+            model: Модель для агента
+            temperature: Температура генерации
+            **extra_kwargs: Дополнительные параметры для инициализации
+            
+        Returns:
+            Экземпляр стримингового агента
+        """
+        cache_key = f"streaming_{agent_type.lower()}_{model}_{temperature}"
+        if cache_key not in cls._streaming_agents_cache:
+            with cls._streaming_agents_lock:
+                if cache_key not in cls._streaming_agents_cache:
+                    # Динамический импорт
+                    module = __import__(agent_module, fromlist=[agent_class_name])
+                    agent_class = getattr(module, agent_class_name)
+                    cls._streaming_agents_cache[cache_key] = agent_class(
+                        model=model,
+                        temperature=temperature,
+                        **extra_kwargs
+                    )
+                    logger.debug(f"✅ {agent_type} (streaming) инициализирован (cache_key: {cache_key})")
+        return cls._streaming_agents_cache[cache_key]
+    
+    @classmethod
     def get_streaming_planner_agent(
         cls,
         model: Optional[str] = None,
@@ -376,12 +440,10 @@ class DependencyContainer:
         """
         if memory_agent is None:
             memory_agent = cls.get_memory_agent()
-        from agents.streaming_planner import StreamingPlannerAgent
-        cache_key = f"streaming_planner_{model}_{temperature}"
-        return cls._get_streaming_agent(
-            agent_type="StreamingPlannerAgent",
-            agent_class=StreamingPlannerAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="PlannerAgent",
+            agent_module="agents.streaming_planner",
+            agent_class_name="StreamingPlannerAgent",
             model=model,
             temperature=temperature,
             memory_agent=memory_agent
@@ -402,12 +464,10 @@ class DependencyContainer:
         Returns:
             Экземпляр StreamingTestGeneratorAgent
         """
-        from agents.streaming_test_generator import StreamingTestGeneratorAgent
-        cache_key = f"streaming_test_generator_{model}_{temperature}"
-        return cls._get_streaming_agent(
-            agent_type="StreamingTestGeneratorAgent",
-            agent_class=StreamingTestGeneratorAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="TestGeneratorAgent",
+            agent_module="agents.streaming_test_generator",
+            agent_class_name="StreamingTestGeneratorAgent",
             model=model,
             temperature=temperature
         )
@@ -427,12 +487,10 @@ class DependencyContainer:
         Returns:
             Экземпляр StreamingCoderAgent
         """
-        from agents.streaming_coder import StreamingCoderAgent
-        cache_key = f"streaming_coder_{model}_{temperature}"
-        return cls._get_streaming_agent(
-            agent_type="StreamingCoderAgent",
-            agent_class=StreamingCoderAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="CoderAgent",
+            agent_module="agents.streaming_coder",
+            agent_class_name="StreamingCoderAgent",
             model=model,
             temperature=temperature
         )
@@ -452,12 +510,10 @@ class DependencyContainer:
         Returns:
             Экземпляр StreamingDebuggerAgent
         """
-        from agents.streaming_debugger import StreamingDebuggerAgent
-        cache_key = f"streaming_debugger_{model}_{temperature}"
-        return cls._get_streaming_agent(
-            agent_type="StreamingDebuggerAgent",
-            agent_class=StreamingDebuggerAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="DebuggerAgent",
+            agent_module="agents.streaming_debugger",
+            agent_class_name="StreamingDebuggerAgent",
             model=model,
             temperature=temperature
         )
@@ -477,12 +533,10 @@ class DependencyContainer:
         Returns:
             Экземпляр StreamingReflectionAgent
         """
-        from agents.streaming_reflection import StreamingReflectionAgent
-        cache_key = f"streaming_reflection_{model}_{temperature}"
-        return cls._get_streaming_agent(
-            agent_type="StreamingReflectionAgent",
-            agent_class=StreamingReflectionAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="ReflectionAgent",
+            agent_module="agents.streaming_reflection",
+            agent_class_name="StreamingReflectionAgent",
             model=model,
             temperature=temperature
         )
@@ -494,12 +548,10 @@ class DependencyContainer:
         Returns:
             Экземпляр StreamingCriticAgent
         """
-        from agents.streaming_critic import StreamingCriticAgent
-        cache_key = "streaming_critic"
-        return cls._get_streaming_agent(
-            agent_type="StreamingCriticAgent",
-            agent_class=StreamingCriticAgent,
-            cache_key=cache_key,
+        return cls._get_streaming_agent_with_params(
+            agent_type="CriticAgent",
+            agent_module="agents.streaming_critic",
+            agent_class_name="StreamingCriticAgent",
             model=None,
             temperature=0.1
         )

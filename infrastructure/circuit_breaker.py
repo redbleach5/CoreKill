@@ -169,6 +169,7 @@ class CircuitBreaker:
             
         except Exception as e:
             # Ошибка при вызове
+            logger.debug(f"⚠️ Circuit breaker: ошибка вызова функции {self.name}: {e}")
             self._on_failure()
             raise
     

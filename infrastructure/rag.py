@@ -13,8 +13,8 @@ try:
     from chromadb.config import Settings
     CHROMADB_AVAILABLE = True
 except ImportError:
-    chromadb = None  # type: ignore[assignment]
-    Settings = None  # type: ignore[assignment,misc]
+    chromadb = None  # type: ignore[assignment]  # chromadb опционален, None используется для проверки доступности
+    Settings = None  # type: ignore[assignment,misc]  # Settings опционален, None используется для проверки доступности
     CHROMADB_AVAILABLE = False
     logger.warning("⚠️ ChromaDB недоступен. RAG будет работать в режиме без векторной БД.")
 
@@ -55,12 +55,17 @@ class RAGSystem:
                 )
                 
                 # Получаем или создаём коллекцию
+                # Используем cosine distance для текстовых эмбеддингов (лучше для семантического поиска)
                 try:
                     self.collection = self.client.get_collection(name=collection_name)
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"⚠️ Коллекция {collection_name} не найдена, создаю новую: {e}")
                     self.collection = self.client.create_collection(
                         name=collection_name,
-                        metadata={"description": "Codebase documentation and context"}
+                        metadata={
+                            "description": "Codebase documentation and context",
+                            "hnsw:space": "cosine"  # Косинусное расстояние для текстовых эмбеддингов
+                        }
                     )
                 logger.info(f"✅ RAG система инициализирована с ChromaDB (коллекция: {collection_name})")
             except Exception as e:

@@ -373,7 +373,7 @@ class ReasoningStreamManager:
                             elapsed_ms=0,
                             total_chars=0
                         ))
-                        logger.info(f"📤 [{stage}] Yielding thinking_started (длина SSE: {len(event)})")
+                        logger.debug(f"📤 [{stage}] Yielding thinking_started (длина SSE: {len(event)})")
                         yield ("thinking", event)
                     
                     thinking_buffer += chunk.content
@@ -389,7 +389,9 @@ class ReasoningStreamManager:
                         total_chars=total_thinking_chars
                     ))
                     if thinking_chunk_count % 10 == 0:  # Логируем каждые 10 чанков
-                        logger.info(f"📤 [{stage}] Yielding thinking_in_progress #{thinking_chunk_count} (длина SSE: {len(event)}, контент: {len(chunk.content)} символов)")
+                        # ОПТИМИЗАЦИЯ: Логируем только периодически (каждые 5 чанков) для уменьшения объема логов
+                        if thinking_chunk_count % 5 == 0:
+                            logger.debug(f"📤 [{stage}] Yielding thinking_in_progress #{thinking_chunk_count} (длина SSE: {len(event)}, контент: {len(chunk.content)} символов)")
                     yield ("thinking", event)
                     
                 else:
@@ -407,8 +409,45 @@ class ReasoningStreamManager:
                             elapsed_ms=elapsed,
                             total_chars=total_thinking_chars
                         ))
-                        logger.info(f"📤 [{stage}] Yielding thinking_completed (длина SSE: {len(event)})")
+                        logger.debug(f"📤 [{stage}] Yielding thinking_completed (длина SSE: {len(event)})")
                         yield ("thinking", event)
+                    
+                    # ИСПРАВЛЕНИЕ: Для non-reasoning моделей отправляем stage_progress события
+                    # чтобы пользователь видел что происходит
+                    if not thinking_started and chunk_count > 0 and chunk_count % 15 == 0:
+                        # Отправляем прогресс каждые 15 чанков для non-reasoning моделей
+                        # (чаще чем каждые 20, чтобы пользователь видел более плавный прогресс)
+                        elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
+                        content_length = len(content_buffer) + len(chunk.content)
+                        
+                        # Определяем сообщение в зависимости от этапа
+                        progress_messages = {
+                            "coding": f"Генерирую код... ({content_length} символов)",
+                            "planning": f"Создаю план... ({content_length} символов)",
+                            "testing": f"Генерирую тесты... ({content_length} символов)",
+                            "debug": f"Анализирую ошибки... ({content_length} символов)",
+                            "debugging": f"Анализирую ошибки... ({content_length} символов)",
+                            "reflection": f"Анализирую результат... ({content_length} символов)",
+                            "critic": f"Проверяю код... ({content_length} символов)"
+                        }
+                        progress_message = progress_messages.get(stage, f"Обрабатываю... ({content_length} символов)")
+                        
+                        # Оцениваем прогресс на основе времени и количества чанков
+                        # Используем более точную оценку: предполагаем что генерация займет ~15-25 секунд
+                        estimated_duration = 20000  # 20 секунд (среднее время)
+                        # Учитываем также количество чанков (больше чанков = больше прогресс)
+                        chunk_progress = min(0.7, chunk_count / 100)  # Максимум 70% от чанков
+                        time_progress = min(0.8, elapsed / estimated_duration)  # Максимум 80% от времени
+                        progress = min(0.95, max(chunk_progress, time_progress))
+                        
+                        from backend.sse_manager import SSEManager
+                        progress_event = await SSEManager.stream_stage_progress(
+                            stage=stage,
+                            progress=progress,
+                            message=progress_message,
+                            metadata={"chunks": chunk_count, "elapsed_ms": elapsed, "content_length": content_length}
+                        )
+                        yield ("progress", progress_event)
                     
                     # Отправляем контент
                     if chunk.content:
@@ -419,7 +458,8 @@ class ReasoningStreamManager:
             if thinking_chunk_count > 0:
                 logger.info(f"✅ [{stage}] Стриминг завершён: {chunk_count} чанков, {thinking_chunk_count} thinking чанков, {total_thinking_chars} символов thinking")
             else:
-                logger.warning(f"⚠️ [{stage}] Нет thinking блоков! Модель {llm.model} не является reasoning моделью или не генерирует <think> блоки")
+                # ИСПРАВЛЕНИЕ: Для non-reasoning моделей это нормально, не логируем как предупреждение
+                logger.debug(f"ℹ️ [{stage}] Модель {llm.model} не генерирует <think> блоки (non-reasoning модель). Отправлены progress события для отображения прогресса.")
             
             # Если был thinking блок и он не был завершён, завершаем его
             if thinking_started and not thinking_completed:
@@ -437,9 +477,49 @@ class ReasoningStreamManager:
             
             # Финальное событие с полным ответом
             full_response = thinking_buffer + content_buffer if thinking_buffer else content_buffer
-            yield ("done", chunk.full_response if chunk else full_response)
+            
+            # ИСПРАВЛЕНИЕ: Проверяем, что есть основной контент (не только thinking)
+            if not content_buffer and thinking_buffer:
+                logger.warning(
+                    f"⚠️ [{stage}] Модель вернула только thinking блоки без основного контента! "
+                    f"thinking: {len(thinking_buffer)} символов, content: 0 символов. "
+                    f"Используем full_response из chunk если доступен."
+                )
+            
+            # Используем chunk.full_response если доступен (содержит полный ответ от LLM),
+            # иначе используем собранный full_response
+            final_response = chunk.full_response if chunk and hasattr(chunk, 'full_response') and chunk.full_response else full_response
+            
+            # Дополнительная проверка: если final_response пустой, логируем предупреждение
+            if not final_response or not final_response.strip():
+                logger.error(
+                    f"❌ [{stage}] Финальный ответ пустой! thinking: {len(thinking_buffer)} символов, "
+                    f"content: {len(content_buffer)} символов, chunk_count: {chunk_count}"
+                )
+            
+            yield ("done", final_response)
             
         except Exception as e:
+            # Пробрасываем LLMModelUnavailableError наверх для обработки в агенте
+            from infrastructure.local_llm import LLMModelUnavailableError
+            if isinstance(e, LLMModelUnavailableError):
+                # Если был thinking блок, отправляем событие прерывания
+                if thinking_started and not thinking_completed:
+                    elapsed = int((datetime.now() - start_time).total_seconds() * 1000)
+                    try:
+                        event = await self.create_thinking_event(ThinkingChunk(
+                            content=thinking_buffer or "[модель недоступна]",
+                            status=ThinkingStatus.INTERRUPTED,
+                            stage=stage,
+                            elapsed_ms=elapsed,
+                            total_chars=total_thinking_chars
+                        ))
+                        yield ("thinking", event)
+                    except Exception as cleanup_error:
+                        logger.warning(f"⚠️ Ошибка при отправке события прерывания: {cleanup_error}")
+                # Пробрасываем ошибку наверх для обработки в агенте
+                raise
+            
             logger.error(f"❌ Ошибка стриминга от LLM: {e}", error=e)
             # Если был thinking блок, отправляем событие прерывания
             if thinking_started and not thinking_completed:

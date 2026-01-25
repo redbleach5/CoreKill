@@ -54,10 +54,9 @@ def create_mock_agent_dependencies(
         temperature: Температура
         
     Returns:
-        Словарь с моками зависимостей
+        Словарь с моками зависимостей (без get_model_router, его нужно мокать отдельно)
     """
     return {
-        "get_model_router": Mock(return_value=create_mock_model_router(model)),
         "create_llm_for_stage": Mock(return_value=create_mock_llm(model, temperature)),
     }
 

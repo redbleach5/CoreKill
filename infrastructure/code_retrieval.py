@@ -31,14 +31,23 @@ class CodeExample:
     
     @property
     def formatted(self) -> str:
-        """Форматирует пример для промпта."""
+        """Форматирует пример для промпта.
+        
+        Улучшенное форматирование с указанием качества и релевантности.
+        """
         source_label = {
             "local": "from project",
             "github": "from GitHub",
             "history": "from history"
         }.get(self.source, self.source)
         
-        return f"""# Example ({source_label}):
+        # Добавляем информацию о качестве если доступна
+        quality_info = ""
+        if self.quality_score > 0:
+            quality_star = "⭐" if self.quality_score > 0.7 else "✓"
+            quality_info = f" {quality_star}"
+        
+        return f"""# Example ({source_label}){quality_info}:
 # {self.description}
 {self.code}"""
 
@@ -231,7 +240,8 @@ class CodeRetriever:
                             relevance_score=0.7,
                             language=language
                         ))
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка обработки примера из GitHub: {e}")
                     continue
             
             self._github_cache[cache_key] = examples
@@ -424,7 +434,8 @@ class CodeRetriever:
                 "embedding_model": self._embedding_model_name,
                 "chroma_path": self._chroma_path
             }
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка получения статистики CodeRetrieval: {e}")
             return {"count": 0, "initialized": True}
 
 

@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
+from utils.logger import get_logger
+
+logger = get_logger()
 from functools import wraps
 import asyncio
 
@@ -122,7 +125,8 @@ class DebugEventEmitter:
             level_str = debug_config.get("log_level", "info")
             self._log_level = LogLevel(level_str.lower())
             self._max_logs = debug_config.get("max_logs_in_memory", 1000)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка загрузки конфигурации debug_events, используем дефолты: {e}")
             self._enabled = True
             self._log_level = LogLevel.INFO
     
@@ -321,6 +325,7 @@ def track_tool_call(tool_type: str, name: str):
                 emitter.tool_call_end(call_id, "success", output_preview)
                 return result
             except Exception as e:
+                logger.debug(f"⚠️ Ошибка в async tool call {name}: {e}")
                 emitter.tool_call_end(call_id, "error", str(e))
                 raise
         
@@ -343,6 +348,7 @@ def track_tool_call(tool_type: str, name: str):
                 emitter.tool_call_end(call_id, "success", output_preview)
                 return result
             except Exception as e:
+                logger.debug(f"⚠️ Ошибка в sync tool call {name}: {e}")
                 emitter.tool_call_end(call_id, "error", str(e))
                 raise
         

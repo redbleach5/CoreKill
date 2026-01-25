@@ -82,9 +82,17 @@ export const ChatInput = forwardRef<HTMLTextAreaElement, ChatInputProps>(
             </div>
           </div>
           
-          <p className="text-center text-xs text-gray-500 mt-2">
-            AI может ошибаться. Проверяйте результаты.
-          </p>
+          <div className="flex items-center justify-center gap-4 mt-2 text-xs text-gray-500">
+            <span className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
+              AI может ошибаться. Проверяйте результаты.
+            </span>
+            {value.trim().length > 0 && (
+              <span className="text-gray-600">
+                {value.trim().length} символов
+              </span>
+            )}
+          </div>
         </div>
       </div>
     )

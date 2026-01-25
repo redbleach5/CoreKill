@@ -1,4 +1,5 @@
 """Тесты для LangGraph workflow."""
+import inspect
 import pytest
 from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from infrastructure.workflow_graph import create_workflow_graph
@@ -74,27 +75,43 @@ class TestWorkflowGraph:
     @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_decorators._acquire_agent_resource')
     @patch('infrastructure.circuit_breaker.get_circuit_breaker')
-    @patch('backend.dependencies.get_intent_agent')
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
     async def test_intent_node_greeting(
-        self, mock_get_intent, mock_circuit, mock_resource, mock_record, mock_save
+        self, mock_get_agent, mock_circuit, mock_resource, mock_record, mock_save
     ):
         """Тест узла intent для greeting."""
-        # Мокаем resource manager (возвращает пустой контекст)
-        mock_resource.return_value.__aenter__ = AsyncMock(return_value=None)
-        mock_resource.return_value.__aexit__ = AsyncMock(return_value=None)
+        # Мокаем resource manager правильно - возвращаем async context manager
+        from contextlib import asynccontextmanager
+        
+        @asynccontextmanager
+        async def mock_context():
+            yield None
+        
+        mock_resource.return_value = mock_context()
         
         # Мокаем circuit breaker
         mock_circuit_breaker = AsyncMock()
-        mock_circuit_breaker.call = AsyncMock(side_effect=lambda f, *args, **kwargs: f(*args, **kwargs))
+        # circuit_breaker.call должен правильно вызывать async функцию
+        async def mock_call(func, *args, **kwargs):
+            coro = func(*args, **kwargs)
+            if inspect.iscoroutine(coro):
+                return await coro
+            return coro
+        mock_circuit_breaker.call = mock_call
         mock_circuit.return_value = mock_circuit_breaker
         
         # Мокаем intent agent
         mock_intent_agent = Mock()
-        mock_get_intent.return_value = mock_intent_agent
+        mock_get_agent.return_value = mock_intent_agent
         
-        with patch.object(IntentAgent, 'is_greeting_fast', return_value=True):
+        with patch('infrastructure.workflow_nodes.IntentAgent.is_greeting_fast', return_value=True):
             state = create_agent_state(task="привет")
+            # intent_node обернут в декоратор, который возвращает AgentState
+            # Проверяем что intent_node это callable
+            assert callable(intent_node), f"intent_node должен быть callable, получен {type(intent_node)}"
             result = await intent_node(state)
+            # Проверяем что result это словарь (AgentState)
+            assert isinstance(result, dict), f"Ожидался dict, получен {type(result)}"
         
         assert result["intent_result"] is not None
         assert result["intent_result"].type == "greeting"
@@ -105,9 +122,9 @@ class TestWorkflowGraph:
     @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_decorators._acquire_agent_resource')
     @patch('infrastructure.circuit_breaker.get_circuit_breaker')
-    @patch('backend.dependencies.get_intent_agent')
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
     async def test_intent_node_create(
-        self, mock_get_intent, mock_circuit, mock_resource, mock_record, mock_save
+        self, mock_get_agent, mock_circuit, mock_resource, mock_record, mock_save
     ):
         """Тест узла intent для create."""
         # Мокаем resource manager
@@ -116,7 +133,13 @@ class TestWorkflowGraph:
         
         # Мокаем circuit breaker
         mock_circuit_breaker = AsyncMock()
-        mock_circuit_breaker.call = AsyncMock(side_effect=lambda f, *args, **kwargs: f(*args, **kwargs))
+        # circuit_breaker.call должен правильно вызывать async функцию
+        async def mock_call(func, *args, **kwargs):
+            coro = func(*args, **kwargs)
+            if inspect.iscoroutine(coro):
+                return await coro
+            return coro
+        mock_circuit_breaker.call = mock_call
         mock_circuit.return_value = mock_circuit_breaker
         
         # Мокаем intent agent
@@ -127,11 +150,18 @@ class TestWorkflowGraph:
         )
         mock_intent_agent = Mock()
         mock_intent_agent.determine_intent.return_value = mock_result
-        mock_get_intent.return_value = mock_intent_agent
+        mock_get_agent.return_value = mock_intent_agent
         
         with patch('infrastructure.workflow_nodes.IntentAgent.is_greeting_fast', return_value=False):
-            state = create_agent_state(task="создать функцию")
-            result = await intent_node(state)
+            # Мокируем asyncio.to_thread чтобы он возвращал результат синхронно
+            async def mock_to_thread(func, *args):
+                return func(*args)
+            
+            with patch('infrastructure.workflow_nodes.asyncio.to_thread', side_effect=mock_to_thread):
+                state = create_agent_state(task="создать функцию")
+                result = await intent_node(state)
+                # Проверяем что result это словарь (AgentState)
+                assert isinstance(result, dict), f"Ожидался dict, получен {type(result)}"
         
         assert result["intent_result"] is not None
         assert result["intent_result"].type == "create"
@@ -161,7 +191,8 @@ class TestWorkflowGraph:
         fail_state = create_agent_state(
             validation_results={"all_passed": False},
             iteration=1,
-            max_iterations=3
+            max_iterations=3,
+            code="def test(): pass"  # Добавляем код, чтобы не сработала проверка на пустой код
         )
         assert should_continue_self_healing(fail_state) == "continue"
         
@@ -175,11 +206,12 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._planner_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_planner_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_planner_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла planner."""
+        mock_agent = Mock()
         mock_agent.create_plan.return_value = "Plan step 1\nPlan step 2"
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             task="создать калькулятор",
@@ -193,11 +225,12 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._researcher_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_researcher_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_researcher_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла researcher."""
+        mock_agent = Mock()
         mock_agent.research.return_value = "Context from research"
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             task="создать функцию",
@@ -211,11 +244,12 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._test_generator')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_generator_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_generator_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла generator (test_generator)."""
+        mock_agent = Mock()
         mock_agent.generate_tests.return_value = "def test_example(): assert True"
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             plan="Create a function",
@@ -230,11 +264,12 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._coder_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_coder_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_coder_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла coder."""
+        mock_agent = Mock()
         mock_agent.generate_code.return_value = "def hello(): return 'world'"
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             plan="Create hello function",
@@ -272,10 +307,10 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._debugger_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_debugger_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_debugger_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла debugger."""
+        mock_agent = Mock()
         mock_agent.analyze_errors.return_value = DebugResult(
             error_summary="Test error",
             root_cause="Test cause",
@@ -283,6 +318,7 @@ class TestWorkflowGraph:
             confidence=0.9,
             error_type="pytest"
         )
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             code="def broken(): pass",
@@ -297,11 +333,12 @@ class TestWorkflowGraph:
     @pytest.mark.asyncio
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
-    @patch('infrastructure.workflow_nodes._coder_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_fixer_node(self, mock_init, mock_agent, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_fixer_node(self, mock_get_agent, mock_record, mock_save):
         """Тест узла fixer."""
+        mock_agent = Mock()
         mock_agent.fix_code.return_value = "def fixed(): return 1"
+        mock_get_agent.return_value = mock_agent
         
         state = create_agent_state(
             code="def broken(): pass",
@@ -324,10 +361,10 @@ class TestWorkflowGraph:
     @patch('infrastructure.workflow_decorators._save_checkpoint')
     @patch('infrastructure.workflow_decorators._record_stage_duration')
     @patch('infrastructure.workflow_nodes._get_memory_agent')
-    @patch('infrastructure.workflow_nodes._reflection_agent')
-    @patch('infrastructure.workflow_nodes._initialize_agents')
-    async def test_reflection_node(self, mock_init, mock_agent, mock_memory, mock_record, mock_save):
+    @patch('infrastructure.workflow_nodes._get_agent_from_container')
+    async def test_reflection_node(self, mock_get_agent, mock_memory, mock_record, mock_save):
         """Тест узла reflection."""
+        mock_agent = Mock()
         mock_agent.reflect.return_value = ReflectionResult(
             planning_score=0.8,
             research_score=0.7,
@@ -338,6 +375,7 @@ class TestWorkflowGraph:
             improvements="None needed",
             should_retry=False
         )
+        mock_get_agent.return_value = mock_agent
         mock_memory.return_value = Mock(save_task_experience=Mock())
         
         state = create_agent_state(

@@ -2,6 +2,48 @@
 
 Использует новую систему логирования (infrastructure/logging) 
 с сохранением обратной совместимости со старым API.
+
+Примеры использования:
+    ```python
+    from utils.logger import get_logger, setup_logger
+    
+    # Простое использование (рекомендуется)
+    logger = get_logger()
+    logger.info("Информационное сообщение")
+    logger.debug("Отладочное сообщение")
+    logger.warning("Предупреждение")
+    logger.error("Ошибка", error=exception)
+    
+    # Настройка логгера (если нужно)
+    logger = setup_logger(
+        name="my_module",
+        level=logging.DEBUG,
+        log_file="logs/my_module.log",
+        console_output=True
+    )
+    
+    # Логирование с дополнительными параметрами
+    logger.info(
+        "Задача выполнена",
+        stage="coding",
+        task_id="task_123",
+        iteration=1,
+        payload={"model": "qwen2.5-coder:7b"}
+    )
+    ```
+
+Зависимости:
+    - infrastructure.logging: новая система логирования
+    - logging: стандартная библиотека Python (для совместимости)
+
+Связанные утилиты:
+    - utils.config: конфигурация логирования может быть в config.toml
+
+Примечания:
+    - Логгер автоматически определяет UI_MODE из переменных окружения
+    - В UI режиме используется конфигурация с памятью для стриминга
+    - В CLI режиме используется конфигурация для разработки
+    - Thread-safe: можно использовать из разных потоков
 """
 import logging
 import threading
@@ -52,6 +94,26 @@ def _get_log_manager() -> LogManager:
                 # Для CLI/обычного использования - конфигурация для разработки
                 config = LoggingConfig.for_dev()
             
+            # Читаем уровень логирования из config.toml (приоритет над предустановленными значениями)
+            try:
+                from utils.config import get_config
+                app_config = get_config()
+                log_level_str = app_config.debug_log_level
+                
+                # Маппинг строкового значения на LogLevel
+                level_map = {
+                    "debug": LogLevel.DEBUG,
+                    "info": LogLevel.INFO,
+                    "warning": LogLevel.WARNING,
+                    "error": LogLevel.ERROR,
+                }
+                config.level = level_map.get(log_level_str, LogLevel.INFO)
+                # Не логируем здесь, так как logger ещё не создан
+            except Exception:
+                # Если не удалось прочитать из config.toml, используем предустановленное значение
+                # Не логируем здесь, так как logger ещё не создан
+                pass
+            
             # Убеждаемся, что файл логов настроен правильно
             if config.enable_file:
                 # Создаём директорию для логов если её нет
@@ -59,6 +121,17 @@ def _get_log_manager() -> LogManager:
                 log_dir.mkdir(parents=True, exist_ok=True)
             
             _default_log_manager = LogManager(config)
+            
+            # Обновляем уровень в LoggerAdapter для совместимости
+            # Маппинг LogLevel на logging уровни
+            logging_level_map = {
+                LogLevel.DEBUG: logging.DEBUG,
+                LogLevel.INFO: logging.INFO,
+                LogLevel.WARNING: logging.WARNING,
+                LogLevel.ERROR: logging.ERROR,
+            }
+            # Сохраняем уровень для LoggerAdapter
+            _default_logging_level = logging_level_map.get(config.level, logging.INFO)
     
     return _default_log_manager
 
@@ -76,7 +149,9 @@ class LoggerAdapter:
             name: Имя логгера (используется для совместимости, но не влияет на новую систему)
         """
         self.name = name
-        self.level = logging.INFO  # По умолчанию INFO
+        # Уровень будет установлен при первом использовании через _get_log_manager()
+        # Используем INFO по умолчанию, но он будет обновлён при первом вызове
+        self.level = logging.INFO
         
         # Маппинг уровней logging на LogLevel
         self._level_map = {
@@ -98,6 +173,18 @@ class LoggerAdapter:
         log_manager = _get_log_manager()
         log_level = self._level_map.get(level, LogLevel.INFO)
         log_manager.config.level = log_level
+    
+    def _sync_level_from_config(self) -> None:
+        """Синхронизирует уровень логгера с конфигурацией из config.toml."""
+        if _default_log_manager is not None:
+            log_manager = _get_log_manager()
+            logging_level_map = {
+                LogLevel.DEBUG: logging.DEBUG,
+                LogLevel.INFO: logging.INFO,
+                LogLevel.WARNING: logging.WARNING,
+                LogLevel.ERROR: logging.ERROR,
+            }
+            self.level = logging_level_map.get(log_manager.config.level, logging.INFO)
     
     def isEnabledFor(self, level: int) -> bool:
         """Проверяет, включён ли данный уровень логирования.
@@ -158,6 +245,9 @@ class LoggerAdapter:
             *args: Аргументы для форматирования (поддерживается % форматирование)
             **kwargs: Дополнительные параметры
         """
+        # Синхронизируем уровень при первом использовании
+        if _default_log_manager is not None and self.level == logging.INFO:
+            self._sync_level_from_config()
         if self.isEnabledFor(logging.DEBUG):
             log_manager = _get_log_manager()
             
@@ -350,10 +440,31 @@ def setup_logger(
 def get_logger() -> LoggerAdapter:
     """Возвращает глобальный логгер по умолчанию.
     
+    Это рекомендуемый способ получения логгера в проекте.
+    Логгер автоматически инициализируется при первом вызове.
+    
+    Примеры:
+        ```python
+        from utils.logger import get_logger
+        
+        logger = get_logger()
+        logger.info("Сообщение")
+        logger.error("Ошибка", error=exception)
+        ```
+    
     Returns:
         LoggerAdapter совместимый со стандартным logging.Logger
+        
+    Примечания:
+        - Логгер автоматически настраивается при первом использовании
+        - Использует singleton паттерн (один экземпляр на приложение)
+        - Thread-safe
+        - Уровень логирования читается из config.toml [debug] log_level
     """
-    return LoggerAdapter()
+    logger = LoggerAdapter()
+    # Синхронизируем уровень из config.toml при создании
+    logger._sync_level_from_config()
+    return logger
 
 
 def get_log_manager() -> LogManager:

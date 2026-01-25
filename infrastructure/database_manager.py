@@ -119,7 +119,8 @@ class DatabaseManager:
                 # Получаем количество записей
                 try:
                     count = collection.count()
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"⚠️ Ошибка получения количества записей из коллекции {collection_name}: {e}")
                     count = None
                 
                 databases.append(DatabaseInfo(
@@ -175,8 +176,8 @@ class DatabaseManager:
                             cursor.execute(f"SELECT COUNT(*) FROM {tables[0][0]}")
                             record_count = cursor.fetchone()[0]
                         conn.close()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"⚠️ Ошибка получения количества записей из SQLite {db_file}: {e}")
                     
                     databases.append(DatabaseInfo(
                         name=f"sqlite:{db_file.stem}",
@@ -206,7 +207,8 @@ class DatabaseManager:
                 size = json_file.stat().st_size
                 total_size += size
                 file_count += 1
-            except Exception:
+            except Exception as e:
+                logger.debug(f"⚠️ Ошибка обработки файла {json_file}: {e}")
                 continue
         
         if file_count > 0:

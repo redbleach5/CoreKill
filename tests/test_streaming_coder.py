@@ -7,8 +7,8 @@ from agents.streaming_coder import StreamingCoderAgent, get_streaming_coder_agen
 class TestStreamingCoderAgentInit:
     """Тесты инициализации StreamingCoderAgent."""
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_init_with_model(
@@ -35,8 +35,8 @@ class TestStreamingCoderAgentInit:
             top_p=0.9
         )
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('agents.base.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_init_without_model(
@@ -48,7 +48,9 @@ class TestStreamingCoderAgentInit:
     ):
         """Тест инициализации без модели (автоматический выбор)."""
         mock_router_instance = Mock()
-        mock_router_instance.select_model.return_value = Mock(model="auto-selected:7b")
+        mock_model_selection = Mock()
+        mock_model_selection.model = "auto-selected:7b"
+        mock_router_instance.select_model.return_value = mock_model_selection
         mock_router.return_value = mock_router_instance
         mock_create_llm.return_value = Mock()
         mock_enhancer.return_value = Mock()
@@ -63,8 +65,8 @@ class TestStreamingCoderAgentInit:
 class TestStreamingCoderAgentInterrupt:
     """Тесты прерывания генерации."""
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_interrupt(
@@ -89,8 +91,8 @@ class TestStreamingCoderAgentInterrupt:
         assert agent._interrupted is True
         mock_reasoning_manager.interrupt.assert_called_once()
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_reset(
@@ -119,8 +121,8 @@ class TestGenerateCodeStream:
     """Тесты стриминга генерации кода."""
     
     @pytest.mark.asyncio
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     @patch('agents.streaming_coder.get_config')
@@ -152,8 +154,8 @@ class TestGenerateCodeStream:
         assert events[0] == ("done", "")
     
     @pytest.mark.asyncio
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     @patch('agents.streaming_coder.get_config')
@@ -185,12 +187,15 @@ class TestGenerateCodeStream:
             yield ("content", "    pass\n")
             yield ("done", "def hello():\n    pass\n")
         
+        from unittest.mock import AsyncMock
         mock_reasoning_manager = Mock()
         mock_reasoning_manager.stream_from_llm = fake_stream
+        mock_reasoning_manager.create_thinking_event = AsyncMock(return_value="sse_event")
         mock_reasoning_manager.reset = Mock()
         mock_reasoning.return_value = mock_reasoning_manager
         
         agent = StreamingCoderAgent(model="test:7b")
+        agent.reasoning_manager = mock_reasoning_manager
         
         events = []
         async for event_type, data in agent.generate_code_stream(
@@ -203,8 +208,9 @@ class TestGenerateCodeStream:
             events.append((event_type, data))
         
         # Проверяем что были thinking события
+        # Минимум 3: начальный анализ, анализ контекста (если есть), начало генерации, плюс события из LLM
         thinking_events = [e for e in events if e[0] == "thinking"]
-        assert len(thinking_events) == 2
+        assert len(thinking_events) >= 3, f"Ожидалось минимум 3 thinking события, получено {len(thinking_events)}"
         
         # Проверяем что были code_chunk события
         code_events = [e for e in events if e[0] == "code_chunk"]
@@ -219,8 +225,8 @@ class TestGenerateCodeStream:
 class TestCleanCode:
     """Тесты очистки кода."""
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_clean_code_with_markdown(
@@ -247,8 +253,8 @@ def hello():
         assert "```" not in cleaned
         assert "def hello" in cleaned
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_clean_code_empty(
@@ -269,49 +275,11 @@ def hello():
         assert agent._clean_code("just text without code") == ""
 
 
-class TestSyncMethods:
-    """Тесты синхронных методов для обратной совместимости."""
-    
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
-    @patch('agents.streaming_coder.get_prompt_enhancer')
-    @patch('agents.streaming_coder.get_reasoning_stream_manager')
-    @patch('agents.coder.CoderAgent')
-    def test_sync_generate_code(
-        self, 
-        mock_coder_agent,
-        mock_reasoning, 
-        mock_enhancer, 
-        mock_create_llm, 
-        mock_router
-    ):
-        """Тест синхронной генерации через CoderAgent."""
-        mock_create_llm.return_value = Mock()
-        mock_enhancer.return_value = Mock()
-        mock_reasoning.return_value = Mock()
-        
-        mock_sync_agent = Mock()
-        mock_sync_agent.generate_code.return_value = "def test(): pass"
-        mock_coder_agent.return_value = mock_sync_agent
-        
-        agent = StreamingCoderAgent(model="test:7b")
-        
-        result = agent.generate_code(
-            plan="plan",
-            tests="tests",
-            context="context",
-            intent_type="create"
-        )
-        
-        assert result == "def test(): pass"
-        mock_sync_agent.generate_code.assert_called_once()
-
-
 class TestFactory:
     """Тесты factory функции."""
     
-    @patch('agents.streaming_coder.get_model_router')
-    @patch('agents.streaming_coder.create_llm_for_stage')
+    @patch('infrastructure.model_router.get_model_router')
+    @patch('agents.base.create_llm_for_stage')
     @patch('agents.streaming_coder.get_prompt_enhancer')
     @patch('agents.streaming_coder.get_reasoning_stream_manager')
     def test_get_streaming_coder_agent(

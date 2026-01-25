@@ -62,11 +62,6 @@ class StreamingDebuggerAgent(BaseAgent):
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Анализ ошибок прерван")
     
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
-    
     async def analyze_errors_stream(
         self,
         validation_results: Dict[str, Any],
@@ -124,6 +119,9 @@ class StreamingDebuggerAgent(BaseAgent):
                 
                 if event_type == "thinking":
                     yield ("thinking", data)
+                elif event_type == "progress":
+                    # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                    yield ("progress", data)
                 elif event_type == "content":
                     analysis_buffer += data
                     yield ("analysis_chunk", data)
@@ -146,33 +144,100 @@ class StreamingDebuggerAgent(BaseAgent):
             yield ("done", debug_result)
             
         except Exception as e:
-            logger.error(f"❌ Ошибка стриминга анализа: {e}", error=e)
-            # Возвращаем базовый результат
-            yield ("done", DebugResult(
-                error_summary="Ошибка анализа",
-                root_cause=str(e),
-                fix_instructions="Fix the code to pass validation",
-                confidence=0.0,
-                error_type=error_type
-            ))
-    
-    # === Синхронный метод для обратной совместимости ===
-    
-    def analyze_errors(
-        self,
-        validation_results: Dict[str, Any],
-        code: str,
-        tests: str,
-        task: str
-    ) -> DebugResult:
-        """Синхронный анализ ошибок (для обратной совместимости)."""
-        from agents.debugger import DebuggerAgent
-        
-        sync_agent = DebuggerAgent(
-            model=self.model,
-            temperature=self.temperature
-        )
-        return sync_agent.analyze_errors(validation_results, code, tests, task)  # type: ignore[return-value]
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при анализе ошибок: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="debugging",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю анализ...")
+                    
+                    # Повторяем попытку с новой моделью
+                    try:
+                        analysis_buffer = ""
+                        full_response = ""
+                        
+                        async for event_type, data in self.reasoning_manager.stream_from_llm(
+                            llm=self.llm,
+                            prompt=prompt,
+                            stage=stage,
+                            num_predict=config.llm_tokens_debug
+                        ):
+                            if self._interrupted:
+                                logger.info("⏹️ Анализ прерван")
+                                break
+                            
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "progress":
+                                # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                                yield ("progress", data)
+                            elif event_type == "content":
+                                analysis_buffer += data
+                                yield ("analysis_chunk", data)
+                            elif event_type == "done":
+                                full_response = data
+                        
+                        # Парсим результат
+                        response_to_parse = full_response if full_response else analysis_buffer
+                        debug_result = self._parse_analysis_response(
+                            response=response_to_parse,
+                            error_details=error_details,
+                            error_type=error_type
+                        )
+                        
+                        logger.info(
+                            f"✅ Анализ завершён с запасной моделью. Тип: {debug_result.error_type}, "
+                            f"уверенность: {debug_result.confidence:.2f}"
+                        )
+                        
+                        yield ("done", debug_result)
+                        return
+                        
+                    except Exception as retry_error:
+                        logger.error(
+                            f"❌ Ошибка при повторной попытке с запасной моделью {self.model}: {retry_error}",
+                            error=retry_error
+                        )
+                        # Возвращаем базовый результат
+                        logger.error(f"❌ Ошибка анализа ошибок: {retry_error}", error=retry_error)
+                        yield ("done", DebugResult(
+                            error_summary="Ошибка анализа",
+                            root_cause=str(retry_error),
+                            fix_instructions="Fix the code to pass validation",
+                            confidence=0.0,
+                            error_type=error_type
+                        ))
+                else:
+                    logger.error(
+                        f"❌ Не удалось переключиться на запасную модель. "
+                        f"Возвращаю базовый результат."
+                    )
+                    yield ("done", DebugResult(
+                        error_summary="Ошибка анализа",
+                        root_cause=str(e),
+                        fix_instructions="Fix the code to pass validation",
+                        confidence=0.0,
+                        error_type=error_type
+                    ))
+            else:
+                logger.error(f"❌ Ошибка стриминга анализа: {e}", error=e)
+                # Возвращаем базовый результат
+                yield ("done", DebugResult(
+                    error_summary="Ошибка анализа",
+                    root_cause=str(e),
+                    fix_instructions="Fix the code to pass validation",
+                    confidence=0.0,
+                    error_type=error_type
+                ))
     
     # === Приватные методы ===
     

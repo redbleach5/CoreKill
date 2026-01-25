@@ -48,7 +48,9 @@ export function SidebarOptions({ options, onChange }: SidebarOptionsProps) {
         <label htmlFor="model" className="block text-sm font-medium mb-2 text-gray-300 flex items-center gap-2">
           Модель Ollama:
           {options.model && isReasoningModelSync(options.model) && (
-            <Zap className="w-4 h-4 text-gray-400" title="Reasoning модель (поддерживает размышления)" />
+            <span title="Reasoning модель (поддерживает размышления)">
+              <Zap className="w-4 h-4 text-gray-400" />
+            </span>
           )}
         </label>
         <div className="relative">

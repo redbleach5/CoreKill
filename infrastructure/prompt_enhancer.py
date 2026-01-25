@@ -650,9 +650,8 @@ Tests:
         Returns:
             'ru' или 'en'
         """
-        # Простая эвристика: считаем кириллические символы
-        cyrillic_count = sum(1 for c in text if '\u0400' <= c <= '\u04ff')
-        return "ru" if cyrillic_count > len(text) * 0.3 else "en"
+        from utils.helpers import detect_language
+        return detect_language(text)
     
 
 

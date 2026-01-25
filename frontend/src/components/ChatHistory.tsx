@@ -11,7 +11,7 @@ import {
   MessageSquare, Plus, Trash2, ChevronLeft, ChevronRight, 
   Clock, Search, X
 } from 'lucide-react'
-import { ConversationPreview, ConversationsListResponse } from '../types/api'
+import { ConversationPreview } from '../types/api'
 import { api } from '../services/apiClient'
 
 interface ChatHistoryProps {
@@ -315,7 +315,9 @@ export function ChatHistory({
               placeholder="Поиск..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-8 py-1.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500/50"
+              className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-8 py-1.5 text-sm text-gray-200 placeholder-gray-500 
+                         focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/25
+                         transition-all duration-200 hover:bg-white/[0.07]"
             />
             {searchQuery && (
               <button

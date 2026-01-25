@@ -56,8 +56,9 @@ class LogManager:
                     use_colors=self.config.console_colors
                 )
                 self.sinks.append(console_sink)
-            except Exception:
-                pass
+            except Exception as e:
+                # Используем sys.stderr так как это инфраструктурный слой
+                sys.stderr.write(f"⚠️ Не удалось создать консольный sink: {e}\n")
         
         if self.config.enable_memory:
             try:

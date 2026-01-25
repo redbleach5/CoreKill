@@ -85,13 +85,37 @@ class CoderPromptBuilder:
         # Секция контекста
         context_section = ""
         if truncated_context:
-            context_section = f"\nКонтекст из базы знаний:\n{truncated_context}\n"
+            # Добавляем информацию о том, что контекст содержит информацию о файлах
+            context_section = f"""
+Контекст из базы знаний (проанализированные файлы и код):
+{truncated_context}
+
+ВАЖНО: В <think> блоке опиши какие файлы/компоненты из контекста ты используешь и как.
+"""
         
         # Если есть примеры, используем few-shot подход
         if examples:
             examples_str = "\n\n".join(ex.formatted for ex in examples[:3])
             
             task_section = user_query if user_query else plan
+            
+            # Инструкции для reasoning моделей
+            thinking_instructions = """
+NOTE for reasoning models (DeepSeek-R1, QwQ, etc.):
+If your model supports <think> blocks, use them to describe:
+1. How you analyze the examples and extract patterns
+2. What decisions you make about code structure
+3. How you ensure the code matches the style
+4. How you verify the code will pass the tests
+
+Example thinking:
+"<think>
+Analyzing examples - see they use type hints, docstrings, and follow PEP 8.
+The task requires implementing function X similar to examples.
+I'll use the same naming conventions and structure.
+Need to ensure it passes all tests.
+</think>"
+"""
             
             return f"""Generate Python code similar in STYLE to these examples:
 
@@ -110,6 +134,7 @@ TESTS TO PASS:
 {truncated_tests}
 ```
 {context_section}
+{thinking_instructions}
 RULES:
 1. Follow the STYLE of the examples above (naming, docstrings, type hints)
 2. Use same naming conventions as examples
@@ -123,25 +148,66 @@ CODE:
         # Стандартный промпт без примеров
         style_requirements = self.style_config.get_style_requirements()
         
+        # Секция с задачей пользователя (если есть)
+        user_task_section = ""
+        if user_query:
+            user_task_section = f"""
+Задача пользователя:
+{user_query}
+
+"""
+        
+        # Инструкции для reasoning моделей (если модель поддерживает <think> блоки)
+        thinking_instructions = """
+ВАЖНО для reasoning моделей (DeepSeek-R1, QwQ и т.д.):
+Если твоя модель поддерживает <think> блоки, используй их для детального описания процесса:
+
+<think>
+Детально опиши:
+1. Какой код анализируешь (если есть контекст) - какие файлы, функции, классы
+2. Какие решения принимаешь и почему
+3. Какой подход выбираешь для реализации
+4. Какие проблемы видишь и как их решаешь
+5. Как код соответствует тестам и требованиям
+
+Пример детального thinking:
+"Анализирую задачу: нужно реализовать функцию X.
+Проверяю контекст - вижу что в проекте используется паттерн Y.
+Тесты требуют Z, значит нужно учесть это при реализации.
+Выбираю подход A, потому что он соответствует требованиям B и C.
+Также нужно обработать случай D, чтобы код был надёжным."
+</think>
+"""
+        
         prompt = f"""Ты - эксперт по написанию чистого Python кода. Реализуй код, который пройдёт следующие тесты.
 
 Тип задачи: {intent_desc}
-
-План реализации:
+{user_task_section}План реализации:
 {plan}
 {context_section}
 Тесты, которые должен пройти код:
+```python
 {truncated_tests}
+```
 
 Требования к коду:
 {style_requirements}
-10. Код должен проходить ВСЕ предоставленные тесты
+10. Код должен проходить ВСЕ предоставленные тесты (100% покрытие тестами)
 11. Код должен быть читаемым и понятным
-12. Обрабатывай ошибки там, где это необходимо
-13. Импортируй все необходимые модули
-14. Не добавляй лишних комментариев в код (только docstrings)
+12. Обрабатывай ошибки там, где это необходимо (используй try/except для внешних вызовов)
+13. Импортируй все необходимые модули в начале файла
+14. Не добавляй лишних комментариев в код (только docstrings для публичных функций/классов)
+15. Используй type hints для всех параметров и возвращаемых значений
+16. Следуй принципам SOLID где это применимо
+17. Избегай дублирования кода (DRY принцип)
 
-Верни ТОЛЬКО код на Python, без объяснений и markdown разметки. Начни сразу с import statements.
+{thinking_instructions}
+
+ВАЖНО:
+- Верни ТОЛЬКО код на Python, без объяснений и markdown разметки
+- Начни сразу с import statements
+- Не добавляй примеры использования или комментарии вне docstrings
+- Код должен быть готов к использованию сразу после генерации
 
 Код:
 """
@@ -207,7 +273,15 @@ IMPORTANT RULES:
 4. Keep all existing functionality that was working
 5. Maintain type hints and docstrings
 6. Ensure the code passes all tests after fixing
-7. Return ONLY the fixed Python code, no explanations, no markdown
+7. Do not introduce new errors while fixing existing ones
+8. If instructions are unclear, make the most reasonable fix based on error messages
+9. Return ONLY the fixed Python code, no explanations, no markdown
+
+ВАЖНО:
+- Верни ТОЛЬКО исправленный код на Python
+- Начни сразу с import statements (если они есть)
+- Не добавляй комментарии или объяснения
+- Код должен быть готов к использованию сразу после исправления
 
 Fixed code:
 """

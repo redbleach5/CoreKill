@@ -61,7 +61,7 @@ async def get_metrics() -> dict[str, Any]:
         })
     
     # Сортируем по времени (самые долгие первые)
-    stage_data.sort(key=lambda x: float(x["avg_time_ms"]), reverse=True)  # type: ignore[arg-type]
+    stage_data.sort(key=lambda x: float(x["avg_time_ms"]), reverse=True)  # type: ignore[arg-type]  # stage_data содержит dict с числовыми значениями, float() гарантирует корректную сортировку
     
     # Общие метрики генерации
     total_generations = sum(s.count for s in metrics.stage_metrics.values()) // max(len(metrics.stage_metrics), 1)

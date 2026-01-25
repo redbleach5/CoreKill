@@ -1,4 +1,53 @@
-"""Управление конфигурацией из переменных окружения."""
+"""Управление конфигурацией из переменных окружения.
+
+Предоставляет Pydantic модель для работы с переменными окружения.
+Используется для переопределения настроек из config.toml.
+
+Примеры использования:
+    ```python
+    from utils.env_config import get_env_config
+    
+    # Получить конфигурацию из переменных окружения
+    env_config = get_env_config()
+    
+    # Доступ к настройкам
+    model = env_config.default_model
+    temperature = env_config.temperature
+    ollama_url = env_config.ollama_base_url
+    
+    # Проверка окружения
+    if env_config.is_production():
+        # Запущено в production
+    
+    # Получить список разрешённых origins
+    origins = env_config.get_allowed_origins_list()
+    ```
+
+Переменные окружения:
+    - ENVIRONMENT: окружение (development/production)
+    - DEBUG: режим отладки
+    - BACKEND_PORT: порт backend
+    - FRONTEND_PORT: порт frontend
+    - OLLAMA_BASE_URL: URL Ollama API
+    - DEFAULT_MODEL: модель по умолчанию
+    - TEMPERATURE: температура для LLM
+    - И многие другие (см. EnvironmentConfig)
+
+Зависимости:
+    - pydantic: для валидации конфигурации
+    - os: для доступа к переменным окружения
+    - functools: для кэширования
+
+Связанные утилиты:
+    - utils.config: основная конфигурация из config.toml
+    - run.py: может использовать для переопределения настроек
+
+Примечания:
+    - Конфигурация кэшируется (lru_cache)
+    - Переменные окружения имеют приоритет над config.toml
+    - Все значения валидируются через Pydantic
+    - Поддерживает типы: str, int, float, bool
+"""
 import os
 from typing import Optional, Dict, Any
 from functools import lru_cache

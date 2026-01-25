@@ -1,4 +1,49 @@
-"""Загрузка конфигурации из config.toml."""
+"""Загрузка конфигурации из config.toml.
+
+Использует singleton паттерн для единого экземпляра конфигурации.
+Конфигурация загружается из файла config.toml в корне проекта.
+
+Примеры использования:
+    ```python
+    from utils.config import get_config
+    
+    # Получить экземпляр конфигурации
+    config = get_config()
+    
+    # Доступ к настройкам Ollama
+    ollama_host = config.ollama_host
+    timeout = config.ollama_connect_timeout
+    
+    # Доступ к настройкам моделей
+    default_model = config.default_model
+    temperature = config.temperature
+    
+    # Доступ к настройкам workflow
+    max_iterations = config.max_iterations
+    enable_web_search = config.enable_web_search
+    
+    # Перезагрузка конфигурации (если изменили config.toml)
+    config.reload()
+    ```
+
+Приоритет настроек:
+    1. Переменные окружения (высший приоритет)
+    2. config.toml
+    3. Значения по умолчанию
+
+Зависимости:
+    - tomllib (Python 3.11+) или tomli (для Python < 3.11)
+    - utils.logger: для логирования ошибок загрузки
+
+Связанные утилиты:
+    - utils.env_config: работа с переменными окружения
+    - utils.logger: логирование
+
+Примечания:
+    - Конфигурация загружается один раз при первом обращении
+    - Используйте config.reload() для перезагрузки после изменения config.toml
+    - Singleton паттерн гарантирует единый экземпляр во всем приложении
+"""
 from pathlib import Path
 from typing import Optional
 import sys
@@ -14,7 +59,30 @@ logger = get_logger()
 
 
 class Config:
-    """Класс для загрузки и хранения конфигурации."""
+    """Класс для загрузки и хранения конфигурации (singleton).
+    
+    Загружает конфигурацию из config.toml и предоставляет доступ
+    к настройкам через свойства.
+    
+    Примеры:
+        ```python
+        from utils.config import get_config
+        
+        config = get_config()
+        
+        # Доступ к настройкам
+        model = config.default_model
+        temperature = config.temperature
+        
+        # Перезагрузка конфигурации
+        config.reload()
+        ```
+    
+    Примечания:
+        - Использует singleton паттерн (один экземпляр на приложение)
+        - Конфигурация загружается автоматически при создании
+        - Все свойства доступны только для чтения
+    """
     
     _instance: Optional['Config'] = None
     _config_data: dict = {}
@@ -498,6 +566,32 @@ class Config:
         """Расширения файлов по умолчанию для индексации."""
         return self._config_data.get("context_engine", {}).get("default_extensions", [".py"])
     
+    # === Debug / Logging Settings ===
+    
+    @property
+    def debug_log_level(self) -> str:
+        """Уровень логирования из секции [debug] в config.toml.
+        
+        Возможные значения: debug, info, warning, error
+        По умолчанию: info
+        """
+        return self._config_data.get("debug", {}).get("log_level", "info").lower()
+    
+    @property
+    def debug_under_the_hood_enabled(self) -> bool:
+        """Включена ли панель Under The Hood."""
+        return self._config_data.get("debug", {}).get("under_the_hood_enabled", True)
+    
+    @property
+    def debug_max_logs_in_memory(self) -> int:
+        """Максимум логов в памяти."""
+        return self._config_data.get("debug", {}).get("max_logs_in_memory", 500)
+    
+    @property
+    def debug_track_tool_calls(self) -> bool:
+        """Включено ли отслеживание tool calls."""
+        return self._config_data.get("debug", {}).get("track_tool_calls", True)
+    
     # === LLM Timeouts ===
     
     def get_stage_timeout(self, stage: str) -> int:
@@ -519,8 +613,9 @@ class Config:
                     fresh_config = tomllib.load(f)
                     timeouts = fresh_config.get("timeouts", {})
                     return timeouts.get(stage, timeouts.get("default", 120))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"⚠️ Ошибка чтения timeout для {stage} из config.toml: {e}")
+            # Fallback на кэшированные значения
         # Fallback на кэшированные значения
         timeouts = self._config_data.get("timeouts", {})
         return timeouts.get(stage, timeouts.get("default", 120))
@@ -597,6 +692,50 @@ class Config:
         """Директория для хранения checkpoint файлов."""
         return self._config_data.get("persistence", {}).get("checkpoint_directory", ".task_checkpoints")
     
+    # === Fast Advisor Settings ===
+    
+    @property
+    def fast_advisor_enabled(self) -> bool:
+        """Включить быстрые консультации."""
+        return self._config_data.get("fast_advisor", {}).get("enabled", False)
+    
+    @property
+    def fast_advisor_model(self) -> str:
+        """Модель для консультаций (пустая строка = автовыбор)."""
+        return self._config_data.get("fast_advisor", {}).get("model", "")
+    
+    @property
+    def fast_advisor_timeout(self) -> int:
+        """Таймаут для консультации (секунды)."""
+        return self._config_data.get("fast_advisor", {}).get("timeout", 10)
+    
+    @property
+    def fast_advisor_enable_cache(self) -> bool:
+        """Включить кэширование ответов."""
+        return self._config_data.get("fast_advisor", {}).get("enable_cache", True)
+    
+    @property
+    def fast_advisor_cache_ttl(self) -> int:
+        """Время жизни кэша (секунды)."""
+        return self._config_data.get("fast_advisor", {}).get("cache_ttl", 3600)
+    
+    # === Performance Settings ===
+    
+    @property
+    def enable_ui_smoothness_delays(self) -> bool:
+        """Включить задержки для плавности UI."""
+        return self._config_data.get("performance", {}).get("enable_ui_smoothness_delays", True)
+    
+    @property
+    def ui_delay_seconds(self) -> float:
+        """Задержка между SSE событиями (секунды)."""
+        return self._config_data.get("performance", {}).get("ui_delay_seconds", 0.02)
+    
+    @property
+    def critical_delay_seconds(self) -> float:
+        """Задержка для критических событий (секунды)."""
+        return self._config_data.get("performance", {}).get("critical_delay_seconds", 0.2)
+    
     @property
     def persistence_max_checkpoint_age_hours(self) -> int:
         """Максимальный возраст checkpoint в часах."""
@@ -606,8 +745,68 @@ class Config:
     def persistence_auto_pause_on_disconnect(self) -> bool:
         """Автоматически помечать задачи как paused при потере соединения."""
         return self._config_data.get("persistence", {}).get("auto_pause_on_disconnect", True)
+    
+    # === Autonomous Improver ===
+    
+    @property
+    def autonomous_improver_enabled(self) -> bool:
+        """Включён ли Autonomous Improver."""
+        return self._config_data.get("autonomous_improver", {}).get("enabled", False)
+    
+    @property
+    def autonomous_improver_project_path(self) -> Optional[str]:
+        """Путь к проекту для анализа (None = текущая директория)."""
+        path = self._config_data.get("autonomous_improver", {}).get("project_path", "")
+        return path if path else None
+    
+    @property
+    def autonomous_improver_model(self) -> Optional[str]:
+        """Модель для анализа (None = автовыбор)."""
+        model = self._config_data.get("autonomous_improver", {}).get("model", "")
+        return model if model else None
+    
+    @property
+    def autonomous_improver_min_confidence(self) -> float:
+        """Минимальная уверенность для предложения."""
+        return self._config_data.get("autonomous_improver", {}).get("min_confidence", 1.0)
+    
+    @property
+    def autonomous_improver_max_files_per_cycle(self) -> int:
+        """Максимум файлов для анализа за цикл."""
+        return self._config_data.get("autonomous_improver", {}).get("max_files_per_cycle", 10)
+    
+    @property
+    def autonomous_improver_cycle_interval(self) -> int:
+        """Интервал между циклами анализа (секунды)."""
+        return self._config_data.get("autonomous_improver", {}).get("cycle_interval", 300)
+    
+    @property
+    def autonomous_improver_max_parallel(self) -> int:
+        """Максимальное количество файлов для параллельного анализа."""
+        return self._config_data.get("autonomous_improver", {}).get("max_parallel", 3)
 
 
 def get_config() -> Config:
-    """Возвращает экземпляр конфигурации."""
+    """Возвращает экземпляр конфигурации (singleton).
+    
+    Это рекомендуемый способ получения конфигурации в проекте.
+    Конфигурация загружается автоматически при первом вызове.
+    
+    Примеры:
+        ```python
+        from utils.config import get_config
+        
+        config = get_config()
+        model = config.default_model
+        temperature = config.temperature
+        ```
+    
+    Returns:
+        Config: Экземпляр конфигурации (singleton)
+        
+    Примечания:
+        - Использует singleton паттерн (один экземпляр на приложение)
+        - Конфигурация загружается из config.toml при первом обращении
+        - Используйте config.reload() для перезагрузки после изменения файла
+    """
     return Config()

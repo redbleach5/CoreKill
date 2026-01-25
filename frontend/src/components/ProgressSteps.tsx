@@ -116,6 +116,13 @@ export function ProgressSteps({ stages }: ProgressStepsProps) {
                   </span>
                 </div>
                 
+                {/* ИСПРАВЛЕНИЕ: Показываем сообщение о прогрессе для активных этапов (non-reasoning модели) */}
+                {status === 'active' && stages[stage]?.message && (
+                  <p className="mt-1 text-xs text-blue-400/80 truncate">
+                    {stages[stage].message}
+                  </p>
+                )}
+                
                 {/* Прогресс-бар для активного состояния */}
                 {status === 'active' && (
                   <div className="mt-2 h-1.5 bg-gray-700 rounded-full overflow-hidden">

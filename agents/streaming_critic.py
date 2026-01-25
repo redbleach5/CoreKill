@@ -14,6 +14,7 @@ from infrastructure.local_llm import create_llm_for_stage
 from infrastructure.model_router import get_model_router
 from infrastructure.reasoning_stream import get_reasoning_stream_manager
 from infrastructure.reasoning_utils import is_reasoning_response
+from agents.base import BaseAgent
 from utils.logger import get_logger
 from utils.config import get_config
 import ast
@@ -44,7 +45,7 @@ class CriticReport:
     tests_analyzed: bool = False
 
 
-class StreamingCriticAgent:
+class StreamingCriticAgent(BaseAgent):
     """Агент-критик с real-time стримингом LLM анализа.
     
     Расширяет функциональность CriticAgent:
@@ -86,11 +87,6 @@ class StreamingCriticAgent:
         self._interrupted = True
         self.reasoning_manager.interrupt()
         logger.info("⏹️ Критический анализ прерван")
-    
-    def reset(self) -> None:
-        """Сбрасывает состояние агента."""
-        self._interrupted = False
-        self.reasoning_manager.reset()
     
     async def analyze_stream(
         self,
@@ -142,12 +138,53 @@ class StreamingCriticAgent:
         
         # 3. LLM анализ со стримингом
         try:
-            llm_issues = await self._llm_analysis_stream(
+            llm_issues = []
+            async for event_type, data in self._llm_analysis_stream(
                 code, tests, task_description, stage
-            )
+            ):
+                if event_type == "thinking":
+                    yield ("thinking", data)
+                elif event_type == "progress":
+                    yield ("progress", data)
+                elif event_type == "issues":
+                    llm_issues = data
             report.issues.extend(llm_issues)
         except Exception as e:
-            logger.warning(f"⚠️ LLM анализ не выполнен: {e}")
+            from infrastructure.local_llm import LLMModelUnavailableError
+            
+            if isinstance(e, LLMModelUnavailableError):
+                logger.warning(
+                    f"⚠️ Модель {e.model} недоступна при LLM анализе: {e}. "
+                    f"Пробую переключиться на запасную модель..."
+                )
+                
+                # Пробуем переключиться на запасную модель
+                if self._switch_to_fallback_model(
+                    failed_model=e.model,
+                    task_type="critic",
+                    complexity=getattr(e, 'complexity', None)
+                ):
+                    logger.info(f"✅ Переключился на модель {self.model}, повторяю LLM анализ...")
+                    try:
+                        llm_issues = []
+                        async for event_type, data in self._llm_analysis_stream(
+                            code, tests, task_description, stage
+                        ):
+                            if event_type == "thinking":
+                                yield ("thinking", data)
+                            elif event_type == "progress":
+                                yield ("progress", data)
+                            elif event_type == "issues":
+                                llm_issues = data
+                        report.issues.extend(llm_issues)
+                    except Exception as retry_error:
+                        logger.warning(
+                            f"⚠️ LLM анализ не выполнен даже с запасной моделью: {retry_error}"
+                        )
+                else:
+                    logger.warning(f"⚠️ LLM анализ не выполнен: {e}")
+            else:
+                logger.warning(f"⚠️ LLM анализ не выполнен: {e}")
         
         # 4. Сильные стороны
         report.strengths = self._find_strengths(code, tests)
@@ -168,8 +205,15 @@ class StreamingCriticAgent:
         tests: str,
         task_description: str,
         stage: str
-    ) -> List[CriticIssue]:
-        """LLM анализ со стримингом thinking."""
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """LLM анализ со стримингом thinking.
+        
+        Yields:
+            tuple[event_type, data]:
+                - ("thinking", sse_event) — SSE событие для <think> блока
+                - ("progress", sse_event) — прогресс для non-reasoning моделей
+                - ("issues", List[CriticIssue]) — финальный список проблем
+        """
         issues: List[CriticIssue] = []
         
         code_snippet = code[:2000] if len(code) > 2000 else code
@@ -213,7 +257,12 @@ Response:"""
             if self._interrupted:
                 break
             
-            if event_type == "content":
+            if event_type == "thinking":
+                yield ("thinking", data)
+            elif event_type == "progress":
+                # ИСПРАВЛЕНИЕ: Пробрасываем progress события для non-reasoning моделей
+                yield ("progress", data)
+            elif event_type == "content":
                 llm_buffer += data
             elif event_type == "done":
                 llm_buffer = data
@@ -225,7 +274,8 @@ Response:"""
             llm_buffer = parsed.answer
         
         if "NO_ISSUES" in llm_buffer:
-            return issues
+            yield ("issues", issues)
+            return
         
         for line in llm_buffer.split('\n'):
             if line.startswith('ISSUE:'):
@@ -242,25 +292,7 @@ Response:"""
                             suggestion=parts[5].strip()
                         ))
         
-        return issues[:3]
-    
-    # === Синхронный метод для обратной совместимости ===
-    
-    def analyze(
-        self,
-        code: str,
-        tests: str = "",
-        task_description: str = "",
-        validation_results: Optional[Dict[str, Any]] = None
-    ) -> CriticReport:
-        """Синхронный анализ (для обратной совместимости)."""
-        from agents.critic import CriticAgent
-        
-        sync_agent = CriticAgent(
-            model=self.model,
-            temperature=self.temperature
-        )
-        return sync_agent.analyze(code, tests, task_description, validation_results)  # type: ignore[return-value]
+        yield ("issues", issues[:3])
     
     # === Приватные методы (из CriticAgent) ===
     

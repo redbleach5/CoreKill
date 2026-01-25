@@ -42,12 +42,22 @@ def should_continue_self_healing(state: AgentState) -> str:
     validation_results = state.get("validation_results", {})
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 1)
+    code = state.get("code", "")
     
     # Проверяем прошла ли валидация
     all_passed = validation_results.get("all_passed", False)
     
     if all_passed:
         logger.info("✅ Валидация пройдена, завершаем цикл self-healing")
+        return "finish"
+    
+    # Если код пустой и это не первая итерация, завершаем цикл
+    # (пустой код обычно означает падение модели)
+    if not code.strip() and iteration > 0:
+        logger.warning(
+            "⚠️ Код пустой после попыток исправления, возможно модель недоступна. "
+            "Завершаем цикл self-healing"
+        )
         return "finish"
     
     # Проверяем не превышен ли лимит итераций

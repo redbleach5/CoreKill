@@ -20,8 +20,6 @@ import { IDEPanel } from './components/IDEPanel'
 import { MetricsDashboard } from './components/MetricsDashboard'
 import { UnderTheHoodPanel } from './components/debug'
 import { ChatMessage, InteractionMode } from './types/chat'
-import { ModelsResponse, ConversationResponse } from './types/api'
-import { extractErrorMessage } from './utils/apiErrorHandler'
 import { api } from './services/apiClient'
 import { useModels } from './hooks/useModels'
 

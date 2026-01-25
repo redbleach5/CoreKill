@@ -2,6 +2,7 @@
 import asyncio
 from typing import AsyncGenerator, Optional, Dict, Any
 from utils.logger import get_logger
+from utils.ui_delays import ui_sleep
 from backend.sse_manager import SSEManager
 
 logger = get_logger()
@@ -10,8 +11,7 @@ logger = get_logger()
 async def send_stage_events(
     stage: str,
     message: str,
-    result: Optional[Dict[str, Any]] = None,
-    delay: float = 0.02
+    result: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
     """Отправляет пару stage_start и stage_end событий.
     
@@ -19,42 +19,43 @@ async def send_stage_events(
         stage: Название этапа
         message: Сообщение для пользователя
         result: Результаты этапа
-        delay: Задержка между событиями (секунды)
         
     Yields:
         SSE события
     """
-    logger.info(f"📤 Отправляю stage_start для {stage}")
+    # ОПТИМИЗАЦИЯ: Убрано избыточное логирование - события stage_start/stage_end важные, но не нужно логировать каждое
+    # Логируем только на уровне DEBUG для отладки
+    logger.debug(f"📤 Отправляю stage_start для {stage}")
     event_start = await SSEManager.stream_stage_start(
         stage=stage,
         message=f"Начинаю {message}..."
     )
     yield event_start
-    await asyncio.sleep(delay)
-    logger.info(f"✅ Отправлено stage_start для {stage}")
+    # ОПТИМИЗАЦИЯ: Убрана задержка для более быстрого стриминга
+    # await ui_sleep()
     
-    logger.info(f"📤 Отправляю stage_end для {stage}")
+    logger.debug(f"📤 Отправляю stage_end для {stage}")
     event_end = await SSEManager.stream_stage_end(
         stage=stage,
         message=message,
         result=result or {}
     )
     yield event_end
-    await asyncio.sleep(delay)
-    logger.info(f"✅ Отправлено stage_end для {stage}")
+    # ОПТИМИЗАЦИЯ: Убрана задержка для более быстрого стриминга
+    # await ui_sleep()
 
 
 async def send_greeting_response(
     task_id: str,
     greeting_message: str,
-    delay: float = 0.02
+    task: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """Отправляет приветственный ответ.
     
     Args:
         task_id: ID задачи
         greeting_message: Текст приветствия
-        delay: Задержка между событиями (секунды)
+        task: Исходная задача пользователя (опционально, для результатов)
         
     Yields:
         SSE события
@@ -67,7 +68,8 @@ async def send_greeting_response(
         message="Определяю намерение..."
     )
     yield event1
-    await asyncio.sleep(delay)
+    # ОПТИМИЗАЦИЯ: Убрана задержка для более быстрого стриминга
+    # await ui_sleep()
     
     # stage_end для intent
     event2 = await SSEManager.stream_stage_end(
@@ -76,7 +78,8 @@ async def send_greeting_response(
         result={"type": "greeting", "confidence": 0.95}
     )
     yield event2
-    await asyncio.sleep(delay)
+    # ОПТИМИЗАЦИЯ: Убрана задержка для более быстрого стриминга
+    # await ui_sleep()
     
     # stage_end для greeting
     event3 = await SSEManager.stream_stage_end(
@@ -85,19 +88,24 @@ async def send_greeting_response(
         result={"type": "greeting", "message": greeting_message}
     )
     yield event3
-    await asyncio.sleep(delay)
+    # ОПТИМИЗАЦИЯ: Убрана задержка для более быстрого стриминга
+    # await ui_sleep()
     
     # final_result
+    results = {
+        "intent": {
+            "type": "greeting",
+            "confidence": 0.95,
+            "description": "Приветствие пользователя"
+        },
+        "greeting_message": greeting_message
+    }
+    if task:
+        results["task"] = task
+    
     event4 = await SSEManager.stream_final_result(
         task_id=task_id,
-        results={
-            "intent": {
-                "type": "greeting",
-                "confidence": 0.95,
-                "description": "Приветствие пользователя"
-            },
-            "greeting_message": greeting_message
-        },
+        results=results,
         metrics={
             "planning": 0.0,
             "research": 0.0,
@@ -107,7 +115,8 @@ async def send_greeting_response(
         }
     )
     yield event4
-    await asyncio.sleep(0.3)
+    # ОПТИМИЗАЦИЯ: Убрана критическая задержка - final_result должен отправляться сразу
+    # await ui_sleep("critical")
     logger.info("✅ Все события для greeting отправлены")
 
 
